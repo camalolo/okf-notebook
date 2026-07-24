@@ -8,6 +8,7 @@ import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
   chatCompletion,
 } from '../lib/llm.js';
+import { mcpManager } from '../lib/mcp-manager.js';
 import type {
   ToolDefinition,
   ToolCall,
@@ -405,6 +406,11 @@ async function buildSystemPrompt(bundle: BundleConfig): Promise<string> {
     'After proposing changes, use apply_edit/apply_create to write them to disk, then',
     'git_commit to commit.',
     '',
+    'You also have access to Google Workspace tools (prefixed gw_) for reading emails',
+    'and managing calendar events, and browser tools (prefixed browser_) for web',
+    'search and scraping. Use these when the user asks about their email, calendar,',
+    'or needs information from the web.',
+    '',
     'Always read relevant files before editing to understand the current content.',
     '',
     `## Bundle: ${bundle.name}`,
@@ -457,7 +463,8 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
     // Select tools based on the user's role.
     const role = req.user?.role;
-    const tools = role === 'full' ? FULL_TOOLS : READONLY_TOOLS;
+    const bundleTools = role === 'full' ? FULL_TOOLS : READONLY_TOOLS;
+    const allTools = [...bundleTools, ...mcpManager.getToolDefinitions()];
 
     const ctx: ToolContext = { bundle, user: req.user };
 
@@ -484,7 +491,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
     try {
       for (let i = 0; i < MAX_ITERATIONS; i++) {
-        const response = await chatCompletion(callMessages, tools);
+        const response = await chatCompletion(callMessages, allTools);
 
         if (response.tool_calls && response.tool_calls.length > 0) {
           // Append the assistant turn carrying all tool calls (once).
@@ -506,7 +513,11 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
             let result: unknown;
             try {
-              result = await executeTool(toolName, parsedArgs, ctx);
+              if (mcpManager.hasTool(toolName)) {
+                result = await mcpManager.callTool(toolName, parsedArgs);
+              } else {
+                result = await executeTool(toolName, parsedArgs, ctx);
+              }
             } catch (err) {
               result = {
                 error: err instanceof Error ? err.message : String(err),
