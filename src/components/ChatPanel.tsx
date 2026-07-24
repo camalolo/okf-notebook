@@ -34,10 +34,16 @@ interface ToolCallLabel {
 
 type ProposedEvent = Extract<TurnEvent, { kind: 'proposed' }>;
 
+function trunc(s: string, max = 60): string {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
 function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
   const args = tc.args ?? {};
   const path = typeof args.path === 'string' ? args.path : '';
+  const str = (k: string): string => (typeof args[k] === 'string' ? (args[k] as string) : '');
   switch (tc.name) {
+    // --- Bundle tools ---
     case 'read_file':
     case 'readFile':
       return { icon: '📖', text: path ? `Read ${path}` : 'Read file' };
@@ -45,26 +51,95 @@ function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
     case 'listFiles':
     case 'glob':
       return { icon: '📁', text: 'List files' };
-    case 'write_file':
-    case 'writeFile':
-      return { icon: '✏️', text: path ? `Write ${path}` : 'Write file' };
-    case 'edit_file':
-    case 'editFile':
-      return { icon: '✏️', text: path ? `Edit ${path}` : 'Edit file' };
-    case 'create_file':
-    case 'createFile':
-      return { icon: '📄', text: path ? `Create ${path}` : 'Create file' };
+    case 'propose_edit':
+      return { icon: '✏️', text: path ? `Propose edit: ${path}` : 'Propose edit' };
+    case 'propose_create':
+      return { icon: '📄', text: path ? `Propose create: ${path}` : 'Propose create' };
+    case 'apply_edit':
+      return { icon: '💾', text: path ? `Apply edit: ${path}` : 'Apply edit' };
+    case 'apply_create':
+      return { icon: '💾', text: path ? `Apply create: ${path}` : 'Apply create' };
+    case 'git_status':
+      return { icon: '🌿', text: 'Git status' };
+    case 'git_diff':
+      return { icon: '🌿', text: path ? `Git diff: ${path}` : 'Git diff' };
+    case 'git_log':
+      return { icon: '🌿', text: 'Git log' };
+    case 'git_commit':
+      return {
+        icon: '✅',
+        text: str('message') ? `Commit: "${trunc(str('message'))}"` : 'Commit changes',
+      };
     case 'commit':
     case 'commit_proposed':
       return {
         icon: '✅',
-        text:
-          typeof args.message === 'string'
-            ? `Commit: “${args.message}”`
-            : 'Commit changes',
+        text: str('message') ? `Commit: "${trunc(str('message'))}"` : 'Commit changes',
       };
-    default:
-      return { icon: '🔧', text: tc.name };
+
+    // --- Browser MCP tools ---
+    case 'browser_navigate':
+      return { icon: '🔗', text: `Navigate to ${trunc(str('url'), 50) || 'URL'}` };
+    case 'browser_snapshot':
+      return { icon: '📸', text: 'Page snapshot' };
+    case 'browser_screenshot':
+      return { icon: '📸', text: 'Screenshot' };
+    case 'browser_click':
+      return { icon: '🖱️', text: `Click ${trunc(str('element') || str('text'), 40) || 'element'}` };
+    case 'browser_double_click':
+      return { icon: '🖱️', text: `Double-click ${trunc(str('element') || str('text'), 40) || 'element'}` };
+    case 'browser_hover':
+      return { icon: '🖱️', text: `Hover ${trunc(str('element') || str('text'), 40) || 'element'}` };
+    case 'browser_type':
+      return { icon: '⌨️', text: `Type "${trunc(str('text'), 40)}"` };
+    case 'browser_press_key':
+      return { icon: '⌨️', text: `Press ${str('key') || 'key'}` };
+    case 'browser_select_option':
+      return { icon: '📋', text: `Select ${str('values') || 'option'}` };
+    case 'browser_resize':
+      return { icon: '🔄', text: `Resize ${args.width ?? ''}×${args.height ?? ''}` };
+    case 'browser_close':
+      return { icon: '🚪', text: 'Close browser' };
+    case 'browser_wait_for':
+      return { icon: '⏳', text: str('text') ? `Wait for "${trunc(str('text'), 40)}"` : 'Wait' };
+    case 'browser_tabs':
+      return { icon: '📑', text: 'Tab management' };
+    case 'browser_fill_form':
+      return { icon: '📝', text: 'Fill form' };
+    case 'browser_evaluate':
+      return { icon: '🔧', text: 'Run JavaScript' };
+
+    // --- Google Workspace MCP tools ---
+    case 'gw_search_emails':
+      return { icon: '📧', text: `Search emails: "${trunc(str('query'), 40)}"` };
+    case 'gw_read_email':
+      return { icon: '📧', text: `Read email ${trunc(str('messageId'), 20)}` };
+    case 'gw_list_calendars':
+      return { icon: '📅', text: 'List calendars' };
+    case 'gw_list_events':
+      return { icon: '📅', text: str('calendarId') ? `List events (${str('calendarId')})` : 'List events' };
+    case 'gw_get_event':
+      return { icon: '📅', text: `Get event ${trunc(str('eventId'), 20)}` };
+    case 'gw_create_event':
+      return { icon: '📅', text: `Create event: ${trunc(str('summary'), 40) || '(untitled)'}` };
+    case 'gw_update_event':
+      return { icon: '📅', text: `Update event: ${trunc(str('summary'), 40) || str('eventId')}` };
+    case 'gw_delete_event':
+      return { icon: '📅', text: `Delete event ${trunc(str('eventId'), 20)}` };
+    case 'gw_find_free_time':
+      return { icon: '📅', text: 'Find free time' };
+    case 'gw_quick_add_event':
+      return { icon: '📅', text: `Add event: "${trunc(str('text'), 40)}"` };
+
+    default: {
+      if (tc.name.startsWith('browser_')) {
+        return { icon: '🌐', text: tc.name.replace('browser_', '').replace(/_/g, ' ') };
+      }
+      if (tc.name.startsWith('gw_')) {
+        return { icon: '📧', text: tc.name.replace('gw_', '').replace(/_/g, ' ') };
+      }
+      return { icon: '🔧', text: tc.name.replace(/_/g, ' ') };
+    }
   }
 }
 
