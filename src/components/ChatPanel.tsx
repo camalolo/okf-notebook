@@ -2,12 +2,21 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type {
   ChatMessage,
+  ChatSummary,
   ProposedChange,
+  StoredEvent,
   ToolCallInfo,
   TurnEvent,
 } from '../types.ts';
 import { streamChat } from '../services/chat.ts';
-import { createFileRaw, updateFileRaw } from '../services/api.ts';
+import {
+  createChat,
+  createFileRaw,
+  listChats,
+  loadChat,
+  saveChat,
+  updateFileRaw,
+} from '../services/api.ts';
 import { ProposedChangeCard } from './ProposedChangeCard.tsx';
 
 interface ChatPanelProps {
@@ -66,6 +75,85 @@ function makeId(): string {
     : `pc-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+/** Relative-ish date label for chat history items. */
+function formatDate(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const diff = now.getTime() - d.getTime();
+  if (diff < 86400000) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (diff < 604800000) return d.toLocaleDateString([], { weekday: 'short' });
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+/**
+ * Flatten the in-memory conversation state into the persisted `StoredEvent[]`
+ * timeline. Tool calls and proposed changes are emitted before the assistant
+ * message they belong to (matching the order produced by {@link restoreFromEvents}).
+ */
+function buildEventsFrom(
+  messages: ChatMessage[],
+  pastTurns: TurnEvent[][],
+  proposedChanges: ProposedChange[],
+): StoredEvent[] {
+  const events: StoredEvent[] = [];
+  const now = new Date().toISOString();
+  let assistantIdx = 0;
+  for (const m of messages) {
+    if (m.role === 'user') {
+      events.push({ ts: now, kind: 'user', content: m.content });
+    } else if (m.role === 'assistant') {
+      // Push tool calls and proposed changes from this turn first.
+      const turnEvents = pastTurns[assistantIdx] ?? [];
+      for (const ev of turnEvents) {
+        if (ev.kind === 'tool') {
+          events.push({ ts: now, kind: 'tool', toolCall: ev.toolCall });
+        } else if (ev.kind === 'proposed') {
+          // Look up the latest status from the persistent proposedChanges list.
+          const latest = proposedChanges.find((c) => c.id === ev.change.id) ?? ev.change;
+          events.push({ ts: now, kind: 'proposed', change: latest });
+        }
+      }
+      events.push({ ts: now, kind: 'assistant', content: m.content });
+      assistantIdx++;
+    }
+  }
+  return events;
+}
+
+/**
+ * Reconstruct in-memory chat state (messages, past turns, proposed changes)
+ * from a persisted `StoredEvent[]` timeline.
+ */
+function restoreFromEvents(events: StoredEvent[]): {
+  messages: ChatMessage[];
+  pastTurns: TurnEvent[][];
+  proposedChanges: ProposedChange[];
+} {
+  const messages: ChatMessage[] = [];
+  const pastTurns: TurnEvent[][] = [];
+  const proposedChanges: ProposedChange[] = [];
+  let currentTurn: TurnEvent[] = [];
+
+  for (const ev of events) {
+    if (ev.kind === 'user') {
+      messages.push({ role: 'user', content: ev.content ?? '' });
+      currentTurn = [];
+    } else if (ev.kind === 'tool') {
+      if (ev.toolCall) currentTurn.push({ kind: 'tool', toolCall: ev.toolCall });
+    } else if (ev.kind === 'proposed') {
+      if (ev.change) {
+        proposedChanges.push(ev.change);
+        currentTurn.push({ kind: 'proposed', change: ev.change });
+      }
+    } else if (ev.kind === 'assistant') {
+      // The current turn's events belong to this assistant message.
+      pastTurns.push(currentTurn);
+      messages.push({ role: 'assistant', content: ev.content ?? '' });
+    }
+  }
+  return { messages, pastTurns, proposedChanges };
+}
+
 export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -79,6 +167,15 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
   const [proposedChanges, setProposedChanges] = useState<ProposedChange[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  /** Active chat session id (null until a session is created/loaded). */
+  const [chatId, setChatId] = useState<string | null>(null);
+  /** Active chat title. */
+  const [chatTitle, setChatTitle] = useState<string>('New chat');
+  /** Past chats for this bundle (newest first). */
+  const [chatList, setChatList] = useState<ChatSummary[]>([]);
+  /** Whether the history dropdown is open. */
+  const [showHistory, setShowHistory] = useState(false);
+
   // Mirror the latest message history so the async send handler can build the
   // request payload without reading stale state.
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -86,12 +183,64 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
     messagesRef.current = messages;
   }, [messages]);
 
+  // Ref mirrors for the persistence logic, which runs inside async handlers.
+  const pastTurnsRef = useRef<TurnEvent[][]>([]);
+  useEffect(() => {
+    pastTurnsRef.current = pastTurns;
+  }, [pastTurns]);
+  const proposedChangesRef = useRef<ProposedChange[]>([]);
+  useEffect(() => {
+    proposedChangesRef.current = proposedChanges;
+  }, [proposedChanges]);
+  const chatIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    chatIdRef.current = chatId;
+  }, [chatId]);
+  const chatTitleRef = useRef<string>('New chat');
+  useEffect(() => {
+    chatTitleRef.current = chatTitle;
+  }, [chatTitle]);
+
   // Auto-scroll to the bottom whenever new content arrives.
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, turnEvents, pastTurns, proposedChanges, loading]);
+
+  /**
+   * Persist the given conversation snapshot to the active chat session.
+   * Auto-titles the chat from the first user message if the title is still the
+   * default. Best-effort: failures are swallowed so chat keeps working offline.
+   */
+  const doSave = useCallback(
+    async (
+      msgs: ChatMessage[],
+      turns: TurnEvent[][],
+      changes: ProposedChange[],
+    ): Promise<void> => {
+      const id = chatIdRef.current;
+      if (!id) return;
+      const events = buildEventsFrom(msgs, turns, changes);
+      let title = chatTitleRef.current;
+      const firstUser = msgs.find((m) => m.role === 'user');
+      if (title === 'New chat' && firstUser) {
+        title = firstUser.content.slice(0, 60).trim() || 'New chat';
+      }
+      try {
+        const saved = await saveChat(bundleId, id, { title, events });
+        if (saved.title !== chatTitleRef.current) {
+          chatTitleRef.current = saved.title;
+          setChatTitle(saved.title);
+        }
+        const refreshed = await listChats(bundleId);
+        setChatList(refreshed);
+      } catch {
+        // Persistence is best-effort.
+      }
+    },
+    [bundleId],
+  );
 
   /**
    * Append a content chunk to the current turn's timeline. Consecutive chunks
@@ -115,15 +264,34 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
     const text = input.trim();
     if (!text || loading) return;
 
+    // Auto-create a chat session on first message (if none active).
+    if (chatIdRef.current === null) {
+      try {
+        const session = await createChat(bundleId);
+        setChatId(session.id);
+        chatIdRef.current = session.id;
+      } catch {
+        // Non-fatal: continue with an ephemeral chat.
+      }
+    }
+
     const userMsg: ChatMessage = { role: 'user', content: text };
+    // Capture the pre-turn state so we can compute the final snapshot for both
+    // the UI and persistence without relying on state updated mid-stream.
     const history = [...messagesRef.current, userMsg];
+    const preTurnPastTurns = pastTurnsRef.current;
+    const preTurnProposed = proposedChangesRef.current;
 
     setInput('');
     setError(null);
     setTurnEvents([]);
     setLoading(true);
-    setMessages((prev) => [...prev, userMsg]);
+    setMessages(history);
 
+    // Local tracking for this turn (mirrors the setTurnEvents/setProposedChanges
+    // calls so we can persist the final snapshot accurately).
+    const turnEventsLocal: TurnEvent[] = [];
+    const proposedLocal: ProposedChange[] = [];
     let acc = '';
     let chatError: string | null = null;
 
@@ -139,17 +307,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
           }
         } else if (ev.event === 'tool_call') {
           const obj = data as Partial<ToolCallInfo>;
-          setTurnEvents((prev) => [
-            ...prev,
-            {
-              kind: 'tool',
-              toolCall: {
-                name: typeof obj.name === 'string' ? obj.name : 'tool',
-                args: obj.args ?? {},
-                result: obj.result,
-              },
-            },
-          ]);
+          const toolCall: ToolCallInfo = {
+            name: typeof obj.name === 'string' ? obj.name : 'tool',
+            args: obj.args ?? {},
+            result: obj.result,
+          };
+          const te: TurnEvent = { kind: 'tool', toolCall };
+          setTurnEvents((prev) => [...prev, te]);
+          turnEventsLocal.push(te);
         } else if (ev.event === 'proposed_change') {
           const obj = data as {
             type?: unknown;
@@ -167,21 +332,23 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
             status: 'pending',
           };
           setProposedChanges((prev) => [...prev, change]);
-          setTurnEvents((prev) => [...prev, { kind: 'proposed', change }]);
+          const te: TurnEvent = { kind: 'proposed', change };
+          setTurnEvents((prev) => [...prev, te]);
+          proposedLocal.push(change);
+          turnEventsLocal.push(te);
         } else if (ev.event === 'commit_proposed') {
           const obj = data as { message?: unknown };
-          setTurnEvents((prev) => [
-            ...prev,
-            {
-              kind: 'tool',
-              toolCall: {
-                name: 'commit',
-                args: {
-                  message: typeof obj.message === 'string' ? obj.message : '',
-                },
+          const te: TurnEvent = {
+            kind: 'tool',
+            toolCall: {
+              name: 'commit',
+              args: {
+                message: typeof obj.message === 'string' ? obj.message : '',
               },
             },
-          ]);
+          };
+          setTurnEvents((prev) => [...prev, te]);
+          turnEventsLocal.push(te);
         } else if (ev.event === 'done') {
           break;
         } else if (ev.event === 'error') {
@@ -195,41 +362,120 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
       chatError = err instanceof Error ? err.message : 'Chat request failed';
     }
 
-    // Commit the accumulated assistant text to the permanent history.
-    if (acc.trim()) {
-      setMessages((prev) => [...prev, { role: 'assistant', content: acc }]);
-    }
-    // Preserve the turn's events (tool calls, content) in past turns so they
-    // stay visible in chronological order.
-    setTurnEvents((prev) => {
-      if (prev.length > 0) setPastTurns((tp) => [...tp, prev]);
-      return [];
-    });
+    // Compute the final snapshot from the captured pre-turn state + this turn.
+    const assistantMsg: ChatMessage | null = acc.trim()
+      ? { role: 'assistant', content: acc }
+      : null;
+    const finalMessages = assistantMsg ? [...history, assistantMsg] : history;
+    const finalPastTurns =
+      turnEventsLocal.length > 0
+        ? [...preTurnPastTurns, turnEventsLocal]
+        : preTurnPastTurns;
+    const finalProposedChanges = [...preTurnProposed, ...proposedLocal];
+
+    // Commit to state.
+    setMessages(finalMessages);
+    setPastTurns(finalPastTurns);
+    setTurnEvents([]);
     if (chatError) setError(chatError);
     setLoading(false);
-  }, [bundleId, input, loading, appendContent]);
+
+    // Persist the completed turn.
+    await doSave(finalMessages, finalPastTurns, finalProposedChanges);
+  }, [bundleId, input, loading, appendContent, doSave]);
 
   const handleAccept = useCallback(
     async (id: string): Promise<void> => {
-      const change = proposedChanges.find((c) => c.id === id);
+      const change = proposedChangesRef.current.find((c) => c.id === id);
       if (!change) return;
       if (change.type === 'edit') {
         await updateFileRaw(bundleId, change.path, change.newContent);
       } else {
         await createFileRaw(bundleId, change.path, change.newContent);
       }
-      setProposedChanges((prev) =>
-        prev.map((c) => (c.id === id ? { ...c, status: 'applied' } : c)),
+      const updated = proposedChangesRef.current.map((c) =>
+        c.id === id ? { ...c, status: 'applied' as const } : c,
       );
+      setProposedChanges(updated);
+      await doSave(messagesRef.current, pastTurnsRef.current, updated);
     },
-    [bundleId, proposedChanges],
+    [bundleId, doSave],
   );
 
-  const handleReject = useCallback((id: string) => {
-    setProposedChanges((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, status: 'rejected' } : c)),
-    );
+  const handleReject = useCallback(
+    async (id: string): Promise<void> => {
+      const updated = proposedChangesRef.current.map((c) =>
+        c.id === id ? { ...c, status: 'rejected' as const } : c,
+      );
+      setProposedChanges(updated);
+      await doSave(messagesRef.current, pastTurnsRef.current, updated);
+    },
+    [doSave],
+  );
+
+  /** Start a fresh, empty chat (clears state; a session is created on first send). */
+  const handleNewChat = useCallback(() => {
+    setMessages([]);
+    setPastTurns([]);
+    setProposedChanges([]);
+    setTurnEvents([]);
+    setError(null);
+    setChatId(null);
+    setChatTitle('New chat');
+    setShowHistory(false);
+    chatIdRef.current = null;
+    chatTitleRef.current = 'New chat';
   }, []);
+
+  /** Load a past chat and restore its conversation state. */
+  const handleSelectChat = useCallback(
+    async (id: string): Promise<void> => {
+      try {
+        const session = await loadChat(bundleId, id);
+        const { messages: msgs, pastTurns: turns, proposedChanges: changes } =
+          restoreFromEvents(session.events);
+        setMessages(msgs);
+        setPastTurns(turns);
+        setProposedChanges(changes);
+        setTurnEvents([]);
+        setError(null);
+        setChatId(session.id);
+        setChatTitle(session.title);
+        setShowHistory(false);
+        chatIdRef.current = session.id;
+        chatTitleRef.current = session.title;
+      } catch {
+        // Best-effort: leave current chat in place.
+      }
+    },
+    [bundleId],
+  );
+
+  // On mount / bundle change: fetch the chat list and auto-load the most recent.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const chats = await listChats(bundleId);
+        if (cancelled) return;
+        setChatList(chats);
+        if (chats.length > 0) {
+          await handleSelectChat(chats[0].id);
+        } else {
+          setChatId(null);
+          setChatTitle('New chat');
+          chatIdRef.current = null;
+          chatTitleRef.current = 'New chat';
+        }
+      } catch {
+        // Persistence is best-effort.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bundleId]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -263,12 +509,58 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
       aria-label={`Chat about ${bundleName ?? 'this bundle'}`}
     >
       <header className="chat-header">
-        <div className="chat-header-title">
+        <div className="chat-header-left">
           <span className="chat-header-avatar" aria-hidden="true">
             {bundleIcon ?? '🤖'}
           </span>
-          <span>{bundleName ?? 'GLM'}</span>
+          <div className="chat-header-info">
+            <span className="chat-header-bundle">{bundleName ?? 'GLM'}</span>
+            <button
+              type="button"
+              className="chat-history-toggle"
+              onClick={() => setShowHistory((v) => !v)}
+            >
+              {chatTitle}
+              <span className="chat-history-caret" aria-hidden="true">▾</span>
+            </button>
+          </div>
         </div>
+        <button
+          type="button"
+          className="chat-new-btn"
+          onClick={handleNewChat}
+          title="New chat"
+        >
+          + New
+        </button>
+
+        {showHistory && (
+          <>
+            <div
+              className="chat-history-backdrop"
+              onClick={() => setShowHistory(false)}
+              aria-hidden="true"
+            />
+            <div className="chat-history-dropdown">
+              <div className="chat-history-header">Chat history</div>
+              {chatList.length === 0 && (
+                <div className="chat-history-empty">No past chats</div>
+              )}
+              {chatList.map((c) => (
+                <div
+                  key={c.id}
+                  className={`chat-history-item ${c.id === chatId ? 'active' : ''}`}
+                  onClick={() => void handleSelectChat(c.id)}
+                >
+                  <span className="chat-history-item-title">{c.title}</span>
+                  <span className="chat-history-item-date">
+                    {formatDate(c.updatedAt)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </header>
 
       <div className="chat-messages" ref={scrollRef}>

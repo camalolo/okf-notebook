@@ -1401,6 +1401,7 @@ img {
 }
 
 .chat-header {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1427,6 +1428,130 @@ img {
 .chat-header-avatar {
   font-size: 1.2rem;
   line-height: 1;
+}
+
+.chat-header-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chat-header-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-header-bundle {
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.chat-history-toggle {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 2px 0;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-history-toggle:hover {
+  color: var(--text);
+}
+
+.chat-history-caret {
+  font-size: 0.7rem;
+}
+
+.chat-new-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chat-new-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.chat-history-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+}
+
+.chat-history-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0 0 8px 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.chat-history-header {
+  padding: 8px 16px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-history-empty {
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.chat-history-item {
+  padding: 10px 16px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-history-item:hover {
+  background: var(--surface-hover);
+}
+
+.chat-history-item.active {
+  background: var(--accent-soft);
+}
+
+.chat-history-item-title {
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-history-item-date {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* Message list (scroll area) */

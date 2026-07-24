@@ -486,11 +486,10 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       ...messages,
     ];
 
-    const MAX_ITERATIONS = 10;
-    let lastError: string | null = null;
+    const lastError: string | null = null;
 
     try {
-      for (let i = 0; i < MAX_ITERATIONS; i++) {
+      for (;;) {
         const response = await chatCompletion(callMessages, allTools);
 
         if (response.tool_calls && response.tool_calls.length > 0) {
@@ -574,11 +573,6 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         res.end();
         return;
       }
-
-      // Exhausted iterations without a final answer.
-      emit('content', { text: 'I reached the maximum number of tool-call rounds.' });
-      emit('done', {});
-      res.end();
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       emit('error', { message: lastError });

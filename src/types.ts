@@ -69,3 +69,35 @@ export type TurnEvent =
   | { kind: 'tool'; toolCall: ToolCallInfo }
   | { kind: 'content'; text: string }
   | { kind: 'proposed'; change: ProposedChange };
+
+/* -------------------------------------------------------------------------
+   Chat persistence
+   ------------------------------------------------------------------------- */
+
+/** Metadata for a chat session (list view). */
+export interface ChatSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  eventCount: number;
+}
+
+/** A single stored event in the chat timeline (persisted format). */
+export interface StoredEvent {
+  ts: string;
+  kind: 'user' | 'assistant' | 'tool' | 'proposed';
+  content?: string;
+  toolCall?: ToolCallInfo;
+  change?: ProposedChange;
+}
+
+/** Full chat session (loaded from server). */
+export interface ChatSession {
+  id: string;
+  bundleId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  events: StoredEvent[];
+}

@@ -1,4 +1,4 @@
-import type { BundleConfig, TreeNode, FileContent } from '../types.ts';
+import type { BundleConfig, TreeNode, FileContent, ChatSummary, ChatSession, StoredEvent } from '../types.ts';
 
 const API_BASE = '/api/notebook';
 
@@ -111,4 +111,39 @@ export function createFileRaw(bundleId: string, filePath: string, raw: string): 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: filePath, raw }),
   });
+}
+
+/* --- Chat persistence --- */
+
+export function listChats(bundleId: string): Promise<ChatSummary[]> {
+  return request<ChatSummary[]>(`${API_BASE}/chats/${encodeURIComponent(bundleId)}`);
+}
+
+export function createChat(bundleId: string): Promise<ChatSession> {
+  return request<ChatSession>(`${API_BASE}/chats/${encodeURIComponent(bundleId)}`, jsonOptions({}));
+}
+
+export function loadChat(bundleId: string, chatId: string): Promise<ChatSession> {
+  return request<ChatSession>(`${API_BASE}/chats/${encodeURIComponent(bundleId)}/${encodeURIComponent(chatId)}`);
+}
+
+export function saveChat(
+  bundleId: string,
+  chatId: string,
+  data: { title?: string; events: StoredEvent[] },
+): Promise<ChatSession> {
+  return request<ChatSession>(
+    `${API_BASE}/chats/${encodeURIComponent(bundleId)}/${encodeURIComponent(chatId)}`,
+    {
+      ...jsonOptions(data),
+      method: 'PUT',
+    },
+  );
+}
+
+export function deleteChat(bundleId: string, chatId: string): Promise<void> {
+  return request<void>(
+    `${API_BASE}/chats/${encodeURIComponent(bundleId)}/${encodeURIComponent(chatId)}`,
+    { method: 'DELETE' },
+  );
 }
