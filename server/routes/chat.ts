@@ -187,9 +187,6 @@ const FULL_TOOLS: ToolDefinition[] = [
   ...READONLY_TOOLS,
   PROPOSE_EDIT_TOOL,
   PROPOSE_CREATE_TOOL,
-  APPLY_EDIT_TOOL,
-  APPLY_CREATE_TOOL,
-  GIT_COMMIT_TOOL,
 ];
 
 // --- Helpers ----------------------------------------------------------------
@@ -401,10 +398,10 @@ async function buildSystemPrompt(bundle: BundleConfig): Promise<string> {
     '',
     'You can read files, check git status, and propose edits. When the user asks you to',
     'make changes, use the propose_edit or propose_create tools. The user will review',
-    'your proposed changes before they are applied.',
+    'your proposed changes and decide whether to apply them.',
     '',
-    'After proposing changes, use apply_edit/apply_create to write them to disk, then',
-    'git_commit to commit.',
+    'Do NOT attempt to apply, write, or commit changes yourself — only propose them.',
+    'Wait for the user to accept or reject before continuing.',
     '',
     'You also have access to Google Workspace tools (prefixed gw_) for reading emails',
     'and managing calendar events, and browser tools (prefixed browser_) for web',
@@ -551,7 +548,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
                 emit('proposed_change', {
                   type: 'create',
                   path: r.path,
-                  content: r.content,
+                  newContent: r.content,
                 });
               }
             }

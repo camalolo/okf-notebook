@@ -55,27 +55,12 @@ function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
       return { icon: '✏️', text: path ? `Propose edit: ${path}` : 'Propose edit' };
     case 'propose_create':
       return { icon: '📄', text: path ? `Propose create: ${path}` : 'Propose create' };
-    case 'apply_edit':
-      return { icon: '💾', text: path ? `Apply edit: ${path}` : 'Apply edit' };
-    case 'apply_create':
-      return { icon: '💾', text: path ? `Apply create: ${path}` : 'Apply create' };
     case 'git_status':
       return { icon: '🌿', text: 'Git status' };
     case 'git_diff':
       return { icon: '🌿', text: path ? `Git diff: ${path}` : 'Git diff' };
     case 'git_log':
       return { icon: '🌿', text: 'Git log' };
-    case 'git_commit':
-      return {
-        icon: '✅',
-        text: str('message') ? `Commit: "${trunc(str('message'))}"` : 'Commit changes',
-      };
-    case 'commit':
-    case 'commit_proposed':
-      return {
-        icon: '✅',
-        text: str('message') ? `Commit: "${trunc(str('message'))}"` : 'Commit changes',
-      };
 
     // --- Browser MCP tools ---
     case 'browser_navigate':
