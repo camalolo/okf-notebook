@@ -44,7 +44,7 @@ const app = express();
 // (required for the dynamic OAuth callback URL to be https://...).
 app.set('trust proxy', 1);
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(
   session({
     secret: SESSION_SECRET,

@@ -169,6 +169,7 @@ function buildEventsFrom(
   messages: ChatMessage[],
   pastTurns: TurnEvent[][],
   proposedChanges: ProposedChange[],
+  extraEvents?: StoredEvent[],
 ): StoredEvent[] {
   const events: StoredEvent[] = [];
   const now = new Date().toISOString();
@@ -177,7 +178,7 @@ function buildEventsFrom(
     if (m.role === 'user') {
       events.push({ ts: now, kind: 'user', content: m.content });
     } else if (m.role === 'assistant') {
-      // Push tool calls and proposed changes from this turn first.
+      // Push tool calls, proposed changes, and errors from this turn first.
       const turnEvents = pastTurns[assistantIdx] ?? [];
       for (const ev of turnEvents) {
         if (ev.kind === 'tool') {
@@ -186,12 +187,16 @@ function buildEventsFrom(
           // Look up the latest status from the persistent proposedChanges list.
           const latest = proposedChanges.find((c) => c.id === ev.change.id) ?? ev.change;
           events.push({ ts: now, kind: 'proposed', change: latest });
+        } else if (ev.kind === 'error') {
+          events.push({ ts: now, kind: 'error', content: ev.text });
         }
       }
       events.push({ ts: now, kind: 'assistant', content: m.content });
       assistantIdx++;
     }
   }
+  // Append extra events (used for mid-stream saves of incomplete turns).
+  if (extraEvents) events.push(...extraEvents);
   return events;
 }
 
@@ -220,12 +225,27 @@ function restoreFromEvents(events: StoredEvent[]): {
         proposedChanges.push(ev.change);
         currentTurn.push({ kind: 'proposed', change: ev.change });
       }
+    } else if (ev.kind === 'error') {
+      currentTurn.push({ kind: 'error', text: ev.content ?? 'Unknown error' });
     } else if (ev.kind === 'assistant') {
       // The current turn's events belong to this assistant message.
       pastTurns.push(currentTurn);
       messages.push({ role: 'assistant', content: ev.content ?? '' });
+      currentTurn = [];
     }
   }
+
+  // If there are orphaned events (incomplete turn — e.g. interrupted by
+  // error), attach them as a synthetic turn with a placeholder assistant
+  // message so they're visible in the timeline.
+  if (currentTurn.length > 0) {
+    pastTurns.push(currentTurn);
+    messages.push({
+      role: 'assistant',
+      content: '⚠️ This response was interrupted.',
+    });
+  }
+
   return { messages, pastTurns, proposedChanges };
 }
 
@@ -240,7 +260,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
   /** Persistent proposed changes — survives across turns so the user can
    *  accept/reject after the turn completes. */
   const [proposedChanges, setProposedChanges] = useState<ProposedChange[]>([]);
-  const [error, setError] = useState<string | null>(null);
 
   /** Active chat session id (null until a session is created/loaded). */
   const [chatId, setChatId] = useState<string | null>(null);
@@ -293,10 +312,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
       msgs: ChatMessage[],
       turns: TurnEvent[][],
       changes: ProposedChange[],
+      extraEvents?: StoredEvent[],
     ): Promise<void> => {
       const id = chatIdRef.current;
       if (!id) return;
-      const events = buildEventsFrom(msgs, turns, changes);
+      const events = buildEventsFrom(msgs, turns, changes, extraEvents);
       let title = chatTitleRef.current;
       const firstUser = msgs.find((m) => m.role === 'user');
       if (title === 'New chat' && firstUser) {
@@ -358,7 +378,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
     const preTurnProposed = proposedChangesRef.current;
 
     setInput('');
-    setError(null);
     setTurnEvents([]);
     setLoading(true);
     setMessages(history);
@@ -369,6 +388,24 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
     const proposedLocal: ProposedChange[] = [];
     let acc = '';
     let chatError: string | null = null;
+
+    /** Build StoredEvents for the current in-progress turn (tool calls only,
+     *  no assistant message yet — used for mid-stream saves). */
+    const buildMidStreamExtras = (): StoredEvent[] => {
+      const now = new Date().toISOString();
+      const extras: StoredEvent[] = [];
+      for (const ev of turnEventsLocal) {
+        if (ev.kind === 'tool') {
+          extras.push({ ts: now, kind: 'tool', toolCall: ev.toolCall });
+        } else if (ev.kind === 'proposed') {
+          const latest = [...preTurnProposed, ...proposedLocal].find(
+            (c) => c.id === ev.change.id,
+          ) ?? ev.change;
+          extras.push({ ts: now, kind: 'proposed', change: latest });
+        }
+      }
+      return extras;
+    };
 
     try {
       for await (const ev of streamChat(bundleId, history)) {
@@ -390,6 +427,15 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
           const te: TurnEvent = { kind: 'tool', toolCall };
           setTurnEvents((prev) => [...prev, te]);
           turnEventsLocal.push(te);
+
+          // Incremental save after each tool call so progress survives
+          // connection drops / server restarts.
+          await doSave(
+            history,
+            preTurnPastTurns,
+            [...preTurnProposed, ...proposedLocal],
+            buildMidStreamExtras(),
+          );
         } else if (ev.event === 'proposed_change') {
           const obj = data as {
             type?: unknown;
@@ -435,6 +481,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
       }
     } catch (err) {
       chatError = err instanceof Error ? err.message : 'Chat request failed';
+      // Add the error as a visible event in the timeline.
+      const errEvent: TurnEvent = { kind: 'error', text: chatError };
+      turnEventsLocal.push(errEvent);
+      setTurnEvents((prev) => [...prev, errEvent]);
     }
 
     // Compute the final snapshot from the captured pre-turn state + this turn.
@@ -452,10 +502,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
     setMessages(finalMessages);
     setPastTurns(finalPastTurns);
     setTurnEvents([]);
-    if (chatError) setError(chatError);
     setLoading(false);
 
-    // Persist the completed turn.
+    // Persist the completed turn (including any error event).
     await doSave(finalMessages, finalPastTurns, finalProposedChanges);
   }, [bundleId, input, loading, appendContent, doSave]);
 
@@ -494,7 +543,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
     setPastTurns([]);
     setProposedChanges([]);
     setTurnEvents([]);
-    setError(null);
     setChatId(null);
     setChatTitle('New chat');
     setShowHistory(false);
@@ -513,7 +561,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
         setPastTurns(turns);
         setProposedChanges(changes);
         setTurnEvents([]);
-        setError(null);
         setChatId(session.id);
         setChatTitle(session.title);
         setShowHistory(false);
@@ -675,6 +722,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
                       </div>
                     );
                   }
+                  if (ev.kind === 'error') {
+                    return (
+                      <div className="chat-error-event" key={`pe${i}-${j}`}>
+                        ⚠️ {ev.text}
+                      </div>
+                    );
+                  }
                   if (ev.kind === 'proposed') {
                     const latest =
                       proposedChanges.find((c) => c.id === ev.change.id) ?? ev.change;
@@ -710,6 +764,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
                   {label.icon}
                 </span>
                 <span className="chat-tool-text">{label.text}</span>
+              </div>
+            );
+          }
+          if (ev.kind === 'error') {
+            return (
+              <div className="chat-error-event" key={`e${i}`}>
+                ⚠️ {ev.text}
               </div>
             );
           }
@@ -756,8 +817,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
           </div>
         )}
       </div>
-
-      {error && <div className="chat-error">{error}</div>}
 
       <div className="chat-input-area">
         <textarea

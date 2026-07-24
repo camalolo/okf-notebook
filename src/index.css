@@ -1726,6 +1726,17 @@ img {
   flex-shrink: 0;
 }
 
+/* Inline error event in the chat timeline */
+.chat-error-event {
+  padding: 8px 14px;
+  background: var(--danger-soft);
+  border: 1px solid rgba(240, 97, 109, 0.3);
+  border-radius: var(--radius-sm);
+  color: #ffb3b9;
+  font-size: 0.84rem;
+  margin: 4px 0;
+}
+
 /* Proposed changes wrapper */
 .chat-proposed-changes {
   display: flex;

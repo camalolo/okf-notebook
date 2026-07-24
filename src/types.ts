@@ -68,7 +68,8 @@ export interface ToolCallInfo {
 export type TurnEvent =
   | { kind: 'tool'; toolCall: ToolCallInfo }
   | { kind: 'content'; text: string }
-  | { kind: 'proposed'; change: ProposedChange };
+  | { kind: 'proposed'; change: ProposedChange }
+  | { kind: 'error'; text: string };
 
 /* -------------------------------------------------------------------------
    Chat persistence
@@ -86,7 +87,7 @@ export interface ChatSummary {
 /** A single stored event in the chat timeline (persisted format). */
 export interface StoredEvent {
   ts: string;
-  kind: 'user' | 'assistant' | 'tool' | 'proposed';
+  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error';
   content?: string;
   toolCall?: ToolCallInfo;
   change?: ProposedChange;
