@@ -1,0 +1,85 @@
+import type express from 'express';
+import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+import { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, USERS } from './config.js';
+import type { User } from './config.js';
+
+/**
+ * Initialize Passport on the Express app: session serialization + the Google
+ * OAuth strategy.
+ *
+ * The Google strategy is only registered when client credentials are present.
+ * `passport-google-oauth20` throws if `clientID` is empty, so in dev (no env
+ * vars) we skip registration — the server still starts and the protected API
+ * returns 401. OAuth endpoints will 500 until credentials are provided.
+ */
+export function setupPassport(app: express.Express): void {
+  // Serialize/deserialize the whole user object (small, in-memory sessions).
+  passport.serializeUser((user, done) => {
+    done(null, user as User);
+  });
+  passport.deserializeUser((serialized, done) => {
+    done(null, serialized as User);
+  });
+
+  if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
+    passport.use(
+      new GoogleStrategy(
+        {
+          clientID: GOOGLE_CLIENT_ID,
+          clientSecret: GOOGLE_CLIENT_SECRET,
+          // Overridden per-request via passport.authenticate({ callbackURL }).
+          callbackURL: 'https://placeholder.example.com/api/notebook/auth/google/callback',
+        },
+        (accessToken, refreshToken, profile, done) => {
+          const email = profile.emails?.[0]?.value;
+          if (!email) {
+            // No email in profile — cannot map to allowlist.
+            return done(null, false);
+          }
+          const role = USERS[email];
+          if (!role) {
+            // Email is not in the allowlist — deny access.
+            return done(null, false);
+          }
+          const user: User = {
+            email,
+            name: profile._json.name ?? profile.displayName ?? email,
+            picture: profile._json.picture,
+            role,
+          };
+          return done(null, user);
+        },
+      ),
+    );
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[auth] GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — Google OAuth disabled. ' +
+        'Set them to enable login.',
+    );
+  }
+
+  app.use(passport.initialize());
+  app.use(passport.session());
+}
+
+/** Middleware: require an authenticated session. */
+export const requireAuth: express.RequestHandler = (req, res, next) => {
+  if (req.isAuthenticated()) return next();
+  return res.status(401).json({ error: 'Unauthorized' });
+};
+
+/** Middleware: require the `full` role. Apply after `requireAuth`. */
+export const requireFull: express.RequestHandler = (req, res, next) => {
+  const user = req.user;
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (user.role !== 'full') {
+    return res.status(403).json({ error: 'Forbidden: full role required' });
+  }
+  return next();
+};
+
+export { passport };

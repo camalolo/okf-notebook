@@ -1,0 +1,56 @@
+import express from 'express';
+import session from 'express-session';
+import { PORT, SESSION_SECRET, USERS } from './config.js';
+import { setupPassport, requireAuth } from './auth.js';
+import bundlesRouter from './routes/bundles.js';
+import authRouter from './routes/auth.js';
+
+const app = express();
+
+// Behind nginx — trust one proxy hop so req.protocol/host reflect the origin
+// (required for the dynamic OAuth callback URL to be https://...).
+app.set('trust proxy', 1);
+
+app.use(express.json());
+app.use(
+  session({
+    secret: SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+    },
+  }),
+);
+setupPassport(app);
+
+// Dev bypass: auto-authenticate as a configured user without OAuth.
+// Activated by setting DEV_BYPASS_EMAIL in the environment.
+const DEV_BYPASS_EMAIL = process.env.DEV_BYPASS_EMAIL || '';
+if (DEV_BYPASS_EMAIL) {
+  // eslint-disable-next-line no-console
+  console.log(`[auth] DEV_BYPASS_EMAIL set — auto-login as ${DEV_BYPASS_EMAIL}`);
+}
+app.use((req, res, next) => {
+  if (DEV_BYPASS_EMAIL && !req.isAuthenticated()) {
+    const role = USERS[DEV_BYPASS_EMAIL];
+    if (role) {
+      req.login({ email: DEV_BYPASS_EMAIL, name: DEV_BYPASS_EMAIL.split('@')[0], role }, () => {
+        next();
+      });
+      return;
+    }
+  }
+  next();
+});
+
+// Routes
+app.use('/api/notebook/auth', authRouter);
+app.use('/api/notebook/bundles', requireAuth, bundlesRouter);
+
+app.listen(PORT, () => {
+  // eslint-disable-next-line no-console
+  console.log(`Notebook API listening on port ${PORT}`);
+});
