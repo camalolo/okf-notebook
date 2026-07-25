@@ -2020,6 +2020,7 @@ img {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+  flex-shrink: 0;
 }
 
 .proposed-change-applied {
@@ -2042,15 +2043,17 @@ img {
 .pc-header-toggle {
   cursor: pointer;
   width: 100%;
-  background: none;
+  background: var(--bg-elevated);
   border: none;
+  border-bottom: 1px solid var(--border);
   text-align: left;
   font-family: inherit;
-  padding: 8px 10px;
+  color: var(--text);
+  padding: 10px 12px;
 }
 
 .pc-header-toggle:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.08));
 }
 
 .pc-chevron {

@@ -109,7 +109,7 @@ const CREATE_FILE_TOOL: ToolDefinition = {
   function: {
     name: 'create_file',
     description:
-      'Create a new file. Writes to disk immediately. Returns { applied: true, path }.',
+      'Create a new file (any type — .md, .gitignore, .json, etc.). Writes to disk immediately. Returns { applied: true, path }.',
     parameters: {
       type: 'object',
       properties: {
@@ -153,6 +153,7 @@ const FULL_TOOLS: ToolDefinition[] = [
   ...READONLY_TOOLS,
   EDIT_FILE_TOOL,
   CREATE_FILE_TOOL,
+  GIT_COMMIT_TOOL,
 ];
 
 // --- Helpers ----------------------------------------------------------------
@@ -299,9 +300,6 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
       const rel = String(args?.path ?? '');
       const content = String(args?.content ?? '');
       const resolved = resolveBundlePath(bundlePath, rel);
-      if (path.extname(resolved).toLowerCase() !== '.md') {
-        return { error: 'Only .md files are allowed' };
-      }
       await fs.mkdir(path.dirname(resolved), { recursive: true });
       await fs.writeFile(resolved, content, 'utf8');
       return { applied: true, path: rel, content };

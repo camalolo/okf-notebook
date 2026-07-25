@@ -102,10 +102,12 @@ export function ProposedChangeCard({ change }: ProposedChangeCardProps) {
 
   return (
     <div className="proposed-change proposed-change-applied">
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         className="pc-header pc-header-toggle"
         onClick={() => setExpanded((v) => !v)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v); } }}
         aria-expanded={expanded}
       >
         <span className="pc-chevron" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
@@ -120,7 +122,7 @@ export function ProposedChangeCard({ change }: ProposedChangeCardProps) {
           </span>
         )}
         <span className="pc-status pc-status-applied">✓ Applied</span>
-      </button>
+      </div>
 
       {expanded && shown.length > 0 && (
         <div className="pc-diff" role="region" aria-label={`Diff for ${change.path}`}>
