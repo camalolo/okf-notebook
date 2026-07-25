@@ -167,6 +167,8 @@ export interface GitStatusInfo {
   deleted: string[];
   modified_list: string[];
   renamed: string[];
+  insertions: number;
+  deletions: number;
 }
 
 export function getGitStatus(bundleId: string): Promise<GitStatusInfo> {

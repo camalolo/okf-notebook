@@ -422,7 +422,7 @@ function makeEmitter(res: import('express').Response): SSEEmit {
  *
  * Request body: `{ messages: ChatMessage[] }`.
  *
- * SSE events: `tool_call`, `content`, `proposed_change`, `done`, `error`.
+ * SSE events: `tool_call`, `content`, `edit_applied`, `done`, `error`.
  */
 router.post('/:bundleId/chat', async (req, res, next) => {
   try {
@@ -506,7 +506,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             // Emit the tool-call event.
             emit('tool_call', { name: toolName, args: parsedArgs, result });
 
-            // For edit_file / create_file, emit a proposed_change event
+            // For edit_file / create_file, emit an edit_applied event
             // with the diff so the frontend can render a collapsible diff card.
             if (toolName === 'edit_file') {
               const r = result as {
@@ -517,7 +517,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
                 error?: string;
               };
               if (!r.error) {
-                emit('proposed_change', {
+                emit('edit_applied', {
                   type: 'edit',
                   path: r.path,
                   oldContent: r.oldContent,
@@ -528,7 +528,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             } else if (toolName === 'create_file') {
               const r = result as { path?: string; content?: string; error?: string };
               if (!r.error) {
-                emit('proposed_change', {
+                emit('edit_applied', {
                   type: 'create',
                   path: r.path,
                   newContent: r.content,

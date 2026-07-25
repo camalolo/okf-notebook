@@ -1591,21 +1591,23 @@ img {
 .chat-git-badge {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
   padding: 2px 8px;
   border-radius: 12px;
   font-size: 0.75rem;
   font-weight: 600;
-  background: var(--danger-bg, rgba(255, 99, 71, 0.15));
-  color: var(--danger, #ff6347);
-  border: 1px solid rgba(255, 99, 71, 0.3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.15s;
+  font-family: var(--font-mono);
 }
 .chat-git-badge:hover {
-  background: rgba(255, 99, 71, 0.25);
+  background: var(--surface-hover);
 }
+.git-ins { color: var(--success); }
+.git-del { color: var(--danger); }
 
 .chat-header-info {
   display: flex;

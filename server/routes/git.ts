@@ -23,6 +23,20 @@ router.get('/:bundleId/git/status', async (req, res, next) => {
       working_dir: f.working_dir,
       staged: f.index !== ' ' && f.index !== '?',
     }));
+
+    // Get line-level insertion/deletion counts for the unstaged diff.
+    let insertions = 0;
+    let deletions = 0;
+    if (!status.isClean()) {
+      try {
+        const diffSummary = await git(bundle.path).diffSummary();
+        insertions = diffSummary.insertions;
+        deletions = diffSummary.deletions;
+      } catch {
+        // best-effort
+      }
+    }
+
     return res.json({
       modified: files.filter((f) => f.working_dir !== ' ' || f.index !== ' '),
       staged: files.filter((f) => f.staged),
@@ -32,6 +46,8 @@ router.get('/:bundleId/git/status', async (req, res, next) => {
       modified_list: status.modified,
       renamed: status.renamed,
       isClean: status.isClean(),
+      insertions,
+      deletions,
     });
   } catch (err) {
     next(err);

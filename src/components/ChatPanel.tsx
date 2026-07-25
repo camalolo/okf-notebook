@@ -283,7 +283,8 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
   const [showHistory, setShowHistory] = useState(false);
 
   /** Count of uncommitted changes from git status (0 when clean/unknown). */
-  const [gitChanges, setGitChanges] = useState(0);
+  const [gitInsertions, setGitInsertions] = useState(0);
+  const [gitDeletions, setGitDeletions] = useState(0);
 
   // Mirror the latest message history so the async send handler can build the
   // request payload without reading stale state.
@@ -370,6 +371,17 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
     });
   }, []);
 
+  /** Fetch the current git status and update the badge. Best-effort. */
+  const refreshGitStatus = useCallback(async (): Promise<void> => {
+    try {
+      const status = await getGitStatus(bundleId);
+      setGitInsertions(status.isClean ? 0 : status.insertions);
+      setGitDeletions(status.isClean ? 0 : status.deletions);
+    } catch {
+      // Git status is best-effort — leave the previous count in place.
+    }
+  }, [bundleId]);
+
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text || loading) return;
@@ -443,6 +455,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
           setTurnEvents((prev) => [...prev, te]);
           turnEventsLocal.push(te);
 
+          // Refresh git badge after commits and file edits.
+          if (toolCall.name === 'git_commit' || toolCall.name === 'edit_file' || toolCall.name === 'create_file') {
+            void refreshGitStatus();
+          }
+
           // Incremental save after each tool call so progress survives
           // connection drops / server restarts.
           await doSave(
@@ -451,7 +468,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
             [...preTurnProposed, ...proposedLocal],
             buildMidStreamExtras(),
           );
-        } else if (ev.event === 'proposed_change') {
+        } else if (ev.event === 'edit_applied') {
           const obj = data as {
             type?: unknown;
             path?: unknown;
@@ -473,6 +490,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
           proposedLocal.push(change);
           turnEventsLocal.push(te);
           onFilesChanged?.();
+          void refreshGitStatus();
         } else if (ev.event === 'commit_proposed') {
           const obj = data as { message?: unknown };
           const te: TurnEvent = {
@@ -522,17 +540,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
 
     // Persist the completed turn (including any error event).
     await doSave(finalMessages, finalPastTurns, finalProposedChanges);
-  }, [bundleId, input, loading, appendContent, doSave, onFilesChanged]);
-
-  /** Fetch the current git status and update the badge count. Best-effort. */
-  const refreshGitStatus = useCallback(async (): Promise<void> => {
-    try {
-      const status = await getGitStatus(bundleId);
-      setGitChanges(status.isClean ? 0 : status.modified.length + status.staged.length);
-    } catch {
-      // Git status is best-effort — leave the previous count in place.
-    }
-  }, [bundleId]);
+  }, [bundleId, input, loading, appendContent, doSave, onFilesChanged, refreshGitStatus]);
 
   /** Start a fresh, empty chat (clears state; a session is created on first send). */
   const handleNewChat = useCallback(() => {
@@ -686,17 +694,18 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
             </button>
           </div>
         </div>
-        {gitChanges > 0 && (
+        {(gitInsertions > 0 || gitDeletions > 0) && (
           <button
             type="button"
             className="chat-git-badge"
-            title={`${gitChanges} uncommitted change${gitChanges > 1 ? 's' : ''}`}
+            title={`${gitInsertions} insertion(s), ${gitDeletions} deletion(s) uncommitted`}
             onClick={() => {
               setInput('Show me the git status');
               void handleSend();
             }}
           >
-            🔴 {gitChanges}
+            <span className="git-ins">+{gitInsertions}</span>
+            <span className="git-del">−{gitDeletions}</span>
           </button>
         )}
         <button
