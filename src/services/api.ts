@@ -155,3 +155,42 @@ export function deleteChat(bundleId: string, chatId: string): Promise<void> {
     { method: 'DELETE' },
   );
 }
+
+/* --- Git status --- */
+
+export interface GitStatusInfo {
+  isClean: boolean;
+  modified: { path: string; index: string; working_dir: string; staged: boolean }[];
+  staged: { path: string; index: string; working_dir: string; staged: boolean }[];
+  not_added: string[];
+  created: string[];
+  deleted: string[];
+  modified_list: string[];
+  renamed: string[];
+}
+
+export function getGitStatus(bundleId: string): Promise<GitStatusInfo> {
+  return request<GitStatusInfo>(`${API_BASE}/bundles/${encodeURIComponent(bundleId)}/git/status`);
+}
+
+/* --- Full-text search --- */
+
+export interface SearchResult {
+  path: string;
+  title?: string;
+  type?: string;
+  heading: string;
+  snippet: string;
+  score: number;
+}
+
+export function searchBundle(
+  bundleId: string,
+  query: string,
+  limit?: number,
+): Promise<{ results: SearchResult[] }> {
+  return request<{ results: SearchResult[] }>(
+    `${API_BASE}/bundles/${encodeURIComponent(bundleId)}/search`,
+    jsonOptions({ query, limit }),
+  );
+}

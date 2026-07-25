@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { BundleConfig, FileContent, TreeNode } from '../types.ts';
-import { getBundles, getBundleTree, readFile, deleteFileRaw } from '../services/api.ts';
+import { getBundles, getBundleTree, readFile, deleteFileRaw, searchBundle } from '../services/api.ts';
+import type { SearchResult } from '../services/api.ts';
 import { FileTree } from '../components/FileTree.tsx';
 import { MarkdownViewer } from '../components/MarkdownViewer.tsx';
 import { ChatPanel } from '../components/ChatPanel.tsx';
@@ -156,6 +157,35 @@ function BundleWorkspace({
     typeof window !== 'undefined' && window.innerWidth <= 760,
   );
 
+  // --- Search state ---
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounced search: fires 250ms after the user stops typing.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchResults([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      searchBundle(bundleId, q)
+        .then(({ results }) => setSearchResults(results))
+        .catch(() => setSearchResults([]))
+        .finally(() => setSearching(false));
+    }, 250);
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+    };
+  }, [searchQuery, bundleId]);
+
+  const showSearch = searchQuery.trim().length > 0;
+
   // Fetch the bundle tree + metadata. `bundleId` is stable for this mount
   // (the parent remounts via `key`), so this runs once per bundle.
   const refreshTree = useCallback(() => {
@@ -244,15 +274,55 @@ function BundleWorkspace({
             </div>
           )}
         </div>
-        <div className="bundle-tree">
-          {loading ? (
-            <div className="centered-spinner">
-              <div className="spinner spinner-sm" />
-            </div>
-          ) : tree ? (
-            <FileTree node={tree} activePath={filePath} onSelect={onSelect} onDelete={handleDeleteFile} />
-          ) : null}
+
+        {/* Search bar */}
+        <div className="sidebar-search">
+          <input
+            type="text"
+            className="sidebar-search-input"
+            placeholder="Search bundle…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          {searching && <div className="sidebar-search-spinner spinner spinner-sm" />}
         </div>
+
+        {showSearch ? (
+          <div className="sidebar-search-results">
+            {searchResults.length === 0 && !searching && (
+              <div className="sidebar-search-empty">No results</div>
+            )}
+            {searchResults.map((r, i) => (
+              <button
+                key={`${r.path}-${i}`}
+                type="button"
+                className="sidebar-search-result"
+                onClick={() => {
+                  onSelect(r.path);
+                  setSearchQuery('');
+                }}
+                title={r.path}
+              >
+                {r.title && <span className="sidebar-search-result-title">{r.title}</span>}
+                <span className="sidebar-search-result-path">{r.path}</span>
+                {r.heading !== '(intro)' && (
+                  <span className="sidebar-search-result-heading">§ {r.heading}</span>
+                )}
+                <span className="sidebar-search-result-snippet">{r.snippet}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="bundle-tree">
+            {loading ? (
+              <div className="centered-spinner">
+                <div className="spinner spinner-sm" />
+              </div>
+            ) : tree ? (
+              <FileTree node={tree} activePath={filePath} onSelect={onSelect} onDelete={handleDeleteFile} />
+            ) : null}
+          </div>
+        )}
       </aside>
 
       {/* Mobile-only backdrop (hidden on desktop via CSS). Tapping it closes

@@ -150,3 +150,173 @@ export async function chatCompletion(
     tool_calls: message.tool_calls,
   };
 }
+
+// --- Streaming chat completion -----------------------------------------------
+
+interface ZaiStreamDelta {
+  content?: string;
+  tool_calls?: {
+    index: number;
+    id?: string;
+    type?: string;
+    function?: { name?: string; arguments?: string };
+  }[];
+}
+
+interface ZaiStreamChunk {
+  choices?: { delta?: ZaiStreamDelta; finish_reason?: string }[];
+  error?: { message?: string } | string;
+}
+
+/**
+ * Streaming variant of {@link chatCompletion}.
+ *
+ * Calls the Z.ai proxy with `stream: true` and invokes `onDelta` for each
+ * content token as it arrives. Tool-call fragments are accumulated across
+ * chunks and returned in the final result. The caller decides what to do with
+ * tool calls (execute them, feed results back, and call again).
+ *
+ * @param messages  Conversation history.
+ * @param tools     Optional tool definitions.
+ * @param onDelta   Called for each streamed content chunk.
+ * @returns The full accumulated content and any tool calls.
+ */
+export async function chatCompletionStream(
+  messages: ChatMessage[],
+  tools: ToolDefinition[] | undefined,
+  onDelta: (text: string) => void,
+): Promise<ChatCompletionResult> {
+  const token = await getToken();
+
+  const body: Record<string, unknown> = {
+    model: MODEL,
+    messages,
+    stream: true,
+  };
+  if (tools && tools.length > 0) {
+    body.tools = tools;
+    body.tool_choice = 'auto';
+  }
+
+  const res = await fetch(ZAI_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Token': token,
+      ...COMMON_HEADERS,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    if (res.status === 401 || res.status === 403) {
+      cachedToken = null;
+    }
+    throw new Error(`Z.ai request failed (${res.status}): ${text.slice(0, 500)}`);
+  }
+
+  if (!res.body) {
+    throw new Error('Z.ai streaming response has no body');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  const toolCallMap = new Map<
+    number,
+    { id: string; name: string; arguments: string }
+  >();
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE events are separated by blank lines; lines within an event end with \n.
+      // Each data line starts with "data: ".
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? ''; // last partial line
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':')) continue; // comment/keepalive
+        if (!trimmed.startsWith('data: ')) continue;
+        const payload = trimmed.slice(6);
+        if (payload === '[DONE]') continue;
+
+        let chunk: ZaiStreamChunk;
+        try {
+          chunk = JSON.parse(payload) as ZaiStreamChunk;
+        } catch {
+          continue; // skip malformed
+        }
+
+        if (chunk.error) {
+          const msg =
+            typeof chunk.error === 'string'
+              ? chunk.error
+              : chunk.error.message ?? 'Unknown error';
+          throw new Error(`Z.ai API error: ${msg}`);
+        }
+
+        const delta = chunk.choices?.[0]?.delta;
+        if (!delta) continue;
+
+        if (delta.content) {
+          content += delta.content;
+          onDelta(delta.content);
+        }
+
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const existing =
+              toolCallMap.get(tc.index) ??
+              { id: '', name: '', arguments: '' };
+            if (tc.id) existing.id = tc.id;
+            if (tc.function?.name) existing.name = tc.function.name;
+            if (tc.function?.arguments)
+              existing.arguments += tc.function.arguments;
+            toolCallMap.set(tc.index, existing);
+          }
+        }
+      }
+    }
+
+    // Flush decoder.
+    buffer += decoder.decode();
+    if (buffer.trim().startsWith('data: ')) {
+      const payload = buffer.trim().slice(6);
+      if (payload !== '[DONE]') {
+        try {
+          const chunk = JSON.parse(payload) as ZaiStreamChunk;
+          const delta = chunk.choices?.[0]?.delta;
+          if (delta?.content) {
+            content += delta.content;
+            onDelta(delta.content);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  let tool_calls: ToolCall[] | undefined;
+  if (toolCallMap.size > 0) {
+    tool_calls = Array.from(toolCallMap.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([, v]) => ({
+        id: v.id,
+        type: 'function' as const,
+        function: { name: v.name, arguments: v.arguments },
+      }));
+  }
+
+  return { content, tool_calls };
+}

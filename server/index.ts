@@ -3,6 +3,7 @@ import session from 'express-session';
 import { PORT, SESSION_SECRET, USERS } from './config.js';
 import { setupPassport, requireAuth } from './auth.js';
 import bundlesRouter from './routes/bundles.js';
+import searchRouter from './routes/search.js';
 import chatsRouter from './routes/chats.js';
 import authRouter from './routes/auth.js';
 import { mcpManager } from './lib/mcp-manager.js';
@@ -82,6 +83,7 @@ app.use((req, res, next) => {
 // Routes
 app.use('/api/notebook/auth', authRouter);
 app.use('/api/notebook/bundles', requireAuth, bundlesRouter);
+app.use('/api/notebook/bundles', requireAuth, searchRouter);
 app.use('/api/notebook/chats', requireAuth, chatsRouter);
 
 // Start MCP servers then listen.

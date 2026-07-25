@@ -14,12 +14,11 @@ import type {
 import { streamChat } from '../services/chat.ts';
 import {
   createChat,
-  createFileRaw,
   deleteChat,
+  getGitStatus,
   listChats,
   loadChat,
   saveChat,
-  updateFileRaw,
 } from '../services/api.ts';
 import { ProposedChangeCard } from './ProposedChangeCard.tsx';
 
@@ -79,10 +78,10 @@ function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
     case 'listFiles':
     case 'glob':
       return { icon: '📁', text: 'List files' };
-    case 'propose_edit':
-      return { icon: '✏️', text: path ? `Propose edit: ${path}` : 'Propose edit' };
-    case 'propose_create':
-      return { icon: '📄', text: path ? `Propose create: ${path}` : 'Propose create' };
+    case 'edit_file':
+      return { icon: '✏️', text: path ? `Edit ${path}` : 'Edit file' };
+    case 'create_file':
+      return { icon: '📄', text: path ? `Create ${path}` : 'Create file' };
     case 'git_status':
       return { icon: '🌿', text: 'Git status' };
     case 'git_diff':
@@ -283,6 +282,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
   /** Whether the history dropdown is open. */
   const [showHistory, setShowHistory] = useState(false);
 
+  /** Count of uncommitted changes from git status (0 when clean/unknown). */
+  const [gitChanges, setGitChanges] = useState(0);
+
   // Mirror the latest message history so the async send handler can build the
   // request payload without reading stale state.
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -463,13 +465,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
             oldContent:
               typeof obj.oldContent === 'string' ? obj.oldContent : undefined,
             newContent: typeof obj.newContent === 'string' ? obj.newContent : '',
-            status: 'pending',
+            status: 'applied',
           };
           setProposedChanges((prev) => [...prev, change]);
           const te: TurnEvent = { kind: 'proposed', change };
           setTurnEvents((prev) => [...prev, te]);
           proposedLocal.push(change);
           turnEventsLocal.push(te);
+          onFilesChanged?.();
         } else if (ev.event === 'commit_proposed') {
           const obj = data as { message?: unknown };
           const te: TurnEvent = {
@@ -519,37 +522,17 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
 
     // Persist the completed turn (including any error event).
     await doSave(finalMessages, finalPastTurns, finalProposedChanges);
-  }, [bundleId, input, loading, appendContent, doSave]);
+  }, [bundleId, input, loading, appendContent, doSave, onFilesChanged]);
 
-  const handleAccept = useCallback(
-    async (id: string): Promise<void> => {
-      const change = proposedChangesRef.current.find((c) => c.id === id);
-      if (!change) return;
-      if (change.type === 'edit') {
-        await updateFileRaw(bundleId, change.path, change.newContent);
-      } else {
-        await createFileRaw(bundleId, change.path, change.newContent);
-      }
-      const updated = proposedChangesRef.current.map((c) =>
-        c.id === id ? { ...c, status: 'applied' as const } : c,
-      );
-      setProposedChanges(updated);
-      await doSave(messagesRef.current, pastTurnsRef.current, updated);
-      onFilesChanged?.();
-    },
-    [bundleId, doSave, onFilesChanged],
-  );
-
-  const handleReject = useCallback(
-    async (id: string): Promise<void> => {
-      const updated = proposedChangesRef.current.map((c) =>
-        c.id === id ? { ...c, status: 'rejected' as const } : c,
-      );
-      setProposedChanges(updated);
-      await doSave(messagesRef.current, pastTurnsRef.current, updated);
-    },
-    [doSave],
-  );
+  /** Fetch the current git status and update the badge count. Best-effort. */
+  const refreshGitStatus = useCallback(async (): Promise<void> => {
+    try {
+      const status = await getGitStatus(bundleId);
+      setGitChanges(status.isClean ? 0 : status.modified.length + status.staged.length);
+    } catch {
+      // Git status is best-effort — leave the previous count in place.
+    }
+  }, [bundleId]);
 
   /** Start a fresh, empty chat (clears state; a session is created on first send). */
   const handleNewChat = useCallback(() => {
@@ -636,11 +619,20 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
         // Persistence is best-effort.
       }
     })();
+    void refreshGitStatus();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bundleId]);
+
+  // Poll git status every 30 seconds so the badge stays current.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void refreshGitStatus();
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, [refreshGitStatus]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -694,6 +686,19 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
             </button>
           </div>
         </div>
+        {gitChanges > 0 && (
+          <button
+            type="button"
+            className="chat-git-badge"
+            title={`${gitChanges} uncommitted change${gitChanges > 1 ? 's' : ''}`}
+            onClick={() => {
+              setInput('Show me the git status');
+              void handleSend();
+            }}
+          >
+            🔴 {gitChanges}
+          </button>
+        )}
         <button
           type="button"
           className="chat-new-btn"
@@ -798,8 +803,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
                       <ProposedChangeCard
                         key={`pp${i}-${j}`}
                         change={latest}
-                        onAccept={handleAccept}
-                        onReject={handleReject}
                       />
                     );
                   }
@@ -852,8 +855,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
             <ProposedChangeCard
               key={`p${i}`}
               change={latest}
-              onAccept={handleAccept}
-              onReject={handleReject}
             />
           );
         })}
@@ -863,8 +864,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
           <ProposedChangeCard
             key={change.id}
             change={change}
-            onAccept={handleAccept}
-            onReject={handleReject}
           />
         ))}
 

@@ -6,7 +6,7 @@ import simpleGit from 'simple-git';
 import { createPatch } from 'diff';
 import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
-  chatCompletion,
+  chatCompletionStream,
 } from '../lib/llm.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import type {
@@ -87,12 +87,12 @@ const GIT_LOG_TOOL: ToolDefinition = {
   },
 };
 
-const PROPOSE_EDIT_TOOL: ToolDefinition = {
+const EDIT_FILE_TOOL: ToolDefinition = {
   type: 'function',
   function: {
-    name: 'propose_edit',
+    name: 'edit_file',
     description:
-      'Propose editing an existing file. Does NOT write to disk — the user must approve. Returns { proposed: true, path, diff }.',
+      'Edit an existing file. Writes to disk immediately. Returns { applied: true, path, diff }.',
     parameters: {
       type: 'object',
       properties: {
@@ -104,51 +104,17 @@ const PROPOSE_EDIT_TOOL: ToolDefinition = {
   },
 };
 
-const PROPOSE_CREATE_TOOL: ToolDefinition = {
+const CREATE_FILE_TOOL: ToolDefinition = {
   type: 'function',
   function: {
-    name: 'propose_create',
+    name: 'create_file',
     description:
-      'Propose creating a new file. Does NOT write to disk — the user must approve. Returns { proposed: true, path }.',
+      'Create a new file. Writes to disk immediately. Returns { applied: true, path }.',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Relative path for the new file.' },
         content: { type: 'string', description: 'The full content for the new file.' },
-      },
-      required: ['path', 'content'],
-    },
-  },
-};
-
-const APPLY_EDIT_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'apply_edit',
-    description:
-      'Write a file to disk (call after the user approves a proposed edit). Returns { applied: true, path }.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Relative path to the file.' },
-        content: { type: 'string', description: 'The full content to write.' },
-      },
-      required: ['path', 'content'],
-    },
-  },
-};
-
-const APPLY_CREATE_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'apply_create',
-    description:
-      'Create a new file on disk (call after the user approves a proposed creation). Returns { applied: true, path }.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Relative path for the new file.' },
-        content: { type: 'string', description: 'The full content to write.' },
       },
       required: ['path', 'content'],
     },
@@ -185,8 +151,8 @@ const READONLY_TOOLS: ToolDefinition[] = [
 
 const FULL_TOOLS: ToolDefinition[] = [
   ...READONLY_TOOLS,
-  PROPOSE_EDIT_TOOL,
-  PROPOSE_CREATE_TOOL,
+  EDIT_FILE_TOOL,
+  CREATE_FILE_TOOL,
 ];
 
 // --- Helpers ----------------------------------------------------------------
@@ -310,7 +276,7 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
       };
     }
 
-    case 'propose_edit': {
+    case 'edit_file': {
       const rel = String(args?.path ?? '');
       const content = String(args?.content ?? '');
       const resolved = resolveBundlePath(bundlePath, rel);
@@ -319,23 +285,17 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
         oldContent = await fs.readFile(resolved, 'utf8');
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-          return { error: `File not found: ${rel}. Use propose_create for new files.` };
+          return { error: `File not found: ${rel}. Use create_file for new files.` };
         }
         throw err;
       }
       const diff = makeDiff(rel, oldContent, content);
-      return { proposed: true, path: rel, oldContent, newContent: content, diff };
+      // Write to disk immediately.
+      await fs.writeFile(resolved, content, 'utf8');
+      return { applied: true, path: rel, oldContent, newContent: content, diff };
     }
 
-    case 'propose_create': {
-      const rel = String(args?.path ?? '');
-      const content = String(args?.content ?? '');
-      resolveBundlePath(bundlePath, rel); // validate within bundle root
-      return { proposed: true, path: rel, content };
-    }
-
-    case 'apply_edit':
-    case 'apply_create': {
+    case 'create_file': {
       const rel = String(args?.path ?? '');
       const content = String(args?.content ?? '');
       const resolved = resolveBundlePath(bundlePath, rel);
@@ -344,7 +304,7 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
       }
       await fs.mkdir(path.dirname(resolved), { recursive: true });
       await fs.writeFile(resolved, content, 'utf8');
-      return { applied: true, path: rel };
+      return { applied: true, path: rel, content };
     }
 
     case 'git_commit': {
@@ -407,12 +367,10 @@ async function buildSystemPrompt(bundle: BundleConfig): Promise<string> {
       timeZoneName: 'short',
     })}`,
     '',
-    'You can read files, check git status, and propose edits. When the user asks you to',
-    'make changes, use the propose_edit or propose_create tools. The user will review',
-    'your proposed changes and decide whether to apply them.',
+    'You can read files, check git status, and edit files directly. When the user asks you to',
+    'make changes, use the edit_file or create_file tools. Changes are applied immediately.',
     '',
-    'Do NOT attempt to apply, write, or commit changes yourself — only propose them.',
-    'Wait for the user to accept or reject before continuing.',
+    'After making edits, use git_commit to commit the changes if appropriate.',
     '',
     '## Formatting your responses',
     'Your responses are rendered as GitHub-Flavored Markdown. Use markdown formatting',
@@ -509,7 +467,12 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
     try {
       for (;;) {
-        const response = await chatCompletion(callMessages, allTools);
+        // Stream content deltas to the client as they arrive.
+        const response = await chatCompletionStream(
+          callMessages,
+          allTools,
+          (delta) => emit('content', { text: delta }),
+        );
 
         if (response.tool_calls && response.tool_calls.length > 0) {
           // Append the assistant turn carrying all tool calls (once).
@@ -545,9 +508,9 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             // Emit the tool-call event.
             emit('tool_call', { name: toolName, args: parsedArgs, result });
 
-            // For propose_edit / propose_create, also emit a proposed_change
-            // event so the frontend can render an Accept/Reject card.
-            if (toolName === 'propose_edit') {
+            // For edit_file / create_file, emit a proposed_change event
+            // with the diff so the frontend can render a collapsible diff card.
+            if (toolName === 'edit_file') {
               const r = result as {
                 path?: string;
                 oldContent?: string;
@@ -564,7 +527,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
                   diff: r.diff,
                 });
               }
-            } else if (toolName === 'propose_create') {
+            } else if (toolName === 'create_file') {
               const r = result as { path?: string; content?: string; error?: string };
               if (!r.error) {
                 emit('proposed_change', {
@@ -586,8 +549,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
           continue;
         }
 
-        // No tool calls: this is the final text response.
-        emit('content', { text: response.content });
+        // No tool calls: content was already streamed via the callback.
         emit('done', {});
         res.end();
         return;
