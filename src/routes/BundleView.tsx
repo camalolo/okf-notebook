@@ -359,6 +359,7 @@ function BundleWorkspace({
             bundleName={bundle?.name}
             bundleIcon={bundle?.icon}
             onFilesChanged={refreshTree}
+            onNavigate={onNavigate}
           />
         )}
       </section>

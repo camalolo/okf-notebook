@@ -30,6 +30,8 @@ interface ChatPanelProps {
   bundleIcon?: string;
   /** Called when a file is created or modified via the chat, so the parent can refresh its file tree. */
   onFilesChanged?: () => void;
+  /** Called when the user clicks an internal .md link in chat output. */
+  onNavigate?: (path: string) => void;
 }
 
 interface ToolCallLabel {
@@ -40,22 +42,36 @@ interface ToolCallLabel {
 type ProposedEvent = Extract<TurnEvent, { kind: 'proposed' }>;
 
 /** Renders markdown content inside chat bubbles (GFM tables, code, etc.). */
-const chatMarkdownComponents: Components = {
-  a({ href, children }) {
-    return (
-      <a href={href} target="_blank" rel="noopener noreferrer">
-        {children}
-      </a>
-    );
-  },
-  table({ children }) {
-    return <div className="chat-table-wrap"><table>{children}</table></div>;
-  },
-};
-
-function ChatMarkdown({ content }: { content: string }) {
+function ChatMarkdown({ content, onNavigate }: { content: string; onNavigate?: (path: string) => void }) {
+  const components: Components = {
+    a({ href, children }) {
+      if (href && onNavigate && !href.startsWith('http') && href.endsWith('.md')) {
+        const relativePath = href.replace(/^\/+/, '');
+        return (
+          <a
+            href="#"
+            className="md-internal-link"
+            onClick={(e) => {
+              e.preventDefault();
+              onNavigate(relativePath);
+            }}
+          >
+            {children}
+          </a>
+        );
+      }
+      return (
+        <a href={href} target="_blank" rel="noopener noreferrer">
+          {children}
+        </a>
+      );
+    },
+    table({ children }) {
+      return <div className="chat-table-wrap"><table>{children}</table></div>;
+    },
+  };
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={chatMarkdownComponents}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
       {content}
     </ReactMarkdown>
   );
@@ -246,7 +262,7 @@ function restoreFromEvents(events: StoredEvent[]): {
   return { messages, pastTurns, proposedChanges };
 }
 
-export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: ChatPanelProps) {
+export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, onNavigate }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -808,7 +824,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
                   className={`chat-message chat-message-${m.role === 'user' ? 'user' : 'assistant'}`}
                 >
                   {m.role !== 'user' && <span className="chat-author">GLM</span>}
-                  <div className="chat-bubble"><ChatMarkdown content={m.content} /></div>
+                  <div className="chat-bubble"><ChatMarkdown content={m.content} onNavigate={onNavigate} /></div>
                 </div>
               </Fragment>
             );
@@ -839,7 +855,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
             return (
               <div className="chat-message chat-message-assistant" key={`c${i}`}>
                 <span className="chat-author">GLM</span>
-                <div className="chat-bubble"><ChatMarkdown content={ev.text} /></div>
+                <div className="chat-bubble"><ChatMarkdown content={ev.text} onNavigate={onNavigate} /></div>
               </div>
             );
           }
