@@ -313,6 +313,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
 
   // Auto-scroll to the bottom whenever new content arrives.
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -405,6 +406,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
     const preTurnProposed = proposedChangesRef.current;
 
     setInput('');
+    if (inputRef.current) inputRef.current.style.height = 'auto';
     setTurnEvents([]);
     setLoading(true);
     setMessages(history);
@@ -890,12 +892,18 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: 
 
       <div className="chat-input-area">
         <textarea
+          ref={inputRef}
           className="chat-input"
           value={input}
           placeholder="Message GLM…  (Enter to send, Shift+Enter for newline)"
           rows={1}
           disabled={loading}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            const el = e.target;
+            el.style.height = 'auto';
+            el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+          }}
           onKeyDown={handleKeyDown}
         />
         <button
