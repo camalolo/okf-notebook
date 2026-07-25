@@ -88,6 +88,16 @@ in a config file). Tools are namespaced with a `toolPrefix` to avoid collisions
 servers by editing that array. `allowTools` filters which tools each server
 exposes.
 
+### Web search (`web_search` built-in tool)
+
+The `web_search` tool is a **built-in** tool (not an MCP server) exposed to all
+users (readonly + full). It searches the web via whichever search API key is
+configured, trying providers in preference order: **exa → tavily → tinyfish →
+serper**. Providers without an env key are skipped; providers that error at
+runtime fall through to the next. Set one or more of: `EXA_API_KEY`,
+`TAVILY_API_KEY`, `TINYFISH_API_KEY`, `SERPER_API_KEY`. The implementation lives
+in `server/lib/web-search.ts`.
+
 ### Auth model (`server/auth.ts`, `server/config.ts`)
 
 - Google OAuth 2.0 with an **email allowlist** (`USERS` map in `config.ts`) →

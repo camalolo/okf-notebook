@@ -88,6 +88,11 @@ function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
       return { icon: '🌿', text: path ? `Git diff: ${path}` : 'Git diff' };
     case 'git_log':
       return { icon: '🌿', text: 'Git log' };
+    case 'git_commit':
+    case 'commit':
+      return { icon: '🌿', text: str('message') ? `Commit: ${trunc(str('message'), 50)}` : 'Commit' };
+    case 'web_search':
+      return { icon: '🔍', text: `Search: "${trunc(str('query'), 50)}"` };
 
     // --- Browser MCP tools ---
     case 'browser_navigate':

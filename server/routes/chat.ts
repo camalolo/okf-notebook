@@ -8,6 +8,7 @@ import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
   chatCompletionStream,
 } from '../lib/llm.js';
+import { webSearch } from '../lib/web-search.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import type {
   ToolDefinition,
@@ -141,12 +142,31 @@ const GIT_COMMIT_TOOL: ToolDefinition = {
   },
 };
 
+const WEB_SEARCH_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'web_search',
+    description:
+      'Search the web. Returns { query, provider, results: [{ title, url, snippet, content? }] }. ' +
+      'Uses whichever search API is configured (exa, tavily, tinyfish, or serper).',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query.' },
+        num_results: { type: 'number', description: 'Number of results (default 5, max 10).' },
+      },
+      required: ['query'],
+    },
+  },
+};
+
 const READONLY_TOOLS: ToolDefinition[] = [
   READ_FILE_TOOL,
   LIST_FILES_TOOL,
   GIT_STATUS_TOOL,
   GIT_DIFF_TOOL,
   GIT_LOG_TOOL,
+  WEB_SEARCH_TOOL,
 ];
 
 const FULL_TOOLS: ToolDefinition[] = [
@@ -240,6 +260,13 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
         }),
       );
       return { files };
+    }
+
+    case 'web_search': {
+      const query = String(args?.query ?? '');
+      if (!query) return { error: 'query is required' };
+      const numResults = Number(args?.num_results) || 5;
+      return webSearch(query, numResults);
     }
 
     case 'git_status': {
@@ -382,9 +409,11 @@ async function buildSystemPrompt(bundle: BundleConfig): Promise<string> {
     'Avoid raw HTML — use markdown equivalents instead.',
     '',
     'You also have access to Google Workspace tools (prefixed gw_) for reading emails',
-    'and managing calendar events, and browser tools (prefixed browser_) for web',
-    'search and scraping. Use these when the user asks about their email, calendar,',
-    'or needs information from the web.',
+    'and managing calendar events, browser tools (prefixed browser_) for navigating',
+    'and scraping web pages, and a web_search tool for quick web searches. Use',
+    'web_search when the user asks a question that needs current information from the',
+    'internet, and use browser_ tools when you need to interact with a specific page',
+    'or fill in forms.',
     '',
     'Always read relevant files before editing to understand the current content.',
     '',
