@@ -21,7 +21,7 @@ const MCP_SERVERS: McpServerConfig[] = [
       // Gmail (read-only)
       'search_emails',
       'read_email',
-      // Calendar (read/edit)
+      // Calendar (full management)
       'list_calendars',
       'list_events',
       'get_event',
@@ -35,7 +35,8 @@ const MCP_SERVERS: McpServerConfig[] = [
   {
     name: 'browser',
     command: 'npx',
-    args: ['@playwright/mcp', '--browser', 'chromium', '--headless', '--no-sandbox', '--caps', 'vision', '--isolated'],
+    args: ['@playwright/mcp', '--browser', 'chromium', '--headless', '--no-sandbox', '--isolated'],
+    allowTools: ['browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_press_key'],
   },
 ];
 

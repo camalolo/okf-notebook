@@ -99,32 +99,12 @@ function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
       return { icon: '🔗', text: `Navigate to ${trunc(str('url'), 50) || 'URL'}` };
     case 'browser_snapshot':
       return { icon: '📸', text: 'Page snapshot' };
-    case 'browser_screenshot':
-      return { icon: '📸', text: 'Screenshot' };
     case 'browser_click':
       return { icon: '🖱️', text: `Click ${trunc(str('element') || str('text'), 40) || 'element'}` };
-    case 'browser_double_click':
-      return { icon: '🖱️', text: `Double-click ${trunc(str('element') || str('text'), 40) || 'element'}` };
-    case 'browser_hover':
-      return { icon: '🖱️', text: `Hover ${trunc(str('element') || str('text'), 40) || 'element'}` };
     case 'browser_type':
       return { icon: '⌨️', text: `Type "${trunc(str('text'), 40)}"` };
     case 'browser_press_key':
       return { icon: '⌨️', text: `Press ${str('key') || 'key'}` };
-    case 'browser_select_option':
-      return { icon: '📋', text: `Select ${str('values') || 'option'}` };
-    case 'browser_resize':
-      return { icon: '🔄', text: `Resize ${args.width ?? ''}×${args.height ?? ''}` };
-    case 'browser_close':
-      return { icon: '🚪', text: 'Close browser' };
-    case 'browser_wait_for':
-      return { icon: '⏳', text: str('text') ? `Wait for "${trunc(str('text'), 40)}"` : 'Wait' };
-    case 'browser_tabs':
-      return { icon: '📑', text: 'Tab management' };
-    case 'browser_fill_form':
-      return { icon: '📝', text: 'Fill form' };
-    case 'browser_evaluate':
-      return { icon: '🔧', text: 'Run JavaScript' };
 
     // --- Google Workspace MCP tools ---
     case 'gw_search_emails':
@@ -134,7 +114,7 @@ function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
     case 'gw_list_calendars':
       return { icon: '📅', text: 'List calendars' };
     case 'gw_list_events':
-      return { icon: '📅', text: str('calendarId') ? `List events (${str('calendarId')})` : 'List events' };
+      return { icon: '📅', text: 'List events' };
     case 'gw_get_event':
       return { icon: '📅', text: `Get event ${trunc(str('eventId'), 20)}` };
     case 'gw_create_event':
