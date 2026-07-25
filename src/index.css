@@ -1545,13 +1545,43 @@ img {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.chat-history-item-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .chat-history-item-date {
   font-size: 0.75rem;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+.chat-history-item-delete {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
   flex-shrink: 0;
+}
+
+.chat-history-item:hover .chat-history-item-delete {
+  opacity: 1;
+}
+
+.chat-history-item-delete:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 /* Message list (scroll area) */

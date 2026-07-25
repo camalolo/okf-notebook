@@ -12,6 +12,7 @@ import { streamChat } from '../services/chat.ts';
 import {
   createChat,
   createFileRaw,
+  deleteChat,
   listChats,
   loadChat,
   saveChat,
@@ -558,6 +559,35 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
     [bundleId],
   );
 
+  /** Delete a chat from the server and update the list. */
+  const handleDeleteChat = useCallback(
+    async (id: string): Promise<void> => {
+      try {
+        await deleteChat(bundleId, id);
+        const refreshed = await listChats(bundleId);
+        setChatList(refreshed);
+        // If we deleted the active chat, load the next available or go empty.
+        if (id === chatIdRef.current) {
+          if (refreshed.length > 0) {
+            await handleSelectChat(refreshed[0].id);
+          } else {
+            setMessages([]);
+            setPastTurns([]);
+            setProposedChanges([]);
+            setTurnEvents([]);
+            setChatId(null);
+            setChatTitle('New chat');
+            chatIdRef.current = null;
+            chatTitleRef.current = 'New chat';
+          }
+        }
+      } catch {
+        // Best-effort.
+      }
+    },
+    [bundleId, handleSelectChat],
+  );
+
   // On mount / bundle change: fetch the chat list and auto-load the most recent.
   useEffect(() => {
     let cancelled = false;
@@ -660,8 +690,23 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
                   onClick={() => void handleSelectChat(c.id)}
                 >
                   <span className="chat-history-item-title">{c.title}</span>
-                  <span className="chat-history-item-date">
-                    {formatDate(c.updatedAt)}
+                  <span className="chat-history-item-meta">
+                    <span className="chat-history-item-date">
+                      {formatDate(c.updatedAt)}
+                    </span>
+                    <button
+                      type="button"
+                      className="chat-history-item-delete"
+                      title="Delete chat"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm(`Delete "${c.title}"?`)) {
+                          void handleDeleteChat(c.id);
+                        }
+                      }}
+                    >
+                      ✕
+                    </button>
                   </span>
                 </div>
               ))}

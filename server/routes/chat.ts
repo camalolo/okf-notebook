@@ -396,6 +396,17 @@ async function buildSystemPrompt(bundle: BundleConfig): Promise<string> {
   return [
     `You are an AI assistant helping manage an OKF knowledge bundle called "${bundle.name}".`,
     '',
+    `Current date/time: ${new Date().toLocaleString('en-US', {
+      timeZone: 'Asia/Taipei',
+      weekday: 'short',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    })}`,
+    '',
     'You can read files, check git status, and propose edits. When the user asks you to',
     'make changes, use the propose_edit or propose_create tools. The user will review',
     'your proposed changes and decide whether to apply them.',
