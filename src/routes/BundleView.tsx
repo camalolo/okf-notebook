@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { BundleConfig, FileContent, TreeNode } from '../types.ts';
-import { getBundles, getBundleTree, readFile } from '../services/api.ts';
+import { getBundles, getBundleTree, readFile, deleteFileRaw } from '../services/api.ts';
 import { FileTree } from '../components/FileTree.tsx';
 import { MarkdownViewer } from '../components/MarkdownViewer.tsx';
 import { ChatPanel } from '../components/ChatPanel.tsx';
@@ -158,6 +158,28 @@ function BundleWorkspace({
 
   // Fetch the bundle tree + metadata. `bundleId` is stable for this mount
   // (the parent remounts via `key`), so this runs once per bundle.
+  const refreshTree = useCallback(() => {
+    getBundleTree(bundleId)
+      .then((treeNode) => setTree(treeNode))
+      .catch(() => {
+        // Best-effort refresh.
+      });
+  }, [bundleId]);
+
+  const handleDeleteFile = useCallback(
+    async (path: string) => {
+      try {
+        await deleteFileRaw(bundleId, path);
+        if (path === filePath) onCloseFile();
+        refreshTree();
+      } catch {
+        // Best-effort: ignore — the file may already be gone.
+        refreshTree();
+      }
+    },
+    [bundleId, filePath, onCloseFile, refreshTree],
+  );
+
   useEffect(() => {
     let active = true;
     Promise.all([getBundleTree(bundleId), getBundles()])
@@ -228,7 +250,7 @@ function BundleWorkspace({
               <div className="spinner spinner-sm" />
             </div>
           ) : tree ? (
-            <FileTree node={tree} activePath={filePath} onSelect={onSelect} />
+            <FileTree node={tree} activePath={filePath} onSelect={onSelect} onDelete={handleDeleteFile} />
           ) : null}
         </div>
       </aside>
@@ -266,6 +288,7 @@ function BundleWorkspace({
             bundleId={bundleId}
             bundleName={bundle?.name}
             bundleIcon={bundle?.icon}
+            onFilesChanged={refreshTree}
           />
         )}
       </section>

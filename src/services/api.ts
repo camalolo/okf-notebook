@@ -113,6 +113,14 @@ export function createFileRaw(bundleId: string, filePath: string, raw: string): 
   });
 }
 
+/** Delete a file. */
+export function deleteFileRaw(bundleId: string, filePath: string): Promise<void> {
+  return request<void>(
+    `${API_BASE}/bundles/${encodeURIComponent(bundleId)}/files/${encodePath(filePath)}`,
+    { method: 'DELETE' },
+  );
+}
+
 /* --- Chat persistence --- */
 
 export function listChats(bundleId: string): Promise<ChatSummary[]> {

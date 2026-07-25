@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { TreeNode } from '../types.ts';
 
 interface FileTreeProps {
   node: TreeNode;
   activePath: string;
   onSelect: (path: string) => void;
+  /** Called when the user confirms deletion of a file. */
+  onDelete?: (path: string) => void;
 }
 
 /** Pick an emoji for a file based on its OKF concept type or filename. */
@@ -42,11 +44,12 @@ interface TreeItemProps {
   node: TreeNode;
   activePath: string;
   onSelect: (path: string) => void;
+  onDelete?: (path: string) => void;
   level: number;
   defaultExpanded: boolean;
 }
 
-function TreeItem({ node, activePath, onSelect, level, defaultExpanded }: TreeItemProps) {
+function TreeItem({ node, activePath, onSelect, onDelete, level, defaultExpanded }: TreeItemProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const isDirectory = node.type === 'directory';
   const isActive = !isDirectory && node.path === activePath;
@@ -77,6 +80,7 @@ function TreeItem({ node, activePath, onSelect, level, defaultExpanded }: TreeIt
                 node={child}
                 activePath={activePath}
                 onSelect={onSelect}
+                onDelete={onDelete}
                 level={level + 1}
                 defaultExpanded={false}
               />
@@ -88,23 +92,96 @@ function TreeItem({ node, activePath, onSelect, level, defaultExpanded }: TreeIt
   }
 
   return (
+    <FileItem
+      node={node}
+      isActive={isActive}
+      indent={indent}
+      onSelect={onSelect}
+      onDelete={onDelete}
+    />
+  );
+}
+
+/** Auto-cancel window (ms) after which an armed delete reverts to idle. */
+const CONFIRM_WINDOW = 1500;
+
+/**
+ * File row with an inline delete button using double-confirmation.
+ *
+ * Idle → click ✕ → armed (✓ visible) → click ✓ within `CONFIRM_WINDOW`
+ * to delete, or wait to auto-cancel.
+ */
+function FileItem({
+  node,
+  isActive,
+  indent,
+  onSelect,
+  onDelete,
+}: {
+  node: TreeNode;
+  isActive: boolean;
+  indent: number;
+  onSelect: (path: string) => void;
+  onDelete?: (path: string) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  function handleDeleteClick(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (confirming) {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      setConfirming(false);
+      onDelete?.(node.path);
+      return;
+    }
+    setConfirming(true);
+    timerRef.current = setTimeout(() => {
+      setConfirming(false);
+      timerRef.current = null;
+    }, CONFIRM_WINDOW);
+  }
+
+  return (
     <li className="tree-node" role="none">
-      <button
+      <div
         className={`tree-row tree-row-file${isActive ? ' tree-row-active' : ''}`}
         style={{ paddingLeft: `${indent}px` }}
-        onClick={() => onSelect(node.path)}
-        title={node.concept?.title ?? node.name}
       >
-        <span className="tree-icon" aria-hidden="true">
-          {fileIcon(node)}
-        </span>
-        <span className="tree-label">{node.name}</span>
-      </button>
+        <button
+          type="button"
+          className="tree-row-main"
+          onClick={() => onSelect(node.path)}
+          title={node.concept?.title ?? node.name}
+        >
+          <span className="tree-icon" aria-hidden="true">
+            {fileIcon(node)}
+          </span>
+          <span className="tree-label">{node.name}</span>
+        </button>
+        {onDelete && (
+          <button
+            type="button"
+            className={`tree-delete-btn${confirming ? ' tree-delete-armed' : ''}`}
+            onClick={handleDeleteClick}
+            aria-label={confirming ? `Confirm delete ${node.name}` : `Delete ${node.name}`}
+            title={confirming ? 'Click again to confirm' : 'Delete'}
+          >
+            {confirming ? '✓' : '✕'}
+          </button>
+        )}
+      </div>
     </li>
   );
 }
 
-export function FileTree({ node, activePath, onSelect }: FileTreeProps) {
+export function FileTree({ node, activePath, onSelect, onDelete }: FileTreeProps) {
   const children = node.children ?? [];
   return (
     <ul className="tree" role="tree">
@@ -114,6 +191,7 @@ export function FileTree({ node, activePath, onSelect }: FileTreeProps) {
           node={child}
           activePath={activePath}
           onSelect={onSelect}
+          onDelete={onDelete}
           level={0}
           defaultExpanded={index === 0}
         />

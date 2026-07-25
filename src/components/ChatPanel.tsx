@@ -1,4 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import type { Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { KeyboardEvent } from 'react';
 import type {
   ChatMessage,
@@ -26,6 +29,8 @@ interface ChatPanelProps {
   bundleName?: string;
   /** Bundle emoji icon shown in the header. */
   bundleIcon?: string;
+  /** Called when a file is created or modified via the chat, so the parent can refresh its file tree. */
+  onFilesChanged?: () => void;
 }
 
 interface ToolCallLabel {
@@ -34,6 +39,28 @@ interface ToolCallLabel {
 }
 
 type ProposedEvent = Extract<TurnEvent, { kind: 'proposed' }>;
+
+/** Renders markdown content inside chat bubbles (GFM tables, code, etc.). */
+const chatMarkdownComponents: Components = {
+  a({ href, children }) {
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer">
+        {children}
+      </a>
+    );
+  },
+  table({ children }) {
+    return <div className="chat-table-wrap"><table>{children}</table></div>;
+  },
+};
+
+function ChatMarkdown({ content }: { content: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={chatMarkdownComponents}>
+      {content}
+    </ReactMarkdown>
+  );
+}
 
 function trunc(s: string, max = 60): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
@@ -235,7 +262,7 @@ function restoreFromEvents(events: StoredEvent[]): {
   return { messages, pastTurns, proposedChanges };
 }
 
-export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) {
+export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -508,8 +535,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
       );
       setProposedChanges(updated);
       await doSave(messagesRef.current, pastTurnsRef.current, updated);
+      onFilesChanged?.();
     },
-    [bundleId, doSave],
+    [bundleId, doSave, onFilesChanged],
   );
 
   const handleReject = useCallback(
@@ -624,16 +652,20 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
   const hasContent = turnEvents.some((e) => e.kind === 'content');
   const showTyping = loading && !hasContent;
 
-  // Proposed changes belonging to the current turn are rendered inline within
-  // the timeline; the rest (from previous turns) render afterwards so they
-  // remain visible/actionable.
-  const currentTurnProposedIds = new Set(
-    turnEvents
+  // Proposed changes already rendered inline within a turn timeline —
+  // either the current streaming turn or committed past turns — are
+  // excluded here to avoid duplication.
+  const inlineProposedIds = new Set<string>([
+    ...turnEvents
       .filter((e): e is ProposedEvent => e.kind === 'proposed')
       .map((e) => e.change.id),
-  );
+    ...pastTurns
+      .flat()
+      .filter((e): e is ProposedEvent => e.kind === 'proposed')
+      .map((e) => e.change.id),
+  ]);
   const pastProposed = proposedChanges.filter(
-    (c) => !currentTurnProposedIds.has(c.id),
+    (c) => !inlineProposedIds.has(c.id),
   );
 
   const isEmpty =
@@ -777,7 +809,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
                   className={`chat-message chat-message-${m.role === 'user' ? 'user' : 'assistant'}`}
                 >
                   {m.role !== 'user' && <span className="chat-author">GLM</span>}
-                  <div className="chat-bubble">{m.content}</div>
+                  <div className="chat-bubble"><ChatMarkdown content={m.content} /></div>
                 </div>
               </Fragment>
             );
@@ -808,7 +840,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon }: ChatPanelProps) 
             return (
               <div className="chat-message chat-message-assistant" key={`c${i}`}>
                 <span className="chat-author">GLM</span>
-                <div className="chat-bubble">{ev.text}</div>
+                <div className="chat-bubble"><ChatMarkdown content={ev.text} /></div>
               </div>
             );
           }
