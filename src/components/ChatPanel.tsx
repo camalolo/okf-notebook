@@ -18,7 +18,6 @@ import {
   getGitStatus,
   listChats,
   loadChat,
-  saveChat,
 } from '../services/api.ts';
 import { ProposedChangeCard } from './ProposedChangeCard.tsx';
 
@@ -174,46 +173,6 @@ function formatDate(iso: string): string {
 }
 
 /**
- * Flatten the in-memory conversation state into the persisted `StoredEvent[]`
- * timeline. Tool calls and proposed changes are emitted before the assistant
- * message they belong to (matching the order produced by {@link restoreFromEvents}).
- */
-function buildEventsFrom(
-  messages: ChatMessage[],
-  pastTurns: TurnEvent[][],
-  proposedChanges: ProposedChange[],
-  extraEvents?: StoredEvent[],
-): StoredEvent[] {
-  const events: StoredEvent[] = [];
-  const now = new Date().toISOString();
-  let assistantIdx = 0;
-  for (const m of messages) {
-    if (m.role === 'user') {
-      events.push({ ts: now, kind: 'user', content: m.content });
-    } else if (m.role === 'assistant') {
-      // Push tool calls, proposed changes, and errors from this turn first.
-      const turnEvents = pastTurns[assistantIdx] ?? [];
-      for (const ev of turnEvents) {
-        if (ev.kind === 'tool') {
-          events.push({ ts: now, kind: 'tool', toolCall: ev.toolCall });
-        } else if (ev.kind === 'proposed') {
-          // Look up the latest status from the persistent proposedChanges list.
-          const latest = proposedChanges.find((c) => c.id === ev.change.id) ?? ev.change;
-          events.push({ ts: now, kind: 'proposed', change: latest });
-        } else if (ev.kind === 'error') {
-          events.push({ ts: now, kind: 'error', content: ev.text });
-        }
-      }
-      events.push({ ts: now, kind: 'assistant', content: m.content });
-      assistantIdx++;
-    }
-  }
-  // Append extra events (used for mid-stream saves of incomplete turns).
-  if (extraEvents) events.push(...extraEvents);
-  return events;
-}
-
-/**
  * Reconstruct in-memory chat state (messages, past turns, proposed changes)
  * from a persisted `StoredEvent[]` timeline.
  */
@@ -262,10 +221,32 @@ function restoreFromEvents(events: StoredEvent[]): {
   return { messages, pastTurns, proposedChanges };
 }
 
+/**
+ * Check whether a turn has completed in the stored event timeline.
+ * Returns true if there's an assistant message after the last user message
+ * matching `userContent`.
+ */
+function isTurnComplete(events: StoredEvent[], userContent: string): boolean {
+  let lastUserIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'user' && events[i].content === userContent) {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx === -1) return false;
+  for (let i = lastUserIdx + 1; i < events.length; i++) {
+    if (events[i].kind === 'assistant') return true;
+  }
+  return false;
+}
+
 export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, onNavigate }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  /** True while reconnecting after a stream drop (shows badge, keeps loading state). */
+  const [reconnecting, setReconnecting] = useState(false);
   /** Chronological events for the in-flight assistant turn. */
   const [turnEvents, setTurnEvents] = useState<TurnEvent[]>([]);
   /** Completed turns — preserves tool calls + proposed changes in order. */
@@ -321,39 +302,23 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   }, [messages, turnEvents, pastTurns, proposedChanges, loading]);
 
   /**
-   * Persist the given conversation snapshot to the active chat session.
-   * Auto-titles the chat from the first user message if the title is still the
-   * default. Best-effort: failures are swallowed so chat keeps working offline.
+   * Refresh the chat list from the server and sync the active chat title.
+   * Called after each turn since the server is now the source of truth for
+   * persistence (including auto-titling).
    */
-  const doSave = useCallback(
-    async (
-      msgs: ChatMessage[],
-      turns: TurnEvent[][],
-      changes: ProposedChange[],
-      extraEvents?: StoredEvent[],
-    ): Promise<void> => {
-      const id = chatIdRef.current;
-      if (!id) return;
-      const events = buildEventsFrom(msgs, turns, changes, extraEvents);
-      let title = chatTitleRef.current;
-      const firstUser = msgs.find((m) => m.role === 'user');
-      if (title === 'New chat' && firstUser) {
-        title = firstUser.content.slice(0, 60).trim() || 'New chat';
+  const refreshChatList = useCallback(async (): Promise<void> => {
+    try {
+      const refreshed = await listChats(bundleId);
+      setChatList(refreshed);
+      const current = refreshed.find((c) => c.id === chatIdRef.current);
+      if (current && current.title !== chatTitleRef.current) {
+        chatTitleRef.current = current.title;
+        setChatTitle(current.title);
       }
-      try {
-        const saved = await saveChat(bundleId, id, { title, events });
-        if (saved.title !== chatTitleRef.current) {
-          chatTitleRef.current = saved.title;
-          setChatTitle(saved.title);
-        }
-        const refreshed = await listChats(bundleId);
-        setChatList(refreshed);
-      } catch {
-        // Persistence is best-effort.
-      }
-    },
-    [bundleId],
-  );
+    } catch {
+      // best-effort
+    }
+  }, [bundleId]);
 
   /**
    * Append a content chunk to the current turn's timeline. Consecutive chunks
@@ -404,7 +369,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     // the UI and persistence without relying on state updated mid-stream.
     const history = [...messagesRef.current, userMsg];
     const preTurnPastTurns = pastTurnsRef.current;
-    const preTurnProposed = proposedChangesRef.current;
 
     setInput('');
     if (inputRef.current) inputRef.current.style.height = 'auto';
@@ -413,32 +377,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     setMessages(history);
 
     // Local tracking for this turn (mirrors the setTurnEvents/setProposedChanges
-    // calls so we can persist the final snapshot accurately).
+    // calls so we can compute the final snapshot accurately).
     const turnEventsLocal: TurnEvent[] = [];
-    const proposedLocal: ProposedChange[] = [];
     let acc = '';
-    let chatError: string | null = null;
-
-    /** Build StoredEvents for the current in-progress turn (tool calls only,
-     *  no assistant message yet — used for mid-stream saves). */
-    const buildMidStreamExtras = (): StoredEvent[] => {
-      const now = new Date().toISOString();
-      const extras: StoredEvent[] = [];
-      for (const ev of turnEventsLocal) {
-        if (ev.kind === 'tool') {
-          extras.push({ ts: now, kind: 'tool', toolCall: ev.toolCall });
-        } else if (ev.kind === 'proposed') {
-          const latest = [...preTurnProposed, ...proposedLocal].find(
-            (c) => c.id === ev.change.id,
-          ) ?? ev.change;
-          extras.push({ ts: now, kind: 'proposed', change: latest });
-        }
-      }
-      return extras;
-    };
 
     try {
-      for await (const ev of streamChat(bundleId, history)) {
+      for await (const ev of streamChat(bundleId, history, chatIdRef.current)) {
         const data = ev.data;
 
         if (ev.event === 'content') {
@@ -462,15 +406,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           if (toolCall.name === 'git_commit' || toolCall.name === 'edit_file' || toolCall.name === 'create_file') {
             void refreshGitStatus();
           }
-
-          // Incremental save after each tool call so progress survives
-          // connection drops / server restarts.
-          await doSave(
-            history,
-            preTurnPastTurns,
-            [...preTurnProposed, ...proposedLocal],
-            buildMidStreamExtras(),
-          );
         } else if (ev.event === 'edit_applied') {
           const obj = data as {
             type?: unknown;
@@ -490,7 +425,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           setProposedChanges((prev) => [...prev, change]);
           const te: TurnEvent = { kind: 'proposed', change };
           setTurnEvents((prev) => [...prev, te]);
-          proposedLocal.push(change);
           turnEventsLocal.push(te);
           onFilesChanged?.();
           void refreshGitStatus();
@@ -517,8 +451,40 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         }
       }
     } catch (err) {
-      chatError = err instanceof Error ? err.message : 'Chat request failed';
-      // Add the error as a visible event in the timeline.
+      // Attempt to recover by polling the server. The server keeps running the
+      // agentic loop after the client disconnects, persisting each event. We poll
+      // until the turn completes (assistant message appears after our user msg),
+      // then rebuild state from the server timeline.
+      const id = chatIdRef.current;
+      if (id) {
+        setReconnecting(true);
+        let recovered = false;
+        for (let attempt = 0; attempt < 15; attempt++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          try {
+            const session = await loadChat(bundleId, id);
+            if (isTurnComplete(session.events, text)) {
+              const restored = restoreFromEvents(session.events);
+              setMessages(restored.messages);
+              setPastTurns(restored.pastTurns);
+              setProposedChanges(restored.proposedChanges);
+              setTurnEvents([]);
+              setLoading(false);
+              setReconnecting(false);
+              void refreshChatList();
+              void refreshGitStatus();
+              recovered = true;
+              break;
+            }
+          } catch {
+            // keep polling
+          }
+        }
+        setReconnecting(false);
+        if (recovered) return;
+      }
+      // Reconnection failed — show the error
+      const chatError = err instanceof Error ? err.message : 'Chat request failed';
       const errEvent: TurnEvent = { kind: 'error', text: chatError };
       turnEventsLocal.push(errEvent);
       setTurnEvents((prev) => [...prev, errEvent]);
@@ -533,7 +499,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       turnEventsLocal.length > 0
         ? [...preTurnPastTurns, turnEventsLocal]
         : preTurnPastTurns;
-    const finalProposedChanges = [...preTurnProposed, ...proposedLocal];
 
     // Commit to state.
     setMessages(finalMessages);
@@ -541,9 +506,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     setTurnEvents([]);
     setLoading(false);
 
-    // Persist the completed turn (including any error event).
-    await doSave(finalMessages, finalPastTurns, finalProposedChanges);
-  }, [bundleId, input, loading, appendContent, doSave, onFilesChanged, refreshGitStatus]);
+    // Refresh chat list (server is now source of truth for persistence + title).
+    void refreshChatList();
+  }, [bundleId, input, loading, appendContent, onFilesChanged, refreshGitStatus, refreshChatList]);
 
   /** Start a fresh, empty chat (clears state; a session is created on first send). */
   const handleNewChat = useCallback(() => {
@@ -887,6 +852,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               <span className="chat-typing-dot" />
               <span className="chat-typing-dot" />
             </div>
+          </div>
+        )}
+
+        {reconnecting && (
+          <div className="chat-reconnecting">
+            <span className="spinner spinner-sm" />
+            <span>Connection lost — reconnecting…</span>
           </div>
         )}
       </div>

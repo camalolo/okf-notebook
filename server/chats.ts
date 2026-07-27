@@ -17,8 +17,9 @@ const DATA_DIR = path.resolve(import.meta.dirname, '..', 'data', 'chats');
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface StoredEvent {
   ts: string; // ISO timestamp
-  kind: 'user' | 'assistant' | 'tool' | 'proposed';
-  content?: string; // for user/assistant
+  seq?: number; // monotonic sequence number (for resumability)
+  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error';
+  content?: string; // for user/assistant/error
   toolCall?: { name: string; args: Record<string, unknown>; result?: unknown };
   change?: {
     id: string;
@@ -148,6 +149,40 @@ export async function saveChat(
   };
   await fs.writeFile(chatPath(bundleId, chatId), JSON.stringify(updated, null, 2), 'utf8');
   return updated;
+}
+
+/**
+ * Append a single event to an existing chat session. Assigns the next monotonic
+ * `seq` number. Auto-titles the chat from the first user message.
+ */
+export async function appendEvent(
+  bundleId: string,
+  chatId: string,
+  event: Omit<StoredEvent, 'ts' | 'seq'>,
+): Promise<void> {
+  validateId(bundleId);
+  validateId(chatId);
+  const existing = await loadChat(bundleId, chatId);
+  if (!existing) throw new Error('Chat not found');
+
+  const lastEvent = existing.events[existing.events.length - 1];
+  const seq = lastEvent ? (lastEvent.seq ?? existing.events.length - 1) + 1 : 0;
+  const now = new Date().toISOString();
+  const newEvent: StoredEvent = { ...event, ts: now, seq };
+
+  // Auto-title from first user message.
+  let { title } = existing;
+  if (title === 'New chat' && event.kind === 'user' && event.content) {
+    title = event.content.slice(0, 60).trim() || 'New chat';
+  }
+
+  const updated: ChatSession = {
+    ...existing,
+    title,
+    events: [...existing.events, newEvent],
+    updatedAt: now,
+  };
+  await fs.writeFile(chatPath(bundleId, chatId), JSON.stringify(updated, null, 2), 'utf8');
 }
 
 /** Delete a chat session. */

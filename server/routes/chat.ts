@@ -10,9 +10,9 @@ import {
 } from '../lib/llm.js';
 import { webSearch } from '../lib/web-search.js';
 import { mcpManager } from '../lib/mcp-manager.js';
+import { appendEvent } from '../chats.js';
 import type {
   ToolDefinition,
-  ToolCall,
   ChatMessage,
 } from '../lib/llm.js';
 import type { BundleConfig } from '../config.js';
@@ -456,13 +456,16 @@ function makeEmitter(res: import('express').Response): SSEEmit {
  * POST /:bundleId/chat — agentic chat with server-side tool use, streamed as
  * Server-Sent Events.
  *
- * Request body: `{ messages: ChatMessage[] }`.
+ * Request body: `{ messages: ChatMessage[], chatId?: string }`.
+ * When `chatId` is provided, the server persists each event to the chat
+ * timeline as it happens (user message, tool calls, assistant response).
  *
  * SSE events: `tool_call`, `content`, `edit_applied`, `done`, `error`.
  */
 router.post('/:bundleId/chat', async (req, res, next) => {
+  const bundleId = req.params.bundleId as string;
   try {
-    const bundle = await getBundle(req.params.bundleId as string);
+    const bundle = await getBundle(bundleId);
     if (!bundle) {
       return res.status(404).json({ error: 'Bundle not found' });
     }
@@ -471,6 +474,19 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages (ChatMessage[]) is required' });
     }
+
+    const chatId: string | null =
+      typeof req.body?.chatId === 'string' ? req.body.chatId : null;
+
+    // Sequential persistence — chains promises to avoid read-modify-write
+    // races between concurrent appendEvent calls.
+    let persistChain: Promise<void> = Promise.resolve();
+    const persist = (event: Parameters<typeof appendEvent>[2]) => {
+      if (!chatId) return;
+      persistChain = persistChain
+        .then(() => appendEvent(bundleId, chatId, event))
+        .catch(() => { /* best-effort */ });
+    };
 
     // Select tools based on the user's role.
     const role = req.user?.role;
@@ -488,7 +504,20 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     });
     res.flushHeaders?.();
 
-    const emit = makeEmitter(res);
+    // Track client connection state so the loop can keep running (and persisting)
+    // even after the client disconnects. SSE writes are silently skipped.
+    let clientConnected = true;
+    req.on('close', () => { clientConnected = false; });
+
+    const rawEmit = makeEmitter(res);
+    const emit: SSEEmit = (event, data) => {
+      if (!clientConnected) return;
+      try {
+        rawEmit(event, data);
+      } catch {
+        clientConnected = false;
+      }
+    };
 
     // Build conversation: system prompt + user-supplied history.
     const systemPrompt = await buildSystemPrompt(bundle);
@@ -497,7 +526,14 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       ...messages,
     ];
 
-    const lastError: string | null = null;
+    // Persist the new user message at the start of the turn.
+    const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
+    if (lastUserMsg) {
+      persist({ kind: 'user', content: lastUserMsg.content });
+    }
+
+    // Accumulate streamed content so we can persist the full assistant message.
+    let turnContent = '';
 
     try {
       for (;;) {
@@ -505,7 +541,10 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         const response = await chatCompletionStream(
           callMessages,
           allTools,
-          (delta) => emit('content', { text: delta }),
+          (delta) => {
+            turnContent += delta;
+            emit('content', { text: delta });
+          },
         );
 
         if (response.tool_calls && response.tool_calls.length > 0) {
@@ -542,6 +581,9 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             // Emit the tool-call event.
             emit('tool_call', { name: toolName, args: parsedArgs, result });
 
+            // Persist tool event.
+            persist({ kind: 'tool', toolCall: { name: toolName, args: parsedArgs as Record<string, unknown>, result } });
+
             // For edit_file / create_file, emit an edit_applied event
             // with the diff so the frontend can render a collapsible diff card.
             if (toolName === 'edit_file') {
@@ -560,6 +602,17 @@ router.post('/:bundleId/chat', async (req, res, next) => {
                   newContent: r.newContent,
                   diff: r.diff,
                 });
+                persist({
+                  kind: 'proposed',
+                  change: {
+                    id: tc.id,
+                    type: 'edit',
+                    path: r.path ?? '',
+                    oldContent: r.oldContent,
+                    newContent: r.newContent ?? '',
+                    status: 'applied',
+                  },
+                });
               }
             } else if (toolName === 'create_file') {
               const r = result as { path?: string; content?: string; error?: string };
@@ -568,6 +621,16 @@ router.post('/:bundleId/chat', async (req, res, next) => {
                   type: 'create',
                   path: r.path,
                   newContent: r.content,
+                });
+                persist({
+                  kind: 'proposed',
+                  change: {
+                    id: tc.id,
+                    type: 'create',
+                    path: r.path ?? '',
+                    newContent: r.content ?? '',
+                    status: 'applied',
+                  },
                 });
               }
             }
@@ -584,14 +647,19 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         }
 
         // No tool calls: content was already streamed via the callback.
+        // Persist the final assistant message.
+        persist({ kind: 'assistant', content: turnContent });
         emit('done', {});
-        res.end();
+        if (clientConnected) res.end();
         return;
       }
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
-      emit('error', { message: lastError });
-      res.end();
+      const errMsg = err instanceof Error ? err.message : String(err);
+      // Persist error + whatever content was accumulated.
+      persist({ kind: 'error', content: errMsg });
+      persist({ kind: 'assistant', content: turnContent || '⚠️ This response was interrupted.' });
+      emit('error', { message: errMsg });
+      if (clientConnected) res.end();
     }
   } catch (err) {
     // If headers weren't sent yet (early failure), fall through to error handler.

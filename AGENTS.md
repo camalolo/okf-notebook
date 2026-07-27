@@ -115,11 +115,17 @@ in `server/lib/web-search.ts`.
 Chat sessions are stored as one JSON file each under
 `server/data/chats/{bundleId}/{chatId}.json` (gitignored). The format is a flat
 chronological `StoredEvent[]` timeline (not a message array) capturing user
-messages, assistant messages, tool calls, proposed changes, and errors. The
-frontend reconstructs in-memory state (messages + per-turn events + proposed
-changes) from this timeline via `restoreFromEvents` in `ChatPanel.tsx`, and
-serializes back via `buildEventsFrom`. Incremental saves happen mid-stream after
-each tool call so progress survives disconnects.
+messages, assistant messages, tool calls, proposed changes, and errors. Each
+event has a monotonic `seq` number for future resumability. The frontend
+reconstructs in-memory state (messages + per-turn events + proposed changes)
+from this timeline via `restoreFromEvents` in `ChatPanel.tsx`.
+
+**The server is the source of truth for persistence.** The agentic chat loop
+(`server/routes/chat.ts`) appends each event to the timeline as it happens via
+`appendEvent()` — the user message at the start, tool calls as they execute,
+and the final assistant message at completion. The client no longer persists;
+it only reads back the timeline when loading a past chat. This means progress
+survives client disconnects as long as the server loop keeps running.
 
 ## Code Conventions
 

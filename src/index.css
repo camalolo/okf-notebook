@@ -1951,6 +1951,19 @@ img {
 }
 
 /* Tool call indicators */
+.chat-reconnecting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 6px 14px;
+  background: var(--warning-bg, #fef3cd);
+  border: 1px solid var(--warning-border, #ffc107);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--warning-text, #856404);
+}
+
 .chat-tool-calls {
   display: flex;
   flex-direction: column;

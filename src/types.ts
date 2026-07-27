@@ -87,6 +87,7 @@ export interface ChatSummary {
 /** A single stored event in the chat timeline (persisted format). */
 export interface StoredEvent {
   ts: string;
+  seq?: number; // monotonic sequence number (for resumability)
   kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error';
   content?: string;
   toolCall?: ToolCallInfo;
