@@ -34,6 +34,8 @@ export interface StoredEvent {
 export interface ChatSession {
   id: string;
   bundleId: string;
+  /** Email of the user who created this chat. Absent on legacy chats. */
+  userId?: string;
   title: string;
   createdAt: string;
   updatedAt: string;
@@ -63,8 +65,16 @@ function validateId(id: string): void {
   }
 }
 
-/** List all chat sessions for a bundle (metadata only). */
-export async function listChats(bundleId: string): Promise<ChatSummary[]> {
+/**
+ * Check whether a chat belongs to the given user.
+ * Legacy chats (created before userId was tracked) are accessible to all.
+ */
+function isOwnedBy(chat: Pick<ChatSession, 'userId'>, userId: string): boolean {
+  return !chat.userId || chat.userId === userId;
+}
+
+/** List chat sessions for a bundle that belong to the given user (metadata only). */
+export async function listChats(bundleId: string, userId: string): Promise<ChatSummary[]> {
   validateId(bundleId);
   const dir = bundleDir(bundleId);
   let entries: string[];
@@ -80,6 +90,7 @@ export async function listChats(bundleId: string): Promise<ChatSummary[]> {
     try {
       const raw = await fs.readFile(path.join(dir, entry), 'utf8');
       const chat = JSON.parse(raw) as ChatSession;
+      if (!isOwnedBy(chat, userId)) continue;
       summaries.push({
         id: chat.id,
         title: chat.title,
@@ -97,29 +108,33 @@ export async function listChats(bundleId: string): Promise<ChatSummary[]> {
   return summaries;
 }
 
-/** Load a full chat session. Returns null if not found. */
+/** Load a full chat session. Returns null if not found or not owned by user. */
 export async function loadChat(
   bundleId: string,
   chatId: string,
+  userId: string,
 ): Promise<ChatSession | null> {
   validateId(bundleId);
   validateId(chatId);
   try {
     const raw = await fs.readFile(chatPath(bundleId, chatId), 'utf8');
-    return JSON.parse(raw) as ChatSession;
+    const chat = JSON.parse(raw) as ChatSession;
+    if (!isOwnedBy(chat, userId)) return null;
+    return chat;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;
   }
 }
 
-/** Create a new empty chat session. */
-export async function createChat(bundleId: string): Promise<ChatSession> {
+/** Create a new empty chat session owned by the given user. */
+export async function createChat(bundleId: string, userId: string): Promise<ChatSession> {
   validateId(bundleId);
   const now = new Date().toISOString();
   const chat: ChatSession = {
     id: crypto.randomUUID(),
     bundleId,
+    userId,
     title: 'New chat',
     createdAt: now,
     updatedAt: now,
@@ -130,15 +145,16 @@ export async function createChat(bundleId: string): Promise<ChatSession> {
   return chat;
 }
 
-/** Save (replace) a full chat session. */
+/** Save (replace) a full chat session. Caller must own the chat. */
 export async function saveChat(
   bundleId: string,
   chatId: string,
+  userId: string,
   data: { title?: string; events: StoredEvent[] },
 ): Promise<ChatSession> {
   validateId(bundleId);
   validateId(chatId);
-  const existing = await loadChat(bundleId, chatId);
+  const existing = await loadChat(bundleId, chatId, userId);
   if (!existing) throw new Error('Chat not found');
 
   const updated: ChatSession = {
@@ -158,11 +174,12 @@ export async function saveChat(
 export async function appendEvent(
   bundleId: string,
   chatId: string,
+  userId: string,
   event: Omit<StoredEvent, 'ts' | 'seq'>,
 ): Promise<void> {
   validateId(bundleId);
   validateId(chatId);
-  const existing = await loadChat(bundleId, chatId);
+  const existing = await loadChat(bundleId, chatId, userId);
   if (!existing) throw new Error('Chat not found');
 
   const lastEvent = existing.events[existing.events.length - 1];
@@ -185,13 +202,16 @@ export async function appendEvent(
   await fs.writeFile(chatPath(bundleId, chatId), JSON.stringify(updated, null, 2), 'utf8');
 }
 
-/** Delete a chat session. */
+/** Delete a chat session. No-op if not found or not owned by user. */
 export async function deleteChat(
   bundleId: string,
   chatId: string,
+  userId: string,
 ): Promise<void> {
   validateId(bundleId);
   validateId(chatId);
+  const existing = await loadChat(bundleId, chatId, userId);
+  if (!existing) return; // not found or not owned
   try {
     await fs.unlink(chatPath(bundleId, chatId));
   } catch (err) {
