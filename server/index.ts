@@ -63,19 +63,24 @@ setupPassport(app);
 
 // Dev bypass: auto-authenticate as a configured user without OAuth.
 // Activated by setting DEV_BYPASS_EMAIL in the environment.
+// Only applies to requests from the LAN (loopback or 192.168.x.x).
 const DEV_BYPASS_EMAIL = process.env.DEV_BYPASS_EMAIL || '';
 if (DEV_BYPASS_EMAIL) {
   // eslint-disable-next-line no-console
-  console.log(`[auth] DEV_BYPASS_EMAIL set — auto-login as ${DEV_BYPASS_EMAIL}`);
+  console.log(`[auth] DEV_BYPASS_EMAIL set — auto-login from LAN only`);
 }
 app.use((req, res, next) => {
   if (DEV_BYPASS_EMAIL && !req.isAuthenticated()) {
-    const role = USERS[DEV_BYPASS_EMAIL];
-    if (role) {
-      req.login({ email: DEV_BYPASS_EMAIL, name: DEV_BYPASS_EMAIL.split('@')[0], role }, () => {
-        next();
-      });
-      return;
+    const ip = req.socket.remoteAddress || '';
+    const isLan = ip === '127.0.0.1' || ip === '::1' || ip.startsWith('192.168.') || ip.startsWith('10.');
+    if (isLan) {
+      const role = USERS[DEV_BYPASS_EMAIL];
+      if (role) {
+        req.login({ email: DEV_BYPASS_EMAIL, name: DEV_BYPASS_EMAIL.split('@')[0], role }, () => {
+          next();
+        });
+        return;
+      }
     }
   }
   next();
