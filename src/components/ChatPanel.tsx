@@ -95,6 +95,8 @@ function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
       return { icon: '📁', text: 'List files' };
     case 'edit_file':
       return { icon: '✏️', text: path ? `Edit ${path}` : 'Edit file' };
+    case 'undo_edit':
+      return { icon: '↶', text: path ? `Undo edit: ${path}` : 'Undo edit' };
     case 'create_file':
       return { icon: '📄', text: path ? `Create ${path}` : 'Create file' };
     case 'git_status':
@@ -403,7 +405,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           turnEventsLocal.push(te);
 
           // Refresh git badge after commits and file edits.
-          if (toolCall.name === 'git_commit' || toolCall.name === 'edit_file' || toolCall.name === 'create_file') {
+          if (toolCall.name === 'git_commit' || toolCall.name === 'edit_file' || toolCall.name === 'undo_edit' || toolCall.name === 'create_file') {
             void refreshGitStatus();
           }
         } else if (ev.event === 'edit_applied') {

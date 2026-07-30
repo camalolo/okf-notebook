@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import matter from 'gray-matter';
 import simpleGit from 'simple-git';
-import { createPatch } from 'diff';
+import { createPatch, applyPatch } from 'diff';
 import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
   chatCompletionStream,
@@ -88,19 +88,33 @@ const GIT_LOG_TOOL: ToolDefinition = {
   },
 };
 
+// Per-file edit history for undo support. Keyed by absolute resolved path.
+const editHistory = new Map<string, { oldContent: string; newContent: string }[]>();
+
 const EDIT_FILE_TOOL: ToolDefinition = {
   type: 'function',
   function: {
     name: 'edit_file',
     description:
-      'Edit an existing file. Writes to disk immediately. Returns { applied: true, path, diff }.',
+      'Edit an existing file by applying a unified diff. The diff MUST follow standard unified diff format: ' +
+      'lines starting with " " (space) are context, "-" are removed lines, "+" are added lines, ' +
+      'and each hunk starts with a "@@ -start,count +start,count @@" header. ' +
+      'Include enough unchanged context lines (2-3) around each change so the diff applies unambiguously. ' +
+      'Always read the file first to get the exact current content. Writes to disk immediately. ' +
+      'Use undo_edit to revert. Returns { applied: true, path, diff } or { error } if the diff fails to apply.',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Relative path to the file to edit.' },
-        content: { type: 'string', description: 'The full new content for the file.' },
+        diff: {
+          type: 'string',
+          description:
+            'Unified diff to apply to the file. Example:\n' +
+            '--- a/example.md\n+++ b/example.md\n' +
+            '@@ -1,3 +1,3 @@\n line one\n-old line\n+new line\n line three',
+        },
       },
-      required: ['path', 'content'],
+      required: ['path', 'diff'],
     },
   },
 };
@@ -118,6 +132,24 @@ const CREATE_FILE_TOOL: ToolDefinition = {
         content: { type: 'string', description: 'The full content for the new file.' },
       },
       required: ['path', 'content'],
+    },
+  },
+};
+
+const UNDO_EDIT_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'undo_edit',
+    description:
+      'Undo the most recent edit_file operation on a file, restoring its previous content. ' +
+      'Only undoes edits made via edit_file in the current server session. ' +
+      'Returns { undone: true, path, diff } or { error } if no edit history exists.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative path to the file whose last edit should be undone.' },
+      },
+      required: ['path'],
     },
   },
 };
@@ -172,6 +204,7 @@ const READONLY_TOOLS: ToolDefinition[] = [
 const FULL_TOOLS: ToolDefinition[] = [
   ...READONLY_TOOLS,
   EDIT_FILE_TOOL,
+  UNDO_EDIT_TOOL,
   CREATE_FILE_TOOL,
   GIT_COMMIT_TOOL,
 ];
@@ -306,7 +339,7 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
 
     case 'edit_file': {
       const rel = String(args?.path ?? '');
-      const content = String(args?.content ?? '');
+      const diffInput = String(args?.diff ?? '');
       const resolved = resolveBundlePath(bundlePath, rel);
       let oldContent: string;
       try {
@@ -317,10 +350,53 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
         }
         throw err;
       }
-      const diff = makeDiff(rel, oldContent, content);
+      if (!diffInput.trim()) {
+        return { error: 'diff is required and must not be empty.' };
+      }
+      const newContent = applyPatch(oldContent, diffInput);
+      if (newContent === false) {
+        return {
+          error:
+            'The diff could not be applied — context lines do not match the current file content. ' +
+            'Read the file first and ensure your diff context (space-prefixed lines) matches the exact current content.',
+        };
+      }
+      // Record edit history for undo.
+      let history = editHistory.get(resolved);
+      if (!history) {
+        history = [];
+        editHistory.set(resolved, history);
+      }
+      history.push({ oldContent, newContent });
       // Write to disk immediately.
-      await fs.writeFile(resolved, content, 'utf8');
-      return { applied: true, path: rel, oldContent, newContent: content, diff };
+      await fs.writeFile(resolved, newContent, 'utf8');
+      const displayDiff = makeDiff(rel, oldContent, newContent);
+      return { applied: true, path: rel, oldContent, newContent, diff: displayDiff };
+    }
+
+    case 'undo_edit': {
+      const rel = String(args?.path ?? '');
+      const resolved = resolveBundlePath(bundlePath, rel);
+      const history = editHistory.get(resolved);
+      if (!history || history.length === 0) {
+        return { error: `No edit history for ${rel}. Nothing to undo.` };
+      }
+      const last = history.pop()!;
+      let currentContent: string;
+      try {
+        currentContent = await fs.readFile(resolved, 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrNoException).code === 'ENOENT') {
+          // File was deleted since the edit — recreate from history.
+          await fs.writeFile(resolved, last.oldContent, 'utf8');
+          const diff = makeDiff(rel, '', last.oldContent);
+          return { undone: true, path: rel, oldContent: '', newContent: last.oldContent, diff };
+        }
+        throw err;
+      }
+      await fs.writeFile(resolved, last.oldContent, 'utf8');
+      const diff = makeDiff(rel, currentContent, last.oldContent);
+      return { undone: true, path: rel, oldContent: currentContent, newContent: last.oldContent, diff };
     }
 
     case 'create_file': {
@@ -481,10 +557,10 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     // Sequential persistence — chains promises to avoid read-modify-write
     // races between concurrent appendEvent calls.
     let persistChain: Promise<void> = Promise.resolve();
-    const persist = (event: Parameters<typeof appendEvent>[2]) => {
+    const persist = (event: Parameters<typeof appendEvent>[3]) => {
       if (!chatId) return;
       persistChain = persistChain
-        .then(() => appendEvent(bundleId, chatId, event))
+        .then(() => appendEvent(bundleId, chatId, req.user!.email, event))
         .catch(() => { /* best-effort */ });
     };
 
@@ -586,7 +662,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
             // For edit_file / create_file, emit an edit_applied event
             // with the diff so the frontend can render a collapsible diff card.
-            if (toolName === 'edit_file') {
+            if (toolName === 'edit_file' || toolName === 'undo_edit') {
               const r = result as {
                 path?: string;
                 oldContent?: string;
