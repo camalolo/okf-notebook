@@ -54,6 +54,7 @@ export async function* streamChat(
   bundleId: string,
   messages: ChatMessage[],
   chatId?: string | null,
+  signal?: AbortSignal,
 ): AsyncGenerator<ChatSSEEvent> {
   const res = await fetch(
     `/api/notebook/bundles/${encodeURIComponent(bundleId)}/chat`,
@@ -61,6 +62,7 @@ export async function* streamChat(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages, chatId: chatId ?? undefined }),
+      signal,
     },
   );
 

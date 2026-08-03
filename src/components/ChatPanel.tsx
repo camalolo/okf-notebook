@@ -175,10 +175,28 @@ function formatDate(iso: string): string {
 }
 
 /**
+ * Merge consecutive assistant messages into one. The UI may split a single
+ * LLM turn into multiple assistant bubbles (text before/after tool calls),
+ * but the LLM API expects alternating user/assistant roles.
+ */
+export function mergeConsecutiveAssistants(messages: ChatMessage[]): ChatMessage[] {
+  const result: ChatMessage[] = [];
+  for (const m of messages) {
+    const last = result[result.length - 1];
+    if (last && last.role === 'assistant' && m.role === 'assistant') {
+      last.content += (last.content && m.content ? '\n' : '') + m.content;
+    } else {
+      result.push({ ...m });
+    }
+  }
+  return result;
+}
+
+/**
  * Reconstruct in-memory chat state (messages, past turns, proposed changes)
  * from a persisted `StoredEvent[]` timeline.
  */
-function restoreFromEvents(events: StoredEvent[]): {
+export function restoreFromEvents(events: StoredEvent[]): {
   messages: ChatMessage[];
   pastTurns: TurnEvent[][];
   proposedChanges: ProposedChange[];
@@ -295,6 +313,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     chatTitleRef.current = chatTitle;
   }, [chatTitle]);
 
+  /** AbortController for the in-flight chat stream (null when idle). */
+  const abortRef = useRef<AbortController | null>(null);
+  /** True when the user explicitly pressed STOP (vs. a network drop). */
+  const stoppedRef = useRef(false);
+
   // Auto-scroll to the bottom whenever new content arrives.
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -354,6 +377,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text || loading) return;
+    stoppedRef.current = false;
 
     // Auto-create a chat session on first message (if none active).
     if (chatIdRef.current === null) {
@@ -370,6 +394,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     // Capture the pre-turn state so we can compute the final snapshot for both
     // the UI and persistence without relying on state updated mid-stream.
     const history = [...messagesRef.current, userMsg];
+    // The UI may have consecutive assistant messages (split at tool-call
+    // boundaries). Merge them for the API call to keep alternating roles.
+    const apiHistory = mergeConsecutiveAssistants(history);
     const preTurnPastTurns = pastTurnsRef.current;
 
     setInput('');
@@ -378,13 +405,16 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     setLoading(true);
     setMessages(history);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     // Local tracking for this turn (mirrors the setTurnEvents/setProposedChanges
     // calls so we can compute the final snapshot accurately).
     const turnEventsLocal: TurnEvent[] = [];
     let acc = '';
 
     try {
-      for await (const ev of streamChat(bundleId, history, chatIdRef.current)) {
+      for await (const ev of streamChat(bundleId, apiHistory, chatIdRef.current, controller.signal)) {
         const data = ev.data;
 
         if (ev.event === 'content') {
@@ -392,6 +422,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           if (typeof obj.text === 'string') {
             acc += obj.text;
             appendContent(obj.text);
+            // Also track in local for finalization ordering (preserves
+            // the correct content-to-tool interleaving).
+            const last = turnEventsLocal[turnEventsLocal.length - 1];
+            if (last && last.kind === 'content') {
+              turnEventsLocal[turnEventsLocal.length - 1] = { kind: 'content', text: last.text + obj.text };
+            } else {
+              turnEventsLocal.push({ kind: 'content', text: obj.text });
+            }
           }
         } else if (ev.event === 'tool_call') {
           const obj = data as Partial<ToolCallInfo>;
@@ -453,54 +491,106 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         }
       }
     } catch (err) {
-      // Attempt to recover by polling the server. The server keeps running the
-      // agentic loop after the client disconnects, persisting each event. We poll
-      // until the turn completes (assistant message appears after our user msg),
-      // then rebuild state from the server timeline.
-      const id = chatIdRef.current;
-      if (id) {
-        setReconnecting(true);
-        let recovered = false;
-        for (let attempt = 0; attempt < 15; attempt++) {
-          await new Promise((r) => setTimeout(r, 2000));
+      // If the user pressed STOP, do a one-shot sync with the server to
+      // pick up any tool results or content that were persisted after we
+      // aborted the SSE stream. The server breaks out of its loop quickly
+      // but may have completed in-flight tool calls.
+      if (stoppedRef.current) {
+        const id = chatIdRef.current;
+        if (id) {
+          // Brief delay to let the server finish persisting.
+          await new Promise((r) => setTimeout(r, 1500));
           try {
             const session = await loadChat(bundleId, id);
-            if (isTurnComplete(session.events, text)) {
-              const restored = restoreFromEvents(session.events);
-              setMessages(restored.messages);
-              setPastTurns(restored.pastTurns);
-              setProposedChanges(restored.proposedChanges);
-              setTurnEvents([]);
-              setLoading(false);
-              setReconnecting(false);
-              void refreshChatList();
-              void refreshGitStatus();
-              recovered = true;
-              break;
-            }
+            const restored = restoreFromEvents(session.events);
+            setMessages(restored.messages);
+            setPastTurns(restored.pastTurns);
+            setProposedChanges(restored.proposedChanges);
+            setTurnEvents([]);
+            setLoading(false);
+            abortRef.current = null;
+            void refreshChatList();
+            void refreshGitStatus();
+            return;
           } catch {
-            // keep polling
+            // Sync failed — fall through to client-side finalization below.
           }
         }
-        setReconnecting(false);
-        if (recovered) return;
+        // Fall through to finalization below.
+      } else {
+        // Attempt to recover by polling the server. The server keeps running the
+        // agentic loop after the client disconnects, persisting each event. We poll
+        // until the turn completes (assistant message appears after our user msg),
+        // then rebuild state from the server timeline.
+        const id = chatIdRef.current;
+        if (id) {
+          setReconnecting(true);
+          let recovered = false;
+          for (let attempt = 0; attempt < 15; attempt++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            try {
+              const session = await loadChat(bundleId, id);
+              if (isTurnComplete(session.events, text)) {
+                const restored = restoreFromEvents(session.events);
+                setMessages(restored.messages);
+                setPastTurns(restored.pastTurns);
+                setProposedChanges(restored.proposedChanges);
+                setTurnEvents([]);
+                setLoading(false);
+                setReconnecting(false);
+                void refreshChatList();
+                void refreshGitStatus();
+                recovered = true;
+                break;
+              }
+            } catch {
+              // keep polling
+            }
+          }
+          setReconnecting(false);
+          if (recovered) return;
+        }
+        // Reconnection failed — show the error
+        const chatError = err instanceof Error ? err.message : 'Chat request failed';
+        const errEvent: TurnEvent = { kind: 'error', text: chatError };
+        turnEventsLocal.push(errEvent);
+        setTurnEvents((prev) => [...prev, errEvent]);
       }
-      // Reconnection failed — show the error
-      const chatError = err instanceof Error ? err.message : 'Chat request failed';
-      const errEvent: TurnEvent = { kind: 'error', text: chatError };
-      turnEventsLocal.push(errEvent);
-      setTurnEvents((prev) => [...prev, errEvent]);
     }
 
-    // Compute the final snapshot from the captured pre-turn state + this turn.
-    const assistantMsg: ChatMessage | null = acc.trim()
-      ? { role: 'assistant', content: acc }
-      : null;
-    const finalMessages = assistantMsg ? [...history, assistantMsg] : history;
-    const finalPastTurns =
-      turnEventsLocal.length > 0
-        ? [...preTurnPastTurns, turnEventsLocal]
-        : preTurnPastTurns;
+    abortRef.current = null;
+
+    // Split turnEventsLocal into segments at content/non-content boundaries.
+    // Each content segment becomes an assistant message; non-content events
+    // (tool calls, proposed changes, errors) become the pastTurns entry for
+    // the FOLLOWING assistant message. This preserves the correct visual
+    // ordering (text before tools, more text after, etc.).
+    const segMessages: ChatMessage[] = [];
+    const segTurns: TurnEvent[][] = [];
+    let pendingEvents: TurnEvent[] = [];
+
+    for (const ev of turnEventsLocal) {
+      if (ev.kind === 'content') {
+        // Content arrives — flush pending tools as the pastTurns for this
+        // content's assistant message.
+        segMessages.push({ role: 'assistant', content: ev.text });
+        segTurns.push(pendingEvents);
+        pendingEvents = [];
+      } else {
+        pendingEvents.push(ev);
+      }
+    }
+
+    // Handle trailing tools with no content after them — anchor with an
+    // empty-content assistant message (the rendering skips empty bubbles).
+    if (pendingEvents.length > 0) {
+      segMessages.push({ role: 'assistant', content: '' });
+      segTurns.push(pendingEvents);
+    }
+
+    // If there were no events at all, keep history unchanged.
+    const finalMessages = segMessages.length > 0 ? [...history, ...segMessages] : history;
+    const finalPastTurns = segMessages.length > 0 ? [...preTurnPastTurns, ...segTurns] : preTurnPastTurns;
 
     // Commit to state.
     setMessages(finalMessages);
@@ -511,6 +601,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     // Refresh chat list (server is now source of truth for persistence + title).
     void refreshChatList();
   }, [bundleId, input, loading, appendContent, onFilesChanged, refreshGitStatus, refreshChatList]);
+
+  /** Stop the in-flight chat stream immediately (user pressed STOP). */
+  const handleStop = useCallback(() => {
+    stoppedRef.current = true;
+    abortRef.current?.abort();
+  }, []);
 
   /** Start a fresh, empty chat (clears state; a session is created on first send). */
   const handleNewChat = useCallback(() => {
@@ -757,6 +853,15 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             return (
               <Fragment key={`m${i}`}>
                 {turnEventsForMsg.map((ev, j) => {
+                  if (ev.kind === 'content') {
+                    // Render inline content (between tool calls) as a bubble.
+                    return (
+                      <div className="chat-message chat-message-assistant" key={`pc${i}-${j}`}>
+                        <span className="chat-author">GLM</span>
+                        <div className="chat-bubble"><ChatMarkdown content={ev.text} onNavigate={onNavigate} /></div>
+                      </div>
+                    );
+                  }
                   if (ev.kind === 'tool') {
                     const label = formatToolCall(ev.toolCall);
                     return (
@@ -787,12 +892,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                   }
                   return null;
                 })}
-                <div
-                  className={`chat-message chat-message-${m.role === 'user' ? 'user' : 'assistant'}`}
-                >
-                  {m.role !== 'user' && <span className="chat-author">GLM</span>}
-                  <div className="chat-bubble"><ChatMarkdown content={m.content} onNavigate={onNavigate} /></div>
-                </div>
+                {(m.role === 'user' || m.content.trim()) && (
+                  <div
+                    className={`chat-message chat-message-${m.role === 'user' ? 'user' : 'assistant'}`}
+                  >
+                    {m.role !== 'user' && <span className="chat-author">GLM</span>}
+                    <div className="chat-bubble"><ChatMarkdown content={m.content} onNavigate={onNavigate} /></div>
+                  </div>
+                )}
               </Fragment>
             );
           });
@@ -881,25 +988,35 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           }}
           onKeyDown={handleKeyDown}
         />
-        <button
-          type="button"
-          className="btn btn-primary chat-send-btn"
-          onClick={() => void handleSend()}
-          disabled={loading || !input.trim()}
-          aria-label="Send message"
-        >
-          {loading ? (
-            <span className="spinner spinner-sm" />
-          ) : (
+        {loading ? (
+          <button
+            type="button"
+            className="btn btn-danger chat-send-btn"
+            onClick={handleStop}
+            aria-label="Stop generation"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
+            </svg>
+            <span>Stop</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-primary chat-send-btn"
+            onClick={() => void handleSend()}
+            disabled={!input.trim()}
+            aria-label="Send message"
+          >
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
               <path
                 fill="currentColor"
                 d="M3.4 20.4 21 12 3.4 3.6 3.39 10l12 2-12 2z"
               />
             </svg>
-          )}
-          <span>Send</span>
-        </button>
+            <span>Send</span>
+          </button>
+        )}
       </div>
     </div>
   );

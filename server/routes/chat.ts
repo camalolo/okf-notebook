@@ -634,10 +634,14 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     });
     res.flushHeaders?.();
 
-    // Track client connection state so the loop can keep running (and persisting)
-    // even after the client disconnects. SSE writes are silently skipped.
+    // Track client connection state so the loop can stop promptly when the
+    // client disconnects (including when the user presses STOP in the UI).
     let clientConnected = true;
-    req.on('close', () => { clientConnected = false; });
+    const abortController = new AbortController();
+    req.on('close', () => {
+      clientConnected = false;
+      abortController.abort();
+    });
 
     const rawEmit = makeEmitter(res);
     const emit: SSEEmit = (event, data) => {
@@ -667,6 +671,15 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
     try {
       for (;;) {
+        // If the client disconnected (STOP button or network drop), stop
+        // processing — persist whatever assistant content we accumulated.
+        if (!clientConnected) {
+          if (turnContent.trim()) {
+            persist({ kind: 'assistant', content: turnContent });
+          }
+          return;
+        }
+
         // Stream content deltas to the client as they arrive.
         const response = await chatCompletionStream(
           callMessages,
@@ -675,9 +688,17 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             turnContent += delta;
             emit('content', { text: delta });
           },
+          abortController.signal,
         );
 
         if (response.tool_calls && response.tool_calls.length > 0) {
+          // Persist any content accumulated before the tool calls so the
+          // timeline preserves the correct text-to-tool ordering.
+          if (turnContent.trim()) {
+            persist({ kind: 'assistant', content: turnContent });
+          }
+          turnContent = '';
+
           // Append the assistant turn carrying all tool calls (once).
           callMessages.push({
             role: 'assistant',
@@ -687,6 +708,8 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
           // Execute each tool call and feed results back.
           for (const tc of response.tool_calls) {
+            // Stop executing remaining tools if the client disconnected.
+            if (!clientConnected) break;
             const toolName = tc.function.name;
             let parsedArgs: unknown = {};
             try {
@@ -772,6 +795,13 @@ router.post('/:bundleId/chat', async (req, res, next) => {
               content: JSON.stringify(result),
             });
           }
+          // If the client disconnected during tool execution, stop here.
+          if (!clientConnected) {
+            if (turnContent.trim()) {
+              persist({ kind: 'assistant', content: turnContent });
+            }
+            return;
+          }
           // Continue the loop — the model may issue more calls or answer.
           continue;
         }
@@ -784,6 +814,15 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         return;
       }
     } catch (err) {
+      // If the abort signal fired (user pressed STOP), persist what we have
+      // without surfacing an error.
+      if (abortController.signal.aborted) {
+        if (turnContent.trim()) {
+          persist({ kind: 'assistant', content: turnContent });
+        }
+        if (clientConnected) res.end();
+        return;
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       // Persist error + whatever content was accumulated.
       persist({ kind: 'error', content: errMsg });

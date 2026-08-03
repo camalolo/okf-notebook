@@ -185,6 +185,7 @@ export async function chatCompletionStream(
   messages: ChatMessage[],
   tools: ToolDefinition[] | undefined,
   onDelta: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<ChatCompletionResult> {
   const token = await getToken();
 
@@ -206,6 +207,7 @@ export async function chatCompletionStream(
       ...COMMON_HEADERS,
     },
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!res.ok) {
