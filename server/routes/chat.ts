@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import matter from 'gray-matter';
 import simpleGit from 'simple-git';
-import { createPatch, applyPatch } from 'diff';
+import { createPatch } from 'diff';
 import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
   chatCompletionStream,
@@ -96,25 +96,26 @@ const EDIT_FILE_TOOL: ToolDefinition = {
   function: {
     name: 'edit_file',
     description:
-      'Edit an existing file by applying a unified diff. The diff MUST follow standard unified diff format: ' +
-      'lines starting with " " (space) are context, "-" are removed lines, "+" are added lines, ' +
-      'and each hunk starts with a "@@ -start,count +start,count @@" header. ' +
-      'Include enough unchanged context lines (2-3) around each change so the diff applies unambiguously. ' +
-      'Always read the file first to get the exact current content. Writes to disk immediately. ' +
-      'Use undo_edit to revert. Returns { applied: true, path, diff } or { error } if the diff fails to apply.',
+      'Edit an existing file using search-and-replace. Provide old_string (the exact text to find) ' +
+      'and new_string (the replacement). old_string must appear exactly once in the file — ' +
+      'include enough surrounding context lines to make it unique. Matching is whitespace-tolerant ' +
+      '(trailing spaces and tab/space differences are ignored). Always read the file first to get ' +
+      'the exact current content. Writes to disk immediately. Use undo_edit to revert. ' +
+      'Returns { applied: true, path, diff } or { error }.',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Relative path to the file to edit.' },
-        diff: {
+        old_string: {
           type: 'string',
-          description:
-            'Unified diff to apply to the file. Example:\n' +
-            '--- a/example.md\n+++ b/example.md\n' +
-            '@@ -1,3 +1,3 @@\n line one\n-old line\n+new line\n line three',
+          description: 'The exact text to find in the file. Must be unique — include context lines if needed.',
+        },
+        new_string: {
+          type: 'string',
+          description: 'The replacement text.',
         },
       },
-      required: ['path', 'diff'],
+      required: ['path', 'old_string', 'new_string'],
     },
   },
 };
@@ -244,6 +245,58 @@ function makeDiff(relPath: string, oldContent: string, newContent: string): stri
   }
 }
 
+/**
+ * Whitespace-tolerant search-and-replace.
+ *
+ * Tries exact character match first. If that fails, falls back to line-based
+ * matching where each line is compared with relaxed whitespace: leading
+ * whitespace runs (tabs/spaces) are collapsed to a single space and trailing
+ * whitespace is stripped.
+ *
+ * Returns the full new content, or null if oldStr was not found, matched zero
+ * times, or matched more than once (ambiguous).
+ */
+function searchReplace(content: string, oldStr: string, newStr: string): string | null {
+  // Fast path: exact match.
+  const exactIdx = content.indexOf(oldStr);
+  if (exactIdx !== -1) {
+    if (content.indexOf(oldStr, exactIdx + 1) !== -1) return null; // ambiguous
+    return content.slice(0, exactIdx) + newStr + content.slice(exactIdx + oldStr.length);
+  }
+
+  // Relaxed path: line-based matching.
+  const normLine = (l: string): string => {
+    const m = l.match(/^([ \t]*)(.*)$/);
+    const indent = m![1].replace(/[ \t]+/g, ' ');
+    return indent + m![2].replace(/[ \t]+$/g, '');
+  };
+
+  const contentLines = content.replace(/\r\n/g, '\n').split('\n');
+  const oldLines = oldStr.replace(/\r\n/g, '\n').split('\n');
+  const normOld = oldLines.map(normLine);
+
+  let matchCount = 0;
+  let matchStart = -1;
+
+  for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
+    let ok = true;
+    for (let j = 0; j < oldLines.length; j++) {
+      if (normLine(contentLines[i + j]) !== normOld[j]) { ok = false; break; }
+    }
+    if (ok) {
+      matchCount++;
+      matchStart = i;
+      if (matchCount > 1) return null; // ambiguous
+    }
+  }
+
+  if (matchCount === 0) return null;
+
+  const before = contentLines.slice(0, matchStart);
+  const after = contentLines.slice(matchStart + oldLines.length);
+  return [...before, newStr, ...after].join('\n');
+}
+
 interface ToolContext {
   bundle: BundleConfig;
   user?: Express.User;
@@ -339,7 +392,8 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
 
     case 'edit_file': {
       const rel = String(args?.path ?? '');
-      const diffInput = String(args?.diff ?? '');
+      const oldStr = String(args?.old_string ?? '');
+      const newStr = String(args?.new_string ?? '');
       const resolved = resolveBundlePath(bundlePath, rel);
       let oldContent: string;
       try {
@@ -350,15 +404,15 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
         }
         throw err;
       }
-      if (!diffInput.trim()) {
-        return { error: 'diff is required and must not be empty.' };
+      if (!oldStr) {
+        return { error: 'old_string is required and must not be empty.' };
       }
-      const newContent = applyPatch(oldContent, diffInput);
-      if (newContent === false) {
+      const newContent = searchReplace(oldContent, oldStr, newStr);
+      if (newContent === null) {
         return {
           error:
-            'The diff could not be applied — context lines do not match the current file content. ' +
-            'Read the file first and ensure your diff context (space-prefixed lines) matches the exact current content.',
+            'old_string was not found in the file (or matched more than once). ' +
+            'Read the file first and ensure old_string exactly matches a unique snippet of the current content.',
         };
       }
       // Record edit history for undo.
