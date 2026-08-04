@@ -737,6 +737,21 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     return () => window.clearInterval(id);
   }, [refreshGitStatus]);
 
+  /**
+   * Jump to bottom on End key (anywhere in the chat panel) and resume
+   * auto-scroll. Home jumps to the top.
+   */
+  const handlePanelKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'End' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const el = scrollRef.current;
+      if (el) {
+        e.preventDefault();
+        el.scrollTop = el.scrollHeight;
+        setStickToBottom(true);
+      }
+    }
+  };
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -771,6 +786,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       className="chat-panel"
       role="log"
       aria-label={`Chat about ${bundleName ?? 'this bundle'}`}
+      onKeyDown={handlePanelKeyDown}
     >
       <header className="chat-header">
         <div className="chat-header-left">
