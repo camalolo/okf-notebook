@@ -742,13 +742,26 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
    * auto-scroll. Home jumps to the top.
    */
   const handlePanelKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'End' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      const el = scrollRef.current;
-      if (el) {
-        e.preventDefault();
-        el.scrollTop = el.scrollHeight;
-        setStickToBottom(true);
-      }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (e.key === 'End') {
+      e.preventDefault();
+      el.scrollTop = el.scrollHeight;
+      setStickToBottom(true);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      el.scrollTop = 0;
+      setStickToBottom(false);
+    } else if (e.key === 'PageUp') {
+      e.preventDefault();
+      el.scrollTop -= el.clientHeight * 0.85;
+      setStickToBottom(false);
+    } else if (e.key === 'PageDown') {
+      e.preventDefault();
+      el.scrollTop += el.clientHeight * 0.85;
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+      setStickToBottom(atBottom);
     }
   };
 
