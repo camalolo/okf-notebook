@@ -18,6 +18,14 @@ export function loginWithGoogle(): void {
   window.location.href = `${AUTH_BASE}/google`;
 }
 
+/**
+ * Re-authenticate with Google, forcing consent so a fresh refresh_token is
+ * issued. Used when Workspace (MCP) tokens have expired.
+ */
+export function reconnectWithGoogle(): void {
+  window.location.href = `${AUTH_BASE}/google?reconnect=1`;
+}
+
 export async function logout(): Promise<void> {
   await fetch(`${AUTH_BASE}/logout`, {
     method: 'POST',

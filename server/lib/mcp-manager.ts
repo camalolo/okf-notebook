@@ -39,12 +39,14 @@ class McpManager {
   private clients = new Map<string, Client>();
   private toolMap = new Map<string, ToolMapping>();
   private toolDefs: ToolDefinition[] = [];
+  private configs: McpServerConfig[] = [];
   private started = false;
 
   /** Start all configured MCP servers and discover their tools. */
   async start(configs: McpServerConfig[]): Promise<void> {
     if (this.started) return;
     this.started = true;
+    this.configs = configs;
 
     await Promise.allSettled(
       configs.map((cfg) =>
@@ -158,6 +160,35 @@ class McpManager {
       .filter((c) => typeof c === 'object' && c !== null && c.type === 'text')
       .map((c) => (c as { text: string }).text)
       .join('\n');
+  }
+
+  /** Restart a single MCP server by name (e.g. after updating its auth tokens). */
+  async restartServer(name: string): Promise<void> {
+    const config = this.configs.find((c) => c.name === name);
+    if (!config) throw new Error(`Unknown MCP server: ${name}`);
+
+    // Close old client
+    const oldClient = this.clients.get(name);
+    if (oldClient) {
+      await oldClient.close().catch(() => {});
+      this.clients.delete(name);
+    }
+
+    // Remove tool mappings for this server
+    const toolsToRemove: string[] = [];
+    for (const [toolName, mapping] of this.toolMap) {
+      if (mapping.serverName === name) {
+        toolsToRemove.push(toolName);
+        this.toolMap.delete(toolName);
+      }
+    }
+    // Remove tool definitions belonging to this server
+    this.toolDefs = this.toolDefs.filter(
+      (td) => !toolsToRemove.includes(td.function.name),
+    );
+
+    // Restart
+    await this.startServer(config);
   }
 
   /** Gracefully shut down all MCP child processes. */

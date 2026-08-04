@@ -5,6 +5,10 @@ export interface User {
   name: string;
   picture?: string;
   role: Role;
+  workspace?: {
+    connected: boolean;
+    expiresAt?: number;
+  };
 }
 
 export interface BundleConfig {

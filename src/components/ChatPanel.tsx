@@ -20,6 +20,7 @@ import {
   loadChat,
 } from '../services/api.ts';
 import { ProposedChangeCard } from './ProposedChangeCard.tsx';
+import { reconnectWithGoogle } from '../services/auth.ts';
 
 interface ChatPanelProps {
   bundleId: string;
@@ -78,6 +79,16 @@ function ChatMarkdown({ content, onNavigate }: { content: string; onNavigate?: (
 
 function trunc(s: string, max = 60): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+/** Detect the sentinel error that signals missing Google Workspace auth. */
+function isWorkspaceAuthRequired(tc: ToolCallInfo): boolean {
+  return (
+    tc.name.startsWith('gw_') &&
+    tc.result != null &&
+    typeof tc.result === 'object' &&
+    (tc.result as Record<string, unknown>).error === '__WORKSPACE_AUTH_REQUIRED__'
+  );
 }
 
 function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
@@ -284,6 +295,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   /** Whether the history dropdown is open. */
   const [showHistory, setShowHistory] = useState(false);
 
+  /** Set when a gw_ tool returns the auth sentinel — triggers redirect to login. */
+  const [workspaceExpired, setWorkspaceExpired] = useState(false);
+
   /** Count of uncommitted changes from git status (0 when clean/unknown). */
   const [gitInsertions, setGitInsertions] = useState(0);
   const [gitDeletions, setGitDeletions] = useState(0);
@@ -317,6 +331,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   const abortRef = useRef<AbortController | null>(null);
   /** True when the user explicitly pressed STOP (vs. a network drop). */
   const stoppedRef = useRef(false);
+
+  // When a gw_ tool reports expired auth, redirect to Google login with
+  // ?reconnect=1 to obtain a fresh refresh token.
+  useEffect(() => {
+    if (workspaceExpired) reconnectWithGoogle();
+  }, [workspaceExpired]);
 
   // Smart auto-scroll: only follow new content if the user is already at
   // (or near) the bottom. Scrolling up pauses auto-follow; scrolling back to
@@ -445,6 +465,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           const te: TurnEvent = { kind: 'tool', toolCall };
           setTurnEvents((prev) => [...prev, te]);
           turnEventsLocal.push(te);
+
+          // Detect expired Workspace auth — trigger redirect to login.
+          if (isWorkspaceAuthRequired(toolCall)) {
+            setWorkspaceExpired(true);
+          }
 
           // Refresh git badge after commits and file edits.
           if (toolCall.name === 'git_commit' || toolCall.name === 'edit_file' || toolCall.name === 'undo_edit' || toolCall.name === 'create_file') {
@@ -870,6 +895,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                     );
                   }
                   if (ev.kind === 'tool') {
+                    if (isWorkspaceAuthRequired(ev.toolCall)) {
+                      return (
+                        <div className="chat-error-event" key={`pt${i}-${j}`}>
+                          ⚠️ Google Workspace session expired — redirecting to login…
+                        </div>
+                      );
+                    }
                     const label = formatToolCall(ev.toolCall);
                     return (
                       <div className="chat-tool-call" key={`pt${i}-${j}`}>
@@ -915,6 +947,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         {/* Current turn — events rendered in arrival order. */}
         {turnEvents.map((ev, i) => {
           if (ev.kind === 'tool') {
+            if (isWorkspaceAuthRequired(ev.toolCall)) {
+              return (
+                <div className="chat-error-event" key={`t${i}`}>
+                  ⚠️ Google Workspace session expired — redirecting to login…
+                </div>
+              );
+            }
             const label = formatToolCall(ev.toolCall);
             return (
               <div className="chat-tool-call" key={`t${i}`}>

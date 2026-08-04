@@ -10,6 +10,7 @@ import {
 } from '../lib/llm.js';
 import { webSearch } from '../lib/web-search.js';
 import { mcpManager } from '../lib/mcp-manager.js';
+import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
 import { appendEvent } from '../chats.js';
 import type {
   ToolDefinition,
@@ -721,7 +722,19 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             let result: unknown;
             try {
               if (mcpManager.hasTool(toolName)) {
-                result = await mcpManager.callTool(toolName, parsedArgs);
+                // Pre-check: if this is a Google Workspace tool, validate auth
+                // proactively (refreshing if needed). If the token can't be
+                // refreshed (e.g. 7-day test expiry), short-circuit so the MCP
+                // doesn't hang trying its own browser-based OAuth flow.
+                if (toolName.startsWith('gw_')) {
+                  const ok = await validateWorkspaceAuth();
+                  if (!ok) {
+                    result = { error: '__WORKSPACE_AUTH_REQUIRED__' };
+                  }
+                }
+                if (result === undefined) {
+                  result = await mcpManager.callTool(toolName, parsedArgs);
+                }
               } else {
                 result = await executeTool(toolName, parsedArgs, ctx);
               }

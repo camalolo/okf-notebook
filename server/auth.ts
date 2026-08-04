@@ -3,6 +3,8 @@ import passport from 'passport';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, USERS } from './config.js';
 import type { User } from './config.js';
+import { writeWorkspaceTokens } from './lib/workspace-auth.js';
+import { mcpManager } from './lib/mcp-manager.js';
 
 /**
  * Initialize Passport on the Express app: session serialization + the Google
@@ -30,8 +32,23 @@ export function setupPassport(app: express.Express): void {
           clientSecret: GOOGLE_CLIENT_SECRET,
           // Overridden per-request via passport.authenticate({ callbackURL }).
           callbackURL: 'https://placeholder.example.com/api/notebook/auth/google/callback',
+          passReqToCallback: true,
         },
-        (accessToken, refreshToken, profile, done) => {
+        async (req, accessToken, refreshToken, profile, done) => {
+          // Every login requests workspace scopes + offline access. Google
+          // only returns a refresh_token on first authorization (or when
+          // prompt:consent is used via ?reconnect=1). When present, write
+          // the tokens to the MCP's token file and restart the server.
+          if (refreshToken) {
+            try {
+              await writeWorkspaceTokens(accessToken, refreshToken);
+              mcpManager
+                .restartServer('google-workspace')
+                .catch((e) => console.error('[mcp] Failed to restart after token update:', e));
+            } catch (e) {
+              console.error('[workspace-auth] Failed to write tokens:', e);
+            }
+          }
           const email = profile.emails?.[0]?.value;
           if (!email) {
             // No email in profile — cannot map to allowlist.
