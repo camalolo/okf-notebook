@@ -318,13 +318,17 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   /** True when the user explicitly pressed STOP (vs. a network drop). */
   const stoppedRef = useRef(false);
 
-  // Auto-scroll to the bottom whenever new content arrives.
+  // Smart auto-scroll: only follow new content if the user is already at
+  // (or near) the bottom. Scrolling up pauses auto-follow; scrolling back to
+  // the bottom resumes it.
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [stickToBottom, setStickToBottom] = useState(true);
   useEffect(() => {
+    if (!stickToBottom) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, turnEvents, pastTurns, proposedChanges, loading]);
+  }, [messages, turnEvents, pastTurns, proposedChanges, loading, stickToBottom]);
 
   /**
    * Refresh the chat list from the server and sync the active chat title.
@@ -827,7 +831,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         )}
       </header>
 
-      <div className="chat-messages" ref={scrollRef}>
+      <div className="chat-messages" ref={scrollRef} onScroll={(e) => {
+        const el = e.currentTarget;
+        setStickToBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 50);
+      }}>
         {isEmpty && (
           <div className="chat-empty">
             <div className="chat-empty-icon" aria-hidden="true">💬</div>
