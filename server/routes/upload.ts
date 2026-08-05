@@ -182,7 +182,7 @@ router.post('/:bundleId/upload', requireFull, upload.single('file'), async (req,
       return res.status(400).json({ error: 'No file provided. Use multipart/form-data with a "file" field.' });
     }
 
-    const bundle = await getBundle(req.params.bundleId);
+    const bundle = await getBundle(req.params.bundleId as string);
     if (!bundle) {
       return res.status(404).json({ error: 'Bundle not found' });
     }

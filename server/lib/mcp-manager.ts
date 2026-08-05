@@ -70,7 +70,7 @@ class McpManager {
     const transport = new StdioClientTransport({
       command: config.command,
       args: config.args,
-      ...(config.env ? { env: { ...process.env, ...config.env } } : {}),
+      ...(config.env ? { env: { ...process.env, ...config.env } as Record<string, string> } : {}),
     });
 
     const client = new Client(

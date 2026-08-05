@@ -2,7 +2,9 @@ import { Router } from 'express';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import matter from 'gray-matter';
-import simpleGit from 'simple-git';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const simpleGit = require('simple-git') as (cwd: string) => import('simple-git').SimpleGit;
 import { createPatch } from 'diff';
 import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
@@ -439,7 +441,7 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
       try {
         currentContent = await fs.readFile(resolved, 'utf8');
       } catch (err) {
-        if ((err as NodeJS.ErrNoException).code === 'ENOENT') {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
           // File was deleted since the edit — recreate from history.
           await fs.writeFile(resolved, last.oldContent, 'utf8');
           const diff = makeDiff(rel, '', last.oldContent);

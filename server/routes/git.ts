@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import simpleGit from 'simple-git';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const simpleGit = require('simple-git') as (cwd: string) => import('simple-git').SimpleGit;
 import { getBundle } from '../bundles.js';
 import { requireFull } from '../auth.js';
 

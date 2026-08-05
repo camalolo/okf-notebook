@@ -8,10 +8,7 @@
  * Unsupported types (binaries) get a metadata stub.
  */
 import path from 'node:path';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
-const TurndownService = require('turndown') as typeof import('turndown')['default'];
+import TurndownService from 'turndown';
 
 export interface ExtractionResult {
   /** Extracted markdown text (empty string for unsupported types). */
@@ -21,6 +18,7 @@ export interface ExtractionResult {
   /** Metadata about the extraction. */
   meta: {
     pages?: number;
+    rows?: number;
     chars: number;
     /** True when no text could be extracted (binary/unknown type). */
     unsupported?: boolean;
