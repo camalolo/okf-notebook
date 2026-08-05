@@ -363,9 +363,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   const [gitInsertions, setGitInsertions] = useState(0);
   const [gitDeletions, setGitDeletions] = useState(0);
 
-  /** Pending file attachments (awaiting user to send message). */
-  const [attachments, setAttachments] = useState<UploadResult[]>([]);
-  /** True while a file is being uploaded/extracted. */
+  /** Pending files selected but not yet uploaded (uploaded on Send). */
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  /** True while files are being uploaded/extracted during send. */
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Drag-over visual state for the input area. */
@@ -488,28 +488,15 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     }
   }, [bundleId]);
 
-  /** Handle selected files from picker or drag-drop: upload each and collect results. */
-  const handleFiles = useCallback(async (fileList: FileList | null) => {
+  /** Queue selected files for upload on next Send (no upload yet). */
+  const handleFiles = useCallback((fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
-    setUploading(true);
-    try {
-      for (const file of Array.from(fileList)) {
-        const result = await uploadFile(bundleId, file);
-        setAttachments((prev) => [...prev, result]);
-        onFilesChanged?.();
-      }
-    } catch (err) {
-      console.error('[upload] Failed:', err);
-      // Surface the error in the input as a brief note.
-      setInput((prev) => prev + (prev ? '\n' : '') + `[Upload failed: ${err instanceof Error ? err.message : 'unknown error'}]`);
-    } finally {
-      setUploading(false);
-    }
-  }, [bundleId, onFilesChanged]);
+    setPendingFiles((prev) => [...prev, ...Array.from(fileList)]);
+  }, []);
 
   const handleSend = useCallback(async () => {
     const rawText = input.trim();
-    if ((!rawText && attachments.length === 0) || loading) return;
+    if ((!rawText && pendingFiles.length === 0) || loading || uploading) return;
     stoppedRef.current = false;
 
     // Auto-create a chat session on first message (if none active).
@@ -523,11 +510,38 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       }
     }
 
-    // Build attachment note + final message text.
-    const attachmentNote = attachments.length > 0
-      ? attachments.map((a) => `📎 Attached: ${a.sourceName} → ${a.mdPath}${a.duplicate ? ' (duplicate)' : ''}`).join('\n') + '\n\n'
-      : '';
-    const text = attachmentNote + rawText;
+    // Upload pending files (all in parallel) and build the attachment note.
+    let attachmentNote = '';
+    if (pendingFiles.length > 0) {
+      setUploading(true);
+      const results = await Promise.allSettled(
+        pendingFiles.map((f) => uploadFile(bundleId, f)),
+      );
+      setUploading(false);
+
+      const ok = results
+        .filter((r): r is PromiseFulfilledResult<UploadResult> => r.status === 'fulfilled')
+        .map((r) => r.value);
+      const failures = results.filter((r) => r.status === 'rejected');
+
+      if (ok.length > 0) {
+        attachmentNote = ok
+          .map((a) => `📎 Attached: ${a.sourceName} → ${a.mdPath}${a.duplicate ? ' (duplicate)' : ''}`)
+          .join('\n') + '\n\n';
+      }
+      if (failures.length > 0) {
+        const failedNames = pendingFiles
+          .filter((_, i) => results[i].status === 'rejected')
+          .map((f) => f.name)
+          .join(', ');
+        attachmentNote += `[Upload failed for: ${failedNames}]\n\n`;
+      }
+      onFilesChanged?.();
+    }
+
+    // Build final message text.
+    const userText = rawText || (attachmentNote ? 'Please refer to this contents:' : '');
+    const text = attachmentNote + userText;
 
     const userMsg: ChatMessage = { role: 'user', content: text };
     // Capture the pre-turn state so we can compute the final snapshot for both
@@ -543,7 +557,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     const preTurnPastTurns = pastTurnsRef.current;
 
     setInput('');
-    setAttachments([]);
+    setPendingFiles([]);
     if (inputRef.current) inputRef.current.style.height = 'auto';
     setTurnEvents([]);
     setLoading(true);
@@ -757,7 +771,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
     // Refresh chat list (server is now source of truth for persistence + title).
     void refreshChatList();
-  }, [bundleId, input, loading, attachments, appendContent, onFilesChanged, refreshGitStatus, refreshChatList]);
+  }, [bundleId, input, loading, uploading, pendingFiles, appendContent, onFilesChanged, refreshGitStatus, refreshChatList]);
 
   /** Stop the in-flight chat stream immediately (user pressed STOP). */
   const handleStop = useCallback(() => {
@@ -1302,17 +1316,16 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           }
         }}
       >
-        {(attachments.length > 0 || uploading) && (
+        {(pendingFiles.length > 0 || uploading) && (
           <div className="chat-attachments">
-            {attachments.map((att, i) => (
+            {pendingFiles.map((file, i) => (
               <span key={i} className="chat-attachment-chip">
-                📎 {att.sourceName}
-                {att.duplicate && <span className="chat-attachment-dup"> dup</span>}
+                📎 {file.name}
                 <button
                   type="button"
                   className="chat-attachment-remove"
-                  onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
-                  aria-label={`Remove ${att.sourceName}`}
+                  onClick={() => setPendingFiles((prev) => prev.filter((_, idx) => idx !== i))}
+                  aria-label={`Remove ${file.name}`}
                 >
                   ×
                 </button>
@@ -1354,7 +1367,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           ref={inputRef}
           className="chat-input"
           value={input}
-          placeholder={attachments.length > 0 ? 'Add a note about the attachment (optional)…' : 'Message GLM…  (Enter to send, Shift+Enter for newline)'}
+          placeholder={pendingFiles.length > 0 ? 'Ask about the attached files (optional)…' : 'Message GLM…  (Enter to send, Shift+Enter for newline)'}
           rows={1}
           disabled={loading}
           onChange={(e) => {
@@ -1382,7 +1395,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             type="button"
             className="btn btn-primary chat-send-btn"
             onClick={() => void handleSend()}
-            disabled={!input.trim() && attachments.length === 0}
+            disabled={!input.trim() && pendingFiles.length === 0}
             aria-label="Send message"
           >
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
