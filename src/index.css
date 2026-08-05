@@ -1617,6 +1617,7 @@ img {
 }
 .git-ins { color: var(--success); }
 .git-del { color: var(--danger); }
+.git-untracked { color: var(--warning, #e6a700); }
 
 .chat-header-info {
   display: flex;

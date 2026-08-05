@@ -362,6 +362,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   /** Count of uncommitted changes from git status (0 when clean/unknown). */
   const [gitInsertions, setGitInsertions] = useState(0);
   const [gitDeletions, setGitDeletions] = useState(0);
+  const [gitUntracked, setGitUntracked] = useState(0);
 
   /** Pending files selected but not yet uploaded (uploaded on Send). */
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -483,6 +484,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       const status = await getGitStatus(bundleId);
       setGitInsertions(status.isClean ? 0 : status.insertions);
       setGitDeletions(status.isClean ? 0 : status.deletions);
+      setGitUntracked(status.isClean ? 0 : (status.not_added?.length ?? 0));
     } catch {
       // Git status is best-effort — leave the previous count in place.
     }
@@ -1031,18 +1033,19 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           </div>
         </div>
         <div className="chat-header-right">
-          {(gitInsertions > 0 || gitDeletions > 0) && (
+          {(gitInsertions > 0 || gitDeletions > 0 || gitUntracked > 0) && (
             <button
               type="button"
               className="chat-git-badge"
-              title={`${gitInsertions} insertion(s), ${gitDeletions} deletion(s) uncommitted`}
+              title={`${gitInsertions} insertion(s), ${gitDeletions} deletion(s), ${gitUntracked} untracked file(s)`}
               onClick={() => {
                 setInput('Show me the git status');
                 void handleSend();
               }}
             >
-              <span className="git-ins">+{gitInsertions}</span>
-              <span className="git-del">−{gitDeletions}</span>
+              {gitInsertions > 0 && <span className="git-ins">+{gitInsertions}</span>}
+              {gitDeletions > 0 && <span className="git-del">−{gitDeletions}</span>}
+              {gitUntracked > 0 && <span className="git-untracked">?{gitUntracked}</span>}
             </button>
           )}
           {messages.length > 0 && !loading ? (
