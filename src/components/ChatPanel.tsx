@@ -696,8 +696,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                 recovered = true;
                 break;
               }
-            } catch {
-              // keep polling
+            } catch (pollErr) {
+              // Session expired — stop polling, redirect is already triggered.
+              if (pollErr instanceof Error && pollErr.message === 'Session expired') {
+                break;
+              }
+              // other errors (network) — keep polling
             }
           }
           setReconnecting(false);

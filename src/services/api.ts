@@ -2,6 +2,13 @@ import type { BundleConfig, TreeNode, FileContent, ChatSummary, ChatSession, Cha
 
 const API_BASE = '/api/notebook';
 
+/** Redirect to login on auth failure. Called from request() and streamChat(). */
+export function redirectToLogin(): void {
+  if (window.location.pathname !== '/') {
+    window.location.href = '/?auth_expired=1';
+  }
+}
+
 /** Read the response body once and try to surface a meaningful error message. */
 async function extractError(res: Response): Promise<string> {
   const text = await res.text().catch(() => '');
@@ -23,6 +30,10 @@ async function extractError(res: Response): Promise<string> {
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, options);
+  if (res.status === 401) {
+    redirectToLogin();
+    throw new Error('Session expired');
+  }
   if (!res.ok) {
     throw new Error(await extractError(res));
   }
@@ -199,6 +210,10 @@ export async function uploadFile(bundleId: string, file: File): Promise<UploadRe
     method: 'POST',
     body: formData,
   });
+  if (res.status === 401) {
+    redirectToLogin();
+    throw new Error('Session expired');
+  }
   if (!res.ok) {
     throw new Error(await extractError(res));
   }

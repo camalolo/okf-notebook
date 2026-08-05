@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../types.ts';
+import { redirectToLogin } from './api.ts';
 
 export interface ChatSSEEvent {
   event: string;
@@ -67,6 +68,10 @@ export async function* streamChat(
   );
 
   if (!res.ok || !res.body) {
+    if (res.status === 401) {
+      redirectToLogin();
+      throw new Error('Session expired');
+    }
     const text = await res.text().catch(() => '');
     let message = `${res.status} ${res.statusText}`;
     if (text) {
