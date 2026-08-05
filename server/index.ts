@@ -1,5 +1,7 @@
 import express from 'express';
 import session from 'express-session';
+import FileStore from 'session-file-store';
+import path from 'node:path';
 import { PORT, SESSION_SECRET, USERS } from './config.js';
 import { setupPassport, requireAuth } from './auth.js';
 import bundlesRouter from './routes/bundles.js';
@@ -47,15 +49,25 @@ const app = express();
 app.set('trust proxy', 1);
 
 app.use(express.json({ limit: '10mb' }));
+
+// File-backed session store so sessions survive server restarts.
+// Sessions are stored as JSON files under server/data/sessions/.
+const sessionStore = new (FileStore(session))({
+  path: path.join(import.meta.dirname, 'data', 'sessions'),
+  logFn: () => {}, // silence verbose logging
+});
+
 app.use(
   session({
     secret: SESSION_SECRET,
+    store: sessionStore,
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
     },
   }),
 );
