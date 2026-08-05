@@ -62,6 +62,9 @@ export async function extractDocument(
     case '.doc':
       return extractDoc(buffer);
 
+    case '.odt':
+      return extractOdt(buffer);
+
     case '.png':
     case '.jpg':
     case '.jpeg':
@@ -151,6 +154,61 @@ async function extractDoc(buffer: Buffer): Promise<ExtractionResult> {
     type: 'doc',
     meta: { chars: text.length },
   };
+}
+
+/**
+ * Extract text from OpenDocument Text (.odt) files.
+ * ODT is a ZIP archive; content.xml holds the document body as XML
+ * with text nodes in <text:p> elements. We parse those out and
+ * convert basic structure to markdown.
+ */
+async function extractOdt(buffer: Buffer): Promise<ExtractionResult> {
+  const JSZip = (await import('jszip')).default;
+  const zip = await JSZip.loadAsync(buffer);
+  const contentFile = zip.file('content.xml');
+  if (!contentFile) {
+    return { text: '', type: 'odt', meta: { chars: 0, unsupported: true } };
+  }
+  const xml = await contentFile.async('string');
+  const text = odtXmlToText(xml);
+  return {
+    text: text.trim(),
+    type: 'odt',
+    meta: { chars: text.length },
+  };
+}
+
+/**
+ * Convert ODT content.xml to plain text with basic markdown structure.
+ * Extracts text from <text:p> (paragraphs) and <text:h> (headings) nodes.
+ */
+function odtXmlToText(xml: string): string {
+  // Insert newlines between block elements, then strip all tags.
+  let out = xml;
+  // Headings: <text:h> → "# " prefix based on outline-level
+  out = out.replace(/<text:h[^>]*outline-level="(\d)"[^>]*>([\s\S]*?)<\/text:h>/g,
+    (_, level, content) => `${'#'.repeat(Number(level))} ${stripTags(content)}\n`);
+  out = out.replace(/<text:h[^>]*>([\s\S]*?)<\/text:h>/g, (_, content) => `# ${stripTags(content)}\n`);
+  // Paragraphs → newline-separated
+  out = out.replace(/<text:p[^>]*>([\s\S]*?)<\/text:p>/g, (_, content) => `${stripTags(content)}\n`);
+  // Tab stops
+  out = out.replace(/<text:tab[^>]*\/>/g, '\t');
+  // Line breaks
+  out = out.replace(/<text:line-break[^>]*\/>/g, '\n');
+  // List items
+  out = out.replace(/<text:list-item[^>]*>([\s\S]*?)<\/text:list-item>/g, (_, content) => `- ${stripTags(content).trim()}\n`);
+  // Remove all remaining tags
+  out = stripTags(out);
+  // Clean up excessive blank lines
+  out = out.replace(/\n{3,}/g, '\n\n');
+  // Decode XML entities
+  out = out.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+  return out.trim();
+}
+
+/** Remove all XML tags from a string. */
+function stripTags(s: string): string {
+  return s.replace(/<[^>]+>/g, '');
 }
 
 /**

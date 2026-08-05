@@ -22,6 +22,22 @@ vi.mock('word-extractor', () => ({
   },
 }));
 
+// Mock jszip for ODT — returns a fake content.xml.
+vi.mock('jszip', () => ({
+  default: {
+    loadAsync: vi.fn(async () => ({
+      file: (name: string) => name === 'content.xml'
+        ? { async: () => Promise.resolve(
+            '<text:h outline-level="2">Title</text:h>' +
+            '<text:p>Hello <text:span>world</text:span>.</text:p>' +
+            '<text:list-item><text:p>Item 1</text:p></text:list-item>' +
+            '<text:list-item><text:p>Item 2</text:p></text:list-item>'
+          ) }
+        : null,
+    })),
+  },
+}));
+
 describe('detectType', () => {
   it('extracts lowercase extension without dot', () => {
     expect(detectType('report.pdf')).toBe('pdf');
@@ -118,6 +134,18 @@ describe('extractDocument — .doc (legacy Word)', () => {
     expect(result.type).toBe('doc');
     expect(result.text).toBe('Mock DOC body text');
     expect(result.meta.chars).toBe('Mock DOC body text'.length);
+  });
+});
+
+describe('extractDocument — .odt (OpenDocument)', () => {
+  it('extracts headings, paragraphs, and list items', async () => {
+    const result = await extractDocument(Buffer.from('fake-zip'), 'doc.odt');
+    expect(result.type).toBe('odt');
+    expect(result.text).toContain('## Title');
+    expect(result.text).toContain('Hello world.');
+    expect(result.text).toContain('- Item 1');
+    expect(result.text).toContain('- Item 2');
+    expect(result.meta.chars).toBeGreaterThan(0);
   });
 });
 
