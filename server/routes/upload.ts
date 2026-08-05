@@ -132,7 +132,8 @@ export async function processUpload(
   if (existing) {
     return {
       mdPath: `${UPLOAD_DIR}/${existing.filename}`,
-      sourceName: existing.source,
+      // Use the current upload's filename, not the stale stored one.
+      sourceName: filename,
       duplicate: true,
       hash,
       chars: existing.chars,

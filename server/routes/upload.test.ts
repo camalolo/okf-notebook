@@ -167,7 +167,7 @@ describe('processUpload', () => {
     const second = await processUpload(buf, 'different-name.txt', uploadsDir);
     expect(second.duplicate).toBe(true);
     expect(second.mdPath).toBe(first.mdPath);
-    expect(second.sourceName).toBe('original.txt');
+    expect(second.sourceName).toBe('different-name.txt');
     expect(second.hash).toBe(first.hash);
 
     // Ensure only one file was written.
