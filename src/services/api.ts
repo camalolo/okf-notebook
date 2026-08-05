@@ -168,6 +168,18 @@ export function compactChat(
   );
 }
 
+/** Ask the LLM for a meaningful chat title from the conversation. */
+export function retitleChat(
+  bundleId: string,
+  messages: ChatMessage[],
+  chatId?: string | null,
+): Promise<{ title: string }> {
+  return request<{ title: string }>(
+    `${API_BASE}/bundles/${encodeURIComponent(bundleId)}/retitle`,
+    jsonOptions({ messages, chatId: chatId ?? undefined }),
+  );
+}
+
 /* --- Git status --- */
 
 export interface GitStatusInfo {

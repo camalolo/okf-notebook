@@ -12,7 +12,7 @@ import {
 import { webSearch } from '../lib/web-search.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
-import { appendEvent } from '../chats.js';
+import { appendEvent, renameChat } from '../chats.js';
 import type {
   ToolDefinition,
   ChatMessage,
@@ -926,6 +926,64 @@ router.post('/:bundleId/compact', async (req, res, next) => {
     }
 
     res.json({ summary });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Retitle ----------------------------------------------------------------
+
+/**
+ * POST /:bundleId/retitle — ask the LLM for a concise, meaningful chat title
+ * derived from the conversation. Updates the persisted session title.
+ */
+router.post('/:bundleId/retitle', async (req, res, next) => {
+  try {
+    const bundle = await getBundle(req.params.bundleId as string);
+    if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
+
+    const messages = req.body?.messages;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages (ChatMessage[]) is required' });
+    }
+
+    const chatId: string | null =
+      typeof req.body?.chatId === 'string' ? req.body.chatId : null;
+
+    const titleRequest: ChatMessage[] = [
+      {
+        role: 'system',
+        content: [
+          'You generate concise, highly identifiable chat titles.',
+          'The title must help the user instantly recall what this conversation was about.',
+          'Rules:',
+          '- 4 to 8 words, never more than 60 characters',
+          '- Focus on the core topic, task, or outcome — not greetings or small talk',
+          '- Use specific nouns (file names, feature names, entities) over vague words',
+          '- No quotes, no trailing period, no emoji',
+          '- Title case',
+          'Respond with ONLY the title text, nothing else.',
+        ].join('\n'),
+      },
+      ...messages,
+      {
+        role: 'user',
+        content: 'Generate a concise title for this conversation.',
+      },
+    ];
+
+    const result = await chatCompletion(titleRequest);
+    const title = result.content.trim().replace(/^["']|["']$/g, '').slice(0, 60);
+
+    if (chatId && title) {
+      try {
+        await renameChat(bundle.id, chatId, req.user!.email, title);
+      } catch {
+        // best-effort
+      }
+    }
+
+    res.json({ title });
   } catch (err) {
     next(err);
   }

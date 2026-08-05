@@ -19,6 +19,7 @@ import {
   getGitStatus,
   listChats,
   loadChat,
+  retitleChat,
 } from '../services/api.ts';
 import { ProposedChangeCard } from './ProposedChangeCard.tsx';
 import { reconnectWithGoogle } from '../services/auth.ts';
@@ -770,6 +771,24 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     }
   }, [bundleId, loading, messages.length, refreshChatList]);
 
+  /** Ask the LLM to generate a meaningful title for the current conversation. */
+  const handleRetitle = useCallback(async () => {
+    if (loading || messages.length === 0) return;
+    setLoading(true);
+    try {
+      const { title } = await retitleChat(bundleId, messagesRef.current, chatIdRef.current);
+      if (title) {
+        setChatTitle(title);
+        chatTitleRef.current = title;
+        void refreshChatList();
+      }
+    } catch {
+      // best-effort
+    } finally {
+      setLoading(false);
+    }
+  }, [bundleId, loading, messages.length, refreshChatList]);
+
   /** Start a fresh, empty chat (clears state; a session is created on first send). */
   const handleNewChat = useCallback(() => {
     setMessages([]);
@@ -1000,9 +1019,20 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             className="chat-new-btn"
             onClick={handleNewChat}
             title="New chat"
+            disabled={loading}
           >
             + New
           </button>
+          {messages.length > 0 && !loading && (
+            <button
+              type="button"
+              className="chat-new-btn"
+              onClick={() => void handleRetitle()}
+              title="Generate a meaningful title from the conversation"
+            >
+              Retitle
+            </button>
+          )}
         </div>
 
         {showHistory && (

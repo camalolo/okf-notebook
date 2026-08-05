@@ -202,6 +202,25 @@ export async function appendEvent(
   await fs.writeFile(chatPath(bundleId, chatId), JSON.stringify(updated, null, 2), 'utf8');
 }
 
+/** Rename a chat session (title only). */
+export async function renameChat(
+  bundleId: string,
+  chatId: string,
+  userId: string,
+  title: string,
+): Promise<void> {
+  validateId(bundleId);
+  validateId(chatId);
+  const existing = await loadChat(bundleId, chatId, userId);
+  if (!existing) return;
+  const updated: ChatSession = {
+    ...existing,
+    title,
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(chatPath(bundleId, chatId), JSON.stringify(updated, null, 2), 'utf8');
+}
+
 /** Delete a chat session. No-op if not found or not owned by user. */
 export async function deleteChat(
   bundleId: string,
