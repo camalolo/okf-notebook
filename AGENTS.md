@@ -11,7 +11,8 @@ npm install
 npm run dev:all    # Vite (5173) + Express (3002) concurrently, both hot-reloading
 npm run dev        # frontend only
 npm run dev:server # backend only (tsx watch)
-npm run build      # tsc -b (typecheck) + vite build
+npm run build      # Full production deploy: typecheck → UI → compile server → deploy
+npm run build:server # Deploy just the server (skip UI rebuild)
 npm run lint       # eslint
 npm test           # vitest run (one-shot)
 npm run test:watch # vitest watch mode
@@ -21,40 +22,64 @@ npm start          # production: tsx server/index.ts
 **Runtime**: Node 20.11+ (server uses `import.meta.dirname`). Requires the bundle
 directories referenced in `server/bundles.json` to exist on the local filesystem.
 
-**Build output is a hardcoded absolute path**: `vite.config.ts` builds to
-`/srv/notebook`. Building on another machine requires editing
-this path or the deploy will land in the wrong place.
+**Build output is a hardcoded absolute path**: `vite.config.ts` builds the UI to
+`/srv/notebook`, and `scripts/deploy.mjs` deploys the compiled
+server to `/srv/notebook/server/`. Building on another machine
+requires editing these paths or the deploy will land in the wrong place.
 
 ## Deployment & Service Management
 
-The backend runs as a **user systemd service** — not a system-level service, and
-not a manual background process.
+Both the UI and the compiled server are deployed to the same directory:
+`/srv/notebook/`. The production layout is:
 
-```bash
-# Service file (user-level, not /etc/systemd/system/)
-# ~/.config/systemd/user/notebook.service
-
-# Restart the backend after code changes
-systemctl --user restart notebook.service
-
-# Check status
-systemctl --user status notebook.service
-
-# View logs (journald — this is where console.log/error output goes)
-journalctl --user -u notebook.service -f
-journalctl --user -u notebook.service --since "5 min ago"
-
-# Frontend: just rebuild (vite writes directly to the nginx-served path)
-npm run build
+```
+/srv/notebook/
+  index.html         ← nginx-served SPA
+  assets/            ← Vite hashed bundles
+  server/            ← Compiled backend (plain JS, not TS)
+    index.js
+    routes/
+    lib/
+    node_modules/    ← production deps (npm install --omit=dev)
+    package.json
+    bundles.json     ← runtime (seeded on first start)
+    data/            ← runtime (chat storage)
+  .env               ← copied from Sources/Notebook/.env during build
 ```
 
-**After editing server code** (`server/**`): `systemctl --user restart notebook.service`.
-The service runs `tsx server/index.ts` (no `--watch`), so it does **not** pick up
-server changes automatically — an explicit restart is required.
+The backend runs as a **user systemd service** — not a system-level service.
 
-**After editing frontend code** (`src/**`): `npm run build` writes the production
-bundle directly to `/srv/notebook` (nginx serves it
-immediately, no restart needed).
+```bash
+# Service file (user-level)
+# ~/.config/systemd/user/notebook.service
+
+# Deploy everything (UI + server)
+npm run build          # builds UI, compiles server TS→JS, deploys both, installs deps
+npm run build:server   # deploy just the server (skip UI rebuild, faster)
+
+# Then restart the service to pick up new server code
+systemctl --user restart notebook.service
+
+# Check status / view logs
+systemctl --user status notebook.service
+journalctl --user -u notebook.service -f
+journalctl --user -u notebook.service --since "5 min ago"
+```
+
+**How `npm run build` works** (in order):
+1. `clean:assets` — remove stale UI assets (not server runtime data)
+2. `tsc -b` — typecheck frontend
+3. `vite build` — build UI to deploy dir (`emptyOutDir: false` to preserve server/)
+4. `tsc -p tsconfig.server.json` — compile server TS → `dist-server/`
+5. `scripts/deploy.mjs` — copy `dist-server/` + `package.json` to production,
+   `npm install --omit=dev`, copy `.env`
+
+**The systemd service runs compiled JS** (`node server/index.js`), not `tsx` on
+source files. The service `WorkingDirectory` is `/srv/notebook`.
+
+**Runtime data is preserved across deploys**: `server/bundles.json` and
+`server/data/` are not wiped by the build (vite's `emptyOutDir` is disabled).
+Only `assets/` is cleaned before each UI build.
 
 **Common mistake**: starting the server manually with `npx tsx server/index.ts &`
 or `nohup` — this creates a competing process on port 3002 that shadows the

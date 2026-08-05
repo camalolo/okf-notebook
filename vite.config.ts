@@ -6,7 +6,7 @@ export default defineConfig({
   base: '/',
   build: {
     outDir: '/srv/notebook',
-    emptyOutDir: true,
+    emptyOutDir: false,
   },
   server: {
     proxy: {

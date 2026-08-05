@@ -1,16 +1,23 @@
 {
   "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.server.tsbuildinfo",
     "target": "es2023",
     "lib": ["ES2023"],
-    "module": "esnext",
-    "moduleResolution": "bundler",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
     "types": ["node"],
     "skipLibCheck": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
-    "strict": true,
-    "noEmit": true,
-    "erasableSyntaxOnly": true
+    "noImplicitAny": false,
+
+    /* Emit */
+    "outDir": "./dist-server",
+    "rootDir": "./server",
+    "declaration": false,
+    "sourceMap": false,
+    "removeComments": true
   },
-  "include": ["server"]
+  "include": ["server/**/*.ts"],
+  "exclude": ["server/**/*.test.ts"]
 }

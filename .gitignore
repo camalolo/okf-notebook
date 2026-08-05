@@ -23,6 +23,9 @@ data/
 # Tesseract OCR language data (downloaded at runtime)
 *.traineddata
 
+# Server compilation output (staging for deploy)
+dist-server/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
