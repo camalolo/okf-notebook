@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -13,6 +13,7 @@ import type {
 } from '../types.ts';
 import { streamChat } from '../services/chat.ts';
 import {
+  compactChat,
   createChat,
   deleteChat,
   getGitStatus,
@@ -204,6 +205,54 @@ export function mergeConsecutiveAssistants(messages: ChatMessage[]): ChatMessage
 }
 
 /**
+ * Rough token estimate (~4 chars/token) for the conversation context.
+ * Excludes the server-side system prompt (AGENTS.md, OKF.md, file list).
+ */
+function estimateContextTokens(
+  messages: ChatMessage[],
+  pastTurns: TurnEvent[][],
+  turnEvents: TurnEvent[],
+): number {
+  let chars = 0;
+  for (const m of messages) {
+    chars += m.content.length + 8; // role + formatting overhead
+  }
+  const addTurnEvent = (ev: TurnEvent) => {
+    if (ev.kind === 'content') {
+      chars += ev.text.length;
+    } else if (ev.kind === 'tool') {
+      chars += ev.toolCall.name.length + 16;
+      chars += JSON.stringify(ev.toolCall.args).length;
+      chars += JSON.stringify(ev.toolCall.result ?? '').length;
+    } else if (ev.kind === 'proposed') {
+      chars += (ev.change.oldContent?.length ?? 0) + ev.change.newContent.length;
+    } else if (ev.kind === 'error') {
+      chars += ev.text.length;
+    }
+  };
+  for (const turn of pastTurns) {
+    for (const ev of turn) addTurnEvent(ev);
+  }
+  for (const ev of turnEvents) addTurnEvent(ev);
+  return Math.ceil(chars / 4);
+}
+
+/** GLM-5.2 context window for the indicator colour thresholds. */
+const CTX_LIMIT = 128_000;
+
+function formatCtxTokens(tokens: number): { label: string; level: string } {
+  const label =
+    tokens >= 10_000
+      ? `${Math.round(tokens / 1000)}K`
+      : tokens >= 1000
+        ? `${(tokens / 1000).toFixed(1)}K`
+        : String(tokens);
+  const pct = tokens / CTX_LIMIT;
+  const level = pct > 0.8 ? 'high' : pct > 0.5 ? 'mid' : 'low';
+  return { label, level };
+}
+
+/**
  * Reconstruct in-memory chat state (messages, past turns, proposed changes)
  * from a persisted `StoredEvent[]` timeline.
  */
@@ -211,11 +260,13 @@ export function restoreFromEvents(events: StoredEvent[]): {
   messages: ChatMessage[];
   pastTurns: TurnEvent[][];
   proposedChanges: ProposedChange[];
+  compactionIndex: number | null;
 } {
   const messages: ChatMessage[] = [];
   const pastTurns: TurnEvent[][] = [];
   const proposedChanges: ProposedChange[] = [];
   let currentTurn: TurnEvent[] = [];
+  let compactionIndex: number | null = null;
 
   for (const ev of events) {
     if (ev.kind === 'user') {
@@ -230,6 +281,13 @@ export function restoreFromEvents(events: StoredEvent[]): {
       }
     } else if (ev.kind === 'error') {
       currentTurn.push({ kind: 'error', text: ev.content ?? 'Unknown error' });
+    } else if (ev.kind === 'compaction') {
+      // The compaction summary becomes an assistant message. Everything from
+      // this point onwards is the active context sent to the LLM.
+      pastTurns.push(currentTurn);
+      messages.push({ role: 'assistant', content: ev.content ?? '' });
+      compactionIndex = messages.length - 1;
+      currentTurn = [];
     } else if (ev.kind === 'assistant') {
       // The current turn's events belong to this assistant message.
       pastTurns.push(currentTurn);
@@ -249,7 +307,7 @@ export function restoreFromEvents(events: StoredEvent[]): {
     });
   }
 
-  return { messages, pastTurns, proposedChanges };
+  return { messages, pastTurns, proposedChanges, compactionIndex };
 }
 
 /**
@@ -301,6 +359,27 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   /** Count of uncommitted changes from git status (0 when clean/unknown). */
   const [gitInsertions, setGitInsertions] = useState(0);
   const [gitDeletions, setGitDeletions] = useState(0);
+
+  /** Index of the last compaction summary in `messages` (null if none). */
+  const [compactionIndex, setCompactionIndex] = useState<number | null>(null);
+  const compactionIndexRef = useRef<number | null>(null);
+  useEffect(() => {
+    compactionIndexRef.current = compactionIndex;
+  }, [compactionIndex]);
+
+  /** Estimated conversation context tokens (only active context after last compaction). */
+  const ctxTokens = useMemo(() => {
+    const start = compactionIndex ?? 0;
+    const activeMessages = messages.slice(start);
+    // Count how many assistant messages are before the compaction point so
+    // we can offset the pastTurns array accordingly.
+    let assistantOffset = 0;
+    for (let i = 0; i < start; i++) {
+      if (messages[i].role === 'assistant') assistantOffset++;
+    }
+    const activePastTurns = pastTurns.slice(assistantOffset);
+    return estimateContextTokens(activeMessages, activePastTurns, turnEvents);
+  }, [messages, pastTurns, turnEvents, compactionIndex]);
 
   // Mirror the latest message history so the async send handler can build the
   // request payload without reading stale state.
@@ -418,9 +497,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     // Capture the pre-turn state so we can compute the final snapshot for both
     // the UI and persistence without relying on state updated mid-stream.
     const history = [...messagesRef.current, userMsg];
+    // For the API call, only send messages from the last compaction summary
+    // onwards — earlier messages have been summarised.
+    const startIdx = compactionIndexRef.current ?? 0;
+    const apiMessages = [...messagesRef.current.slice(startIdx), userMsg];
     // The UI may have consecutive assistant messages (split at tool-call
     // boundaries). Merge them for the API call to keep alternating roles.
-    const apiHistory = mergeConsecutiveAssistants(history);
+    const apiHistory = mergeConsecutiveAssistants(apiMessages);
     const preTurnPastTurns = pastTurnsRef.current;
 
     setInput('');
@@ -535,6 +618,8 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             setMessages(restored.messages);
             setPastTurns(restored.pastTurns);
             setProposedChanges(restored.proposedChanges);
+            setCompactionIndex(restored.compactionIndex);
+            compactionIndexRef.current = restored.compactionIndex;
             setTurnEvents([]);
             setLoading(false);
             abortRef.current = null;
@@ -564,6 +649,8 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                 setMessages(restored.messages);
                 setPastTurns(restored.pastTurns);
                 setProposedChanges(restored.proposedChanges);
+                setCompactionIndex(restored.compactionIndex);
+                compactionIndexRef.current = restored.compactionIndex;
                 setTurnEvents([]);
                 setLoading(false);
                 setReconnecting(false);
@@ -637,6 +724,52 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     abortRef.current?.abort();
   }, []);
 
+  /**
+   * Compact the conversation: send all active messages to the LLM for a
+   * detailed summary. The summary replaces the prior context — only messages
+   * from the summary onwards are sent to the LLM in future turns. A divider
+   * is shown in the chat; the summary text itself is not rendered as a bubble.
+   */
+  const handleCompact = useCallback(async () => {
+    if (loading || messages.length === 0) return;
+
+    // Auto-create a chat session if none active yet.
+    if (chatIdRef.current === null) {
+      try {
+        const session = await createChat(bundleId);
+        setChatId(session.id);
+        chatIdRef.current = session.id;
+      } catch {
+        // Non-fatal — proceed without persistence.
+      }
+    }
+
+    setLoading(true);
+    try {
+      const startIdx = compactionIndexRef.current ?? 0;
+      const activeMessages = messagesRef.current.slice(startIdx);
+      const { summary } = await compactChat(bundleId, activeMessages, chatIdRef.current);
+
+      // The summary becomes a new assistant message in the display history.
+      // It is NOT rendered as a bubble — the divider takes its place.
+      const summaryMsg: ChatMessage = { role: 'assistant', content: summary };
+      const newMessages = [...messagesRef.current, summaryMsg];
+      const newIndex = newMessages.length - 1;
+
+      setMessages(newMessages);
+      messagesRef.current = newMessages;
+      setPastTurns((prev) => [...prev, []]); // empty turn events for the summary
+      setCompactionIndex(newIndex);
+      compactionIndexRef.current = newIndex;
+
+      void refreshChatList();
+    } catch {
+      // Best-effort — compaction failed, leave conversation unchanged.
+    } finally {
+      setLoading(false);
+    }
+  }, [bundleId, loading, messages.length, refreshChatList]);
+
   /** Start a fresh, empty chat (clears state; a session is created on first send). */
   const handleNewChat = useCallback(() => {
     setMessages([]);
@@ -646,8 +779,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     setChatId(null);
     setChatTitle('New chat');
     setShowHistory(false);
+    setCompactionIndex(null);
     chatIdRef.current = null;
     chatTitleRef.current = 'New chat';
+    compactionIndexRef.current = null;
   }, []);
 
   /** Load a past chat and restore its conversation state. */
@@ -655,7 +790,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     async (id: string): Promise<void> => {
       try {
         const session = await loadChat(bundleId, id);
-        const { messages: msgs, pastTurns: turns, proposedChanges: changes } =
+        const { messages: msgs, pastTurns: turns, proposedChanges: changes, compactionIndex: cIdx } =
           restoreFromEvents(session.events);
         setMessages(msgs);
         setPastTurns(turns);
@@ -664,8 +799,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         setChatId(session.id);
         setChatTitle(session.title);
         setShowHistory(false);
+        setCompactionIndex(cIdx);
         chatIdRef.current = session.id;
         chatTitleRef.current = session.title;
+        compactionIndexRef.current = cIdx;
       } catch {
         // Best-effort: leave current chat in place.
       }
@@ -691,8 +828,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             setTurnEvents([]);
             setChatId(null);
             setChatTitle('New chat');
+            setCompactionIndex(null);
             chatIdRef.current = null;
             chatTitleRef.current = 'New chat';
+            compactionIndexRef.current = null;
           }
         }
       } catch {
@@ -813,33 +952,58 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               className="chat-history-toggle"
               onClick={() => setShowHistory((v) => !v)}
             >
-              {chatTitle}
+              <span className="chat-history-title">{chatTitle}</span>
               <span className="chat-history-caret" aria-hidden="true">▾</span>
             </button>
           </div>
         </div>
-        {(gitInsertions > 0 || gitDeletions > 0) && (
+        <div className="chat-header-right">
+          {(gitInsertions > 0 || gitDeletions > 0) && (
+            <button
+              type="button"
+              className="chat-git-badge"
+              title={`${gitInsertions} insertion(s), ${gitDeletions} deletion(s) uncommitted`}
+              onClick={() => {
+                setInput('Show me the git status');
+                void handleSend();
+              }}
+            >
+              <span className="git-ins">+{gitInsertions}</span>
+              <span className="git-del">−{gitDeletions}</span>
+            </button>
+          )}
+          {messages.length > 0 && !loading ? (
+            <button
+              type="button"
+              className={`chat-compact-btn ctx-${formatCtxTokens(ctxTokens).level}`}
+              onClick={() => void handleCompact()}
+              title={`Summarise conversation to free up context (≈${ctxTokens.toLocaleString()} tokens active)`}
+            >
+              Compact{ctxTokens > 0 && (() => {
+                const { label } = formatCtxTokens(ctxTokens);
+                return <span className="chat-compact-ctx">{label}</span>;
+              })()}
+            </button>
+          ) : ctxTokens > 0 && (() => {
+            const { label, level } = formatCtxTokens(ctxTokens);
+            return (
+              <span
+                className={`chat-ctx-badge ctx-${level}`}
+                title={`≈${ctxTokens.toLocaleString()} tokens of conversation context`}
+              >
+                {label}
+              </span>
+            );
+          })()}
           <button
             type="button"
-            className="chat-git-badge"
-            title={`${gitInsertions} insertion(s), ${gitDeletions} deletion(s) uncommitted`}
-            onClick={() => {
-              setInput('Show me the git status');
-              void handleSend();
-            }}
+            className="chat-new-btn"
+            onClick={handleNewChat}
+            title="New chat"
           >
-            <span className="git-ins">+{gitInsertions}</span>
-            <span className="git-del">−{gitDeletions}</span>
+            + New
           </button>
-        )}
-        <button
-          type="button"
-          className="chat-new-btn"
-          onClick={handleNewChat}
-          title="New chat"
-        >
-          + New
-        </button>
+        </div>
 
         {showHistory && (
           <>
@@ -960,7 +1124,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                   }
                   return null;
                 })}
-                {(m.role === 'user' || m.content.trim()) && (
+                {i === compactionIndex ? (
+                  <div className="chat-compaction-divider" role="separator" aria-label="Conversation compacted">
+                    <span className="chat-compaction-line" />
+                    <span className="chat-compaction-label">compaction</span>
+                    <span className="chat-compaction-line" />
+                  </div>
+                ) : (m.role === 'user' || m.content.trim()) && (
                   <div
                     className={`chat-message chat-message-${m.role === 'user' ? 'user' : 'assistant'}`}
                   >

@@ -1,4 +1,4 @@
-import type { BundleConfig, TreeNode, FileContent, ChatSummary, ChatSession, StoredEvent } from '../types.ts';
+import type { BundleConfig, TreeNode, FileContent, ChatSummary, ChatSession, ChatMessage, StoredEvent } from '../types.ts';
 
 const API_BASE = '/api/notebook';
 
@@ -153,6 +153,18 @@ export function deleteChat(bundleId: string, chatId: string): Promise<void> {
   return request<void>(
     `${API_BASE}/chats/${encodeURIComponent(bundleId)}/${encodeURIComponent(chatId)}`,
     { method: 'DELETE' },
+  );
+}
+
+/** Compact the conversation: ask the LLM to summarise, persist, return summary. */
+export function compactChat(
+  bundleId: string,
+  messages: ChatMessage[],
+  chatId?: string | null,
+): Promise<{ summary: string }> {
+  return request<{ summary: string }>(
+    `${API_BASE}/bundles/${encodeURIComponent(bundleId)}/compact`,
+    jsonOptions({ messages, chatId: chatId ?? undefined }),
   );
 }
 

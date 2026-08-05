@@ -18,7 +18,7 @@ const DATA_DIR = path.resolve(import.meta.dirname, '..', 'data', 'chats');
 export interface StoredEvent {
   ts: string; // ISO timestamp
   seq?: number; // monotonic sequence number (for resumability)
-  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error';
+  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error' | 'compaction';
   content?: string; // for user/assistant/error
   toolCall?: { name: string; args: Record<string, unknown>; result?: unknown };
   change?: {

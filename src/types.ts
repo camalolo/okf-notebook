@@ -92,7 +92,7 @@ export interface ChatSummary {
 export interface StoredEvent {
   ts: string;
   seq?: number; // monotonic sequence number (for resumability)
-  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error';
+  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error' | 'compaction';
   content?: string;
   toolCall?: ToolCallInfo;
   change?: ProposedChange;

@@ -6,6 +6,7 @@ import simpleGit from 'simple-git';
 import { createPatch } from 'diff';
 import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
+  chatCompletion,
   chatCompletionStream,
 } from '../lib/llm.js';
 import { webSearch } from '../lib/web-search.js';
@@ -855,6 +856,78 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       // ignore
     }
     res.end();
+  }
+});
+
+// --- Compaction -------------------------------------------------------------
+
+/**
+ * POST /:bundleId/compact — summarise the conversation so far into a compact
+ * context block. The summary replaces all prior messages as the starting point
+ * for future LLM calls. The summary text is persisted as a `compaction` event
+ * and returned to the client (which renders a divider, not the summary text).
+ */
+router.post('/:bundleId/compact', async (req, res, next) => {
+  try {
+    const bundle = await getBundle(req.params.bundleId as string);
+    if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
+
+    const messages = req.body?.messages;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages (ChatMessage[]) is required' });
+    }
+
+    const chatId: string | null =
+      typeof req.body?.chatId === 'string' ? req.body.chatId : null;
+
+    const summaryRequest: ChatMessage[] = [
+      {
+        role: 'system',
+        content: [
+          'You are a conversation summarizer. The messages below are a conversation',
+          `between a user and an AI assistant working with a knowledge bundle called "${bundle.name}".`,
+          '',
+          'Summarize the conversation in comprehensive detail. You MUST preserve:',
+          '- Every fact, decision, and conclusion reached',
+          '- All file names, paths, and content discussed or edited',
+          '- Code snippets, commands, and technical details',
+          '- User preferences, instructions, and constraints',
+          '- The current state of any tasks, proposals, or pending actions',
+          '- Any URLs, dates, amounts, or other specific data',
+          '- Questions that were asked but not yet answered',
+          '',
+          'Write the summary as a direct reference document. Do NOT use phrases like',
+          '"the user asked" or "the assistant replied" — state the information directly.',
+          'The summary will replace the conversation history as context for future exchanges,',
+          'so it must contain everything needed to continue seamlessly.',
+        ].join('\n'),
+      },
+      ...messages,
+      {
+        role: 'user',
+        content:
+          'Summarize the entire conversation above in comprehensive detail, preserving every fact, decision, file reference, and technical detail.',
+      },
+    ];
+
+    const result = await chatCompletion(summaryRequest);
+    const summary = result.content.trim();
+
+    // Persist the compaction event to the chat timeline.
+    if (chatId) {
+      try {
+        await appendEvent(bundle.id, chatId, req.user!.email, {
+          kind: 'compaction',
+          content: summary,
+        });
+      } catch {
+        // best-effort
+      }
+    }
+
+    res.json({ summary });
+  } catch (err) {
+    next(err);
   }
 });
 
