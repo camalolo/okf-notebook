@@ -198,9 +198,6 @@ const WEB_SEARCH_TOOL: ToolDefinition = {
 const READONLY_TOOLS: ToolDefinition[] = [
   READ_FILE_TOOL,
   LIST_FILES_TOOL,
-  GIT_STATUS_TOOL,
-  GIT_DIFF_TOOL,
-  GIT_LOG_TOOL,
   WEB_SEARCH_TOOL,
 ];
 
@@ -838,6 +835,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         return;
       }
       const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[chat] Turn failed for bundle=${bundleId} chatId=${chatId}:`, errMsg);
       // Persist error + whatever content was accumulated.
       persist({ kind: 'error', content: errMsg });
       persist({ kind: 'assistant', content: turnContent || '⚠️ This response was interrupted.' });
@@ -845,6 +843,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       if (clientConnected) res.end();
     }
   } catch (err) {
+    console.error(`[chat] Fatal error for bundle=${req.params.bundleId}:`, err);
     // If headers weren't sent yet (early failure), fall through to error handler.
     if (!res.headersSent) {
       return next(err);

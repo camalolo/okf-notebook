@@ -300,6 +300,18 @@ export async function chatCompletionStream(
             content += delta.content;
             onDelta(delta.content);
           }
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const existing =
+                toolCallMap.get(tc.index) ??
+                { id: '', name: '', arguments: '' };
+              if (tc.id) existing.id = tc.id;
+              if (tc.function?.name) existing.name = tc.function.name;
+              if (tc.function?.arguments)
+                existing.arguments += tc.function.arguments;
+              toolCallMap.set(tc.index, existing);
+            }
+          }
         } catch {
           // ignore
         }
@@ -318,6 +330,12 @@ export async function chatCompletionStream(
         type: 'function' as const,
         function: { name: v.name, arguments: v.arguments },
       }));
+  }
+
+  if (content.trim() && !tool_calls) {
+    console.log(`[llm] Stream ended with ${content.length} chars content, no tool calls`);
+  } else if (tool_calls) {
+    console.log(`[llm] Stream ended with ${tool_calls.length} tool call(s): ${tool_calls.map(t => t.function.name).join(', ')}`);
   }
 
   return { content, tool_calls };
