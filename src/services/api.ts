@@ -180,6 +180,31 @@ export function retitleChat(
   );
 }
 
+/* --- Document upload --- */
+
+export interface UploadResult {
+  mdPath: string;
+  sourceName: string;
+  duplicate: boolean;
+  hash: string;
+  chars: number;
+  pages?: number;
+}
+
+/** Upload a file to the bundle. The server extracts content and writes uploads/{slug}.md. */
+export async function uploadFile(bundleId: string, file: File): Promise<UploadResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${API_BASE}/bundles/${encodeURIComponent(bundleId)}/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    throw new Error(await extractError(res));
+  }
+  return (await res.json()) as UploadResult;
+}
+
 /* --- Git status --- */
 
 export interface GitStatusInfo {

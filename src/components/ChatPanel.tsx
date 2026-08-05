@@ -20,7 +20,9 @@ import {
   listChats,
   loadChat,
   retitleChat,
+  uploadFile,
 } from '../services/api.ts';
+import type { UploadResult } from '../services/api.ts';
 import { ProposedChangeCard } from './ProposedChangeCard.tsx';
 import { reconnectWithGoogle } from '../services/auth.ts';
 
@@ -361,6 +363,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   const [gitInsertions, setGitInsertions] = useState(0);
   const [gitDeletions, setGitDeletions] = useState(0);
 
+  /** Pending file attachments (awaiting user to send message). */
+  const [attachments, setAttachments] = useState<UploadResult[]>([]);
+  /** True while a file is being uploaded/extracted. */
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Drag-over visual state for the input area. */
+  const [dragOver, setDragOver] = useState(false);
+
   /** Index of the last compaction summary in `messages` (null if none). */
   const [compactionIndex, setCompactionIndex] = useState<number | null>(null);
   const compactionIndexRef = useRef<number | null>(null);
@@ -478,9 +488,28 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     }
   }, [bundleId]);
 
+  /** Handle selected files from picker or drag-drop: upload each and collect results. */
+  const handleFiles = useCallback(async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    setUploading(true);
+    try {
+      for (const file of Array.from(fileList)) {
+        const result = await uploadFile(bundleId, file);
+        setAttachments((prev) => [...prev, result]);
+        onFilesChanged?.();
+      }
+    } catch (err) {
+      console.error('[upload] Failed:', err);
+      // Surface the error in the input as a brief note.
+      setInput((prev) => prev + (prev ? '\n' : '') + `[Upload failed: ${err instanceof Error ? err.message : 'unknown error'}]`);
+    } finally {
+      setUploading(false);
+    }
+  }, [bundleId, onFilesChanged]);
+
   const handleSend = useCallback(async () => {
-    const text = input.trim();
-    if (!text || loading) return;
+    const rawText = input.trim();
+    if ((!rawText && attachments.length === 0) || loading) return;
     stoppedRef.current = false;
 
     // Auto-create a chat session on first message (if none active).
@@ -493,6 +522,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         // Non-fatal: continue with an ephemeral chat.
       }
     }
+
+    // Build attachment note + final message text.
+    const attachmentNote = attachments.length > 0
+      ? attachments.map((a) => `📎 Attached: ${a.sourceName} → ${a.mdPath}${a.duplicate ? ' (duplicate)' : ''}`).join('\n') + '\n\n'
+      : '';
+    const text = attachmentNote + rawText;
 
     const userMsg: ChatMessage = { role: 'user', content: text };
     // Capture the pre-turn state so we can compute the final snapshot for both
@@ -508,6 +543,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     const preTurnPastTurns = pastTurnsRef.current;
 
     setInput('');
+    setAttachments([]);
     if (inputRef.current) inputRef.current.style.height = 'auto';
     setTurnEvents([]);
     setLoading(true);
@@ -717,7 +753,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
     // Refresh chat list (server is now source of truth for persistence + title).
     void refreshChatList();
-  }, [bundleId, input, loading, appendContent, onFilesChanged, refreshGitStatus, refreshChatList]);
+  }, [bundleId, input, loading, attachments, appendContent, onFilesChanged, refreshGitStatus, refreshChatList]);
 
   /** Stop the in-flight chat stream immediately (user pressed STOP). */
   const handleStop = useCallback(() => {
@@ -1247,12 +1283,74 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         )}
       </div>
 
-      <div className="chat-input-area">
+      <div
+        className={`chat-input-area${dragOver ? ' chat-input-area--dragover' : ''}`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          if (!loading && !uploading) {
+            void handleFiles(e.dataTransfer.files);
+          }
+        }}
+      >
+        {(attachments.length > 0 || uploading) && (
+          <div className="chat-attachments">
+            {attachments.map((att, i) => (
+              <span key={i} className="chat-attachment-chip">
+                📎 {att.sourceName}
+                {att.duplicate && <span className="chat-attachment-dup"> dup</span>}
+                <button
+                  type="button"
+                  className="chat-attachment-remove"
+                  onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
+                  aria-label={`Remove ${att.sourceName}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            {uploading && (
+              <span className="chat-attachment-chip chat-attachment-chip--uploading">
+                <span className="spinner spinner-sm" /> Extracting…
+              </span>
+            )}
+          </div>
+        )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            void handleFiles(e.target.files);
+            e.target.value = ''; // reset so the same file can be selected again
+          }}
+        />
+        <button
+          type="button"
+          className="chat-attach-btn"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={loading || uploading}
+          aria-label="Attach file"
+          title="Attach file"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6z"
+            />
+          </svg>
+        </button>
         <textarea
           ref={inputRef}
           className="chat-input"
           value={input}
-          placeholder="Message GLM…  (Enter to send, Shift+Enter for newline)"
+          placeholder={attachments.length > 0 ? 'Add a note about the attachment (optional)…' : 'Message GLM…  (Enter to send, Shift+Enter for newline)'}
           rows={1}
           disabled={loading}
           onChange={(e) => {
@@ -1280,7 +1378,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             type="button"
             className="btn btn-primary chat-send-btn"
             onClick={() => void handleSend()}
-            disabled={!input.trim()}
+            disabled={!input.trim() && attachments.length === 0}
             aria-label="Send message"
           >
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">

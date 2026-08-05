@@ -14,6 +14,7 @@ import { requireFull } from '../auth.js';
 import filesRouter from './files.js';
 import gitRouter from './git.js';
 import chatRouter from './chat.js';
+import uploadRouter from './upload.js';
 
 const router = Router();
 
@@ -21,6 +22,7 @@ const router = Router();
 router.use(filesRouter);
 router.use(gitRouter);
 router.use(chatRouter);
+router.use(uploadRouter);
 
 interface TreeNode {
   name: string;
