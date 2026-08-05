@@ -36,13 +36,18 @@ export function sha256(buffer: Buffer): string {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
-/** Generate a URL-safe slug from a filename (without extension). */
+/** Generate a filesystem-safe slug from a filename, preserving Unicode chars.
+ *  Replaces path separators and control chars, collapses runs of non-word
+ *  chars (excluding CJK and letters) into a single dash. */
 export function slugifyFilename(filename: string): string {
-  const base = path.basename(filename, path.extname(filename));
+  const ext = path.extname(filename);
+  const base = path.basename(filename, ext);
   return base
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
+    .replace(/[/\\:*?"<>|]+/g, '-')   // path-unsafe chars → dash
+    .replace(/[\x00-\x1f]+/g, '')     // strip control chars
+    .replace(/\s+/g, '-')             // whitespace → dash
+    .replace(/-+/g, '-')              // collapse runs of dashes
+    .replace(/^-+|-+$/g, '')          // trim leading/trailing dashes
     || 'untitled';
 }
 
@@ -188,7 +193,10 @@ router.post('/:bundleId/upload', requireFull, upload.single('file'), async (req,
     }
 
     const uploadsDir = resolveBundlePath(bundle.path, UPLOAD_DIR);
-    const result = await processUpload(req.file.buffer, req.file.originalname, uploadsDir);
+    // Multer decodes filenames as latin1; re-encode to UTF-8 so CJK/Unicode
+    // filenames are preserved.
+    const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+    const result = await processUpload(req.file.buffer, originalName, uploadsDir);
 
     res.status(result.duplicate ? 200 : 201).json(result);
   } catch (err) {

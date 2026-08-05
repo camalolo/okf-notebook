@@ -51,20 +51,32 @@ describe('sha256', () => {
 // ---------------------------------------------------------------------------
 
 describe('slugifyFilename', () => {
-  it('lowercases and replaces non-alphanumeric with dashes', () => {
-    expect(slugifyFilename('Quarterly Report (Final).pdf')).toBe('quarterly-report-final');
+  it('replaces spaces and path-unsafe chars with dashes', () => {
+    expect(slugifyFilename('Quarterly Report (Final).pdf')).toBe('Quarterly-Report-(Final)');
   });
 
   it('handles underscores and spaces', () => {
-    expect(slugifyFilename('my_data file.docx')).toBe('my-data-file');
+    expect(slugifyFilename('my_data file.docx')).toBe('my_data-file');
   });
 
-  it('strips leading/trailing dashes', () => {
+  it('collapses runs of dashes', () => {
     expect(slugifyFilename('---weird---name---.txt')).toBe('weird-name');
   });
 
   it('falls back to "untitled" for empty slugs', () => {
-    expect(slugifyFilename('....pdf')).toBe('untitled');
+    expect(slugifyFilename('   .pdf')).toBe('untitled');
+  });
+
+  it('preserves CJK characters', () => {
+    expect(slugifyFilename('學生申請學費減免緩繳申請書.pdf')).toBe('學生申請學費減免緩繳申請書');
+  });
+
+  it('preserves accented characters', () => {
+    expect(slugifyFilename('café résumé.pdf')).toBe('café-résumé');
+  });
+
+  it('replaces path-unsafe chars with dashes', () => {
+    expect(slugifyFilename('report:name?.pdf')).toBe('report-name');
   });
 });
 
