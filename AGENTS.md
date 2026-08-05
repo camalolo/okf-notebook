@@ -25,6 +25,41 @@ directories referenced in `server/bundles.json` to exist on the local filesystem
 `/srv/notebook`. Building on another machine requires editing
 this path or the deploy will land in the wrong place.
 
+## Deployment & Service Management
+
+The backend runs as a **user systemd service** — not a system-level service, and
+not a manual background process.
+
+```bash
+# Service file (user-level, not /etc/systemd/system/)
+# ~/.config/systemd/user/notebook.service
+
+# Restart the backend after code changes
+systemctl --user restart notebook.service
+
+# Check status
+systemctl --user status notebook.service
+
+# View logs (journald — this is where console.log/error output goes)
+journalctl --user -u notebook.service -f
+journalctl --user -u notebook.service --since "5 min ago"
+
+# Frontend: just rebuild (vite writes directly to the nginx-served path)
+npm run build
+```
+
+**After editing server code** (`server/**`): `systemctl --user restart notebook.service`.
+The service runs `tsx server/index.ts` (no `--watch`), so it does **not** pick up
+server changes automatically — an explicit restart is required.
+
+**After editing frontend code** (`src/**`): `npm run build` writes the production
+bundle directly to `/srv/notebook` (nginx serves it
+immediately, no restart needed).
+
+**Common mistake**: starting the server manually with `npx tsx server/index.ts &`
+or `nohup` — this creates a competing process on port 3002 that shadows the
+systemd service, with stdout going nowhere useful. Always use `systemctl --user`.
+
 ## Architecture
 
 ```
@@ -235,8 +270,9 @@ in the persistence layer.
 ## Configuration & Environment
 
 `server/config.ts` reads from `process.env` directly — **no dotenv import**.
-Production loads env via systemd `EnvironmentFile=.env` (per `plan.md`); for local
-dev, export them in your shell or run with `--env-file=.env`. Variables:
+Production loads env via systemd `EnvironmentFile=.env` (per service file in
+`~/.config/systemd/user/notebook.service`); for local dev, export them in your
+shell or run with `--env-file=.env`. Variables:
 
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — OAuth (omit to disable login).
 - `SESSION_SECRET` — defaults to `dev-secret-change-me`.
