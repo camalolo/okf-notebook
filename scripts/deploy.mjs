@@ -1,19 +1,24 @@
 #!/usr/bin/env node
 /**
- * Deploy script: copies compiled server JS + production deps to the nginx-served
- * production directory.  Runs AFTER `tsc -p tsconfig.server.json` and `vite build`.
+ * Deploy script: copies the dist/ build tree to production.
  *
- * What it does:
- *   1. Copies dist-server/ → {DEPLOY_DIR}/server/  (compiled JS)
- *   2. Copies package.json + package-lock.json     (for npm install)
- *   3. Runs `npm install --omit=dev` in the server dir
- *   4. Copies .env if present
+ * Build output layout (local):
+ *   dist/
+ *     server/   ← tsc output (compiled JS)
+ *     public/   ← vite output (built UI)
  *
- * What it does NOT do:
- *   - Wipe runtime data (server/bundles.json, server/data/) — preserved across deploys
- *   - Build the frontend (vite already ran before this script)
+ * What this script does:
+ *   1. Clean + copy dist/public/ → {DEPLOY_DIR}/public/   (UI assets)
+ *   2. Copy dist/server/ → {DEPLOY_DIR}/server/             (compiled JS)
+ *   3. Copy package.json + package-lock.json → server/
+ *   4. Run `npm install --omit=dev` in the server dir
+ *   5. Copy .env if present
+ *
+ * Runtime data (server/bundles.json, server/data/, data/chats/) is preserved.
+ *
+ * Runs AFTER `tsc -p tsconfig.server.json` and `vite build`.
  */
-import { cp, mkdir, access, rm } from 'node:fs/promises';
+import { cp, mkdir, rm, access } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
@@ -22,7 +27,6 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
-// Same hardcoded path as vite.config.ts build.outDir.
 const DEPLOY_DIR = '/srv/notebook';
 
 async function exists(p) {
@@ -35,24 +39,38 @@ async function exists(p) {
 }
 
 async function main() {
-  const serverSrc = path.join(ROOT, 'dist-server');
-  const serverDst = path.join(DEPLOY_DIR, 'server');
+  const distServer = path.join(ROOT, 'dist', 'server');
+  const distPublic = path.join(ROOT, 'dist', 'public');
 
-  if (!await exists(serverSrc)) {
-    console.error('[deploy] dist-server/ not found. Run `tsc -p tsconfig.server.json` first.');
+  // Verify build outputs exist.
+  if (!await exists(distServer)) {
+    console.error('[deploy] dist/server/ not found. Run `tsc -p tsconfig.server.json` first.');
+    process.exit(1);
+  }
+  if (!await exists(distPublic)) {
+    console.error('[deploy] dist/public/ not found. Run `vite build` first.');
     process.exit(1);
   }
 
-  // 1. Copy compiled server JS.
+  // 1. Deploy UI: clean + copy public/.
+  const publicDst = path.join(DEPLOY_DIR, 'public');
+  console.log('[deploy] Copying UI →', publicDst);
+  await rm(publicDst, { recursive: true, force: true });
+  await cp(distPublic, publicDst, { recursive: true });
+
+  // Migration: remove old root-level UI files from the previous architecture
+  // (when nginx served index.html + assets/ directly from DEPLOY_DIR root).
+  await rm(path.join(DEPLOY_DIR, 'index.html'), { force: true });
+  await rm(path.join(DEPLOY_DIR, 'assets'), { recursive: true, force: true });
+
+  // 2. Deploy server: copy compiled JS (preserve runtime data).
+  // Old stale .js files from removed modules are harmless (never imported).
+  const serverDst = path.join(DEPLOY_DIR, 'server');
   console.log('[deploy] Copying server code →', serverDst);
   await mkdir(serverDst, { recursive: true });
+  await cp(distServer, serverDst, { recursive: true, force: true });
 
-  // Remove old JS files but preserve runtime data (bundles.json, data/).
-  // We overwrite all .js files by copying; old stale .js from removed files
-  // are harmless (never imported).
-  await cp(serverSrc, serverDst, { recursive: true, force: true });
-
-  // 2. Copy package files for dependency resolution.
+  // 3. Copy package files for dependency resolution.
   console.log('[deploy] Copying package.json + package-lock.json');
   await cp(path.join(ROOT, 'package.json'), path.join(serverDst, 'package.json'), { force: true });
   await cp(
@@ -61,14 +79,14 @@ async function main() {
     { force: true },
   );
 
-  // 3. Install production dependencies.
+  // 4. Install production dependencies.
   console.log('[deploy] Installing production dependencies …');
   execSync('npm install --omit=dev --no-fund --no-audit', {
     cwd: serverDst,
     stdio: 'inherit',
   });
 
-  // 4. Copy .env if it exists (for systemd EnvironmentFile).
+  // 5. Copy .env if it exists (for systemd EnvironmentFile).
   const envSrc = path.join(ROOT, '.env');
   if (existsSync(envSrc)) {
     console.log('[deploy] Copying .env');

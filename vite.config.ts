@@ -5,8 +5,8 @@ export default defineConfig({
   plugins: [react()],
   base: '/',
   build: {
-    outDir: '/srv/notebook',
-    emptyOutDir: false,
+    outDir: 'dist/public',
+    emptyOutDir: true,
   },
   server: {
     proxy: {

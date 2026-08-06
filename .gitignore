@@ -23,8 +23,7 @@ data/
 # Tesseract OCR language data (downloaded at runtime)
 *.traineddata
 
-# Server compilation output (staging for deploy)
-dist-server/
+# Build output (staging for deploy)
 
 # Editor directories and files
 .vscode/*

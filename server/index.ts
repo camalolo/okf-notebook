@@ -2,6 +2,7 @@ import express from 'express';
 import session from 'express-session';
 import FileStore from 'session-file-store';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { PORT, SESSION_SECRET, USERS } from './config.js';
 import { setupPassport, requireAuth } from './auth.js';
 import bundlesRouter from './routes/bundles.js';
@@ -103,6 +104,20 @@ app.use('/api/notebook/auth', authRouter);
 app.use('/api/notebook/bundles', requireAuth, bundlesRouter);
 app.use('/api/notebook/bundles', requireAuth, searchRouter);
 app.use('/api/notebook/chats', requireAuth, chatsRouter);
+
+// Serve built UI (production only — in dev, Vite serves the UI directly).
+// Checks for the built index.html so this is inert during development.
+const publicDir = path.join(import.meta.dirname, '..', 'public');
+if (existsSync(path.join(publicDir, 'index.html'))) {
+  app.use(express.static(publicDir));
+  // SPA fallback: any non-API GET → index.html (enables client-side routing)
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api/')) {
+      return next();
+    }
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+}
 
 // Start MCP servers then listen.
 async function main() {

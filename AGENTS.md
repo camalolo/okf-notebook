@@ -22,20 +22,23 @@ npm start          # production: tsx server/index.ts
 **Runtime**: Node 20.11+ (server uses `import.meta.dirname`). Requires the bundle
 directories referenced in `server/bundles.json` to exist on the local filesystem.
 
-**Build output is a hardcoded absolute path**: `vite.config.ts` builds the UI to
-`/srv/notebook`, and `scripts/deploy.mjs` deploys the compiled
-server to `/srv/notebook/server/`. Building on another machine
-requires editing these paths or the deploy will land in the wrong place.
+**Build output**: `vite.config.ts` builds the UI to `dist/public/`, and
+`tsc -p tsconfig.server.json` compiles the server to `dist/server/`.
+`scripts/deploy.mjs` deploys the `dist/` tree to
+`/srv/notebook/`. Building on another machine requires
+editing `DEPLOY_DIR` in `scripts/deploy.mjs`.
 
 ## Deployment & Service Management
 
 Both the UI and the compiled server are deployed to the same directory:
-`/srv/notebook/`. The production layout is:
+`/srv/notebook/`. Express serves both the API and the
+static UI from a single process. The production layout is:
 
 ```
 /srv/notebook/
-  index.html         ← nginx-served SPA
-  assets/            ← Vite hashed bundles
+  public/            ← Vite build output (served by Express)
+    index.html
+    assets/          ← Vite hashed bundles
   server/            ← Compiled backend (plain JS, not TS)
     index.js
     routes/
@@ -43,8 +46,10 @@ Both the UI and the compiled server are deployed to the same directory:
     node_modules/    ← production deps (npm install --omit=dev)
     package.json
     bundles.json     ← runtime (seeded on first start)
-    data/            ← runtime (chat storage)
-  .env               ← copied from Sources/Notebook/.env during build
+    data/            ← runtime (session store)
+  data/
+    chats/           ← runtime (chat persistence, one level above server/)
+  .env               ← copied from Sources/Notebook/.env during deploy
 ```
 
 The backend runs as a **user systemd service** — not a system-level service.
@@ -67,19 +72,19 @@ journalctl --user -u notebook.service --since "5 min ago"
 ```
 
 **How `npm run build` works** (in order):
-1. `clean:assets` — remove stale UI assets (not server runtime data)
-2. `tsc -b` — typecheck frontend
-3. `vite build` — build UI to deploy dir (`emptyOutDir: false` to preserve server/)
-4. `tsc -p tsconfig.server.json` — compile server TS → `dist-server/`
-5. `scripts/deploy.mjs` — copy `dist-server/` + `package.json` to production,
-   `npm install --omit=dev`, copy `.env`
+1. `tsc -b` — typecheck frontend
+2. `vite build` — build UI to `dist/public/` (`emptyOutDir: true`)
+3. `tsc -p tsconfig.server.json` — compile server TS → `dist/server/`
+4. `scripts/deploy.mjs` — copy `dist/public/` → `{DEPLOY_DIR}/public/`,
+   copy `dist/server/` → `{DEPLOY_DIR}/server/`, `npm install --omit=dev`,
+   copy `.env`
 
 **The systemd service runs compiled JS** (`node server/index.js`), not `tsx` on
 source files. The service `WorkingDirectory` is `/srv/notebook`.
 
-**Runtime data is preserved across deploys**: `server/bundles.json` and
-`server/data/` are not wiped by the build (vite's `emptyOutDir` is disabled).
-Only `assets/` is cleaned before each UI build.
+**Runtime data is preserved across deploys**: `server/bundles.json`, `server/data/`,
+and `data/chats/` are not wiped. The deploy script cleans `public/` (stale assets)
+but never touches the server runtime data.
 
 **Common mistake**: starting the server manually with `npx tsx server/index.ts &`
 or `nohup` — this creates a competing process on port 3002 that shadows the
@@ -95,8 +100,10 @@ deploy/  ← nginx config for notebook.example.com
 
 ### Request flow
 
-- nginx serves the built SPA statically and reverse-proxies `/api/notebook/` to
-  `localhost:3002` (`proxy_buffering off` for SSE; 180s read timeout).
+- nginx is a pure reverse proxy: all requests (UI, API, SSE) go to Express on
+  `localhost:3002` (`proxy_buffering off` for SSE; 180s read timeout). Express
+  serves static files from `public/` and provides the SPA fallback for
+  client-side routing.
 - In dev, Vite proxies `/api/notebook` → `localhost:3002` (see `vite.config.ts`).
 - All API routes mount under `/api/notebook/` (`server/index.ts`):
   - `/auth/*` — Google OAuth + `/me` + `/logout`
