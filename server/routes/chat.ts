@@ -11,6 +11,7 @@ import {
   chatCompletion,
   chatCompletionStream,
 } from '../lib/llm.js';
+import { chatLogger, newTraceId } from '../lib/logger.js';
 import { webSearch } from '../lib/web-search.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
@@ -595,19 +596,30 @@ function makeEmitter(res: import('express').Response): SSEEmit {
  */
 router.post('/:bundleId/chat', async (req, res, next) => {
   const bundleId = req.params.bundleId as string;
+  const traceId = newTraceId();
+  const log = chatLogger(traceId);
+  const tStart = Date.now();
+
   try {
     const bundle = await getBundle(bundleId);
     if (!bundle) {
+      log.warn('Bundle not found');
       return res.status(404).json({ error: 'Bundle not found' });
     }
 
     const messages = req.body?.messages;
     if (!Array.isArray(messages) || messages.length === 0) {
+      log.warn('Bad request: messages missing or empty');
       return res.status(400).json({ error: 'messages (ChatMessage[]) is required' });
     }
 
     const chatId: string | null =
       typeof req.body?.chatId === 'string' ? req.body.chatId : null;
+
+    log.info(
+      `Request: bundle=${bundleId}, chatId=${chatId ?? 'none'}, ` +
+      `${messages.length} msgs, role=${req.user?.role ?? 'unknown'}`,
+    );
 
     // Sequential persistence — chains promises to avoid read-modify-write
     // races between concurrent appendEvent calls.
@@ -640,6 +652,9 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     let clientConnected = true;
     const abortController = new AbortController();
     req.on('close', () => {
+      if (clientConnected) {
+        log.info(`Client disconnected (after ${Date.now() - tStart}ms) — aborting upstream calls`);
+      }
       clientConnected = false;
       abortController.abort();
     });
@@ -669,12 +684,16 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
     // Accumulate streamed content so we can persist the full assistant message.
     let turnContent = '';
+    let loopIteration = 0;
 
     try {
       for (;;) {
+        loopIteration++;
+
         // If the client disconnected (STOP button or network drop), stop
         // processing — persist whatever assistant content we accumulated.
         if (!clientConnected) {
+          log.info(`Loop exit: client disconnected (iter=${loopIteration})`);
           if (turnContent.trim()) {
             persist({ kind: 'assistant', content: turnContent });
           }
@@ -682,6 +701,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         }
 
         // Stream content deltas to the client as they arrive.
+        log.debug(`Loop iter ${loopIteration}: calling LLM (${callMessages.length} messages in context)`);
         const response = await chatCompletionStream(
           callMessages,
           allTools,
@@ -690,6 +710,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             emit('content', { text: delta });
           },
           abortController.signal,
+          log,
         );
 
         if (response.tool_calls && response.tool_calls.length > 0) {
@@ -719,6 +740,8 @@ router.post('/:bundleId/chat', async (req, res, next) => {
               parsedArgs = {};
             }
 
+            log.debug(`Tool: ${toolName}`, JSON.stringify(parsedArgs).slice(0, 200));
+            const tTool = Date.now();
             let result: unknown;
             try {
               if (mcpManager.hasTool(toolName)) {
@@ -739,10 +762,12 @@ router.post('/:bundleId/chat', async (req, res, next) => {
                 result = await executeTool(toolName, parsedArgs, ctx);
               }
             } catch (err) {
+              log.errorTrace(`Tool error: ${toolName}`, err);
               result = {
                 error: err instanceof Error ? err.message : String(err),
               };
             }
+            log.debug(`Tool done: ${toolName} (${Date.now() - tTool}ms)`);
 
             // Emit the tool-call event.
             emit('tool_call', { name: toolName, args: parsedArgs, result });
@@ -821,6 +846,11 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
         // No tool calls: content was already streamed via the callback.
         // Persist the final assistant message.
+        if (!turnContent.trim()) {
+          log.warn(`LLM returned empty content — no tool calls, no text (iter=${loopIteration}). User will see an empty response.`);
+        } else {
+          log.info(`Turn complete (${Date.now() - tStart}ms, ${loopIteration} iter, ${turnContent.length} chars)`);
+        }
         persist({ kind: 'assistant', content: turnContent });
         emit('done', {});
         if (clientConnected) res.end();
@@ -830,14 +860,15 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       // If the abort signal fired (user pressed STOP), persist what we have
       // without surfacing an error.
       if (abortController.signal.aborted) {
+        log.info(`Loop aborted by client disconnect (after ${Date.now() - tStart}ms, ${turnContent.length} chars accumulated)`);
         if (turnContent.trim()) {
           persist({ kind: 'assistant', content: turnContent });
         }
         if (clientConnected) res.end();
         return;
       }
+      log.errorTrace(`Turn failed (bundle=${bundleId} chatId=${chatId}, iter=${loopIteration})`, err);
       const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[chat] Turn failed for bundle=${bundleId} chatId=${chatId}:`, errMsg);
       // Persist error + whatever content was accumulated.
       persist({ kind: 'error', content: errMsg });
       persist({ kind: 'assistant', content: turnContent || '⚠️ This response was interrupted.' });
@@ -845,7 +876,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       if (clientConnected) res.end();
     }
   } catch (err) {
-    console.error(`[chat] Fatal error for bundle=${req.params.bundleId}:`, err);
+    log.errorTrace('Fatal error', err);
     // If headers weren't sent yet (early failure), fall through to error handler.
     if (!res.headersSent) {
       return next(err);
@@ -869,6 +900,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
  * and returned to the client (which renders a divider, not the summary text).
  */
 router.post('/:bundleId/compact', async (req, res, next) => {
+  const log = chatLogger(newTraceId());
   try {
     const bundle = await getBundle(req.params.bundleId as string);
     if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
@@ -911,7 +943,8 @@ router.post('/:bundleId/compact', async (req, res, next) => {
       },
     ];
 
-    const result = await chatCompletion(summaryRequest);
+    log.info(`Compact: ${messages.length} msgs, chatId=${chatId ?? 'none'}`);
+    const result = await chatCompletion(summaryRequest, undefined, log);
     const summary = result.content.trim();
 
     // Persist the compaction event to the chat timeline.
@@ -928,6 +961,7 @@ router.post('/:bundleId/compact', async (req, res, next) => {
 
     res.json({ summary });
   } catch (err) {
+    log.errorTrace('Compact failed', err);
     next(err);
   }
 });
@@ -939,6 +973,7 @@ router.post('/:bundleId/compact', async (req, res, next) => {
  * derived from the conversation. Updates the persisted session title.
  */
 router.post('/:bundleId/retitle', async (req, res, next) => {
+  const log = chatLogger(newTraceId());
   try {
     const bundle = await getBundle(req.params.bundleId as string);
     if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
@@ -973,7 +1008,8 @@ router.post('/:bundleId/retitle', async (req, res, next) => {
       },
     ];
 
-    const result = await chatCompletion(titleRequest);
+    log.info(`Retitle: ${messages.length} msgs, chatId=${chatId ?? 'none'}`);
+    const result = await chatCompletion(titleRequest, undefined, log);
     const title = result.content.trim().replace(/^["']|["']$/g, '').slice(0, 60);
 
     if (chatId && title) {
@@ -986,6 +1022,7 @@ router.post('/:bundleId/retitle', async (req, res, next) => {
 
     res.json({ title });
   } catch (err) {
+    log.errorTrace('Retitle failed', err);
     next(err);
   }
 });

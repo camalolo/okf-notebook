@@ -6,6 +6,8 @@
  * until 30s before expiry. Uses Node 22 native fetch (globalThis.fetch).
  */
 
+import type { ChatLogger } from './logger.js';
+
 // --- Token management -------------------------------------------------------
 
 const TOKEN_URL = 'https://example.com/api/token';
@@ -26,20 +28,32 @@ interface TokenResponse {
 }
 
 /** Fetch a fresh token from the proxy, caching it until 30s before expiry. */
-async function getToken(): Promise<string> {
+async function getToken(log?: ChatLogger): Promise<string> {
   // Reuse cached token if it's still valid (with a 30s safety margin).
   const now = Math.floor(Date.now() / 1000);
   if (cachedToken && tokenExpiry - now > 30) {
+    log?.debug('Token: using cached token');
     return cachedToken;
   }
 
+  log?.info('Token: fetching fresh token from proxy');
+  const t0 = Date.now();
   const res = await fetch(TOKEN_URL, { headers: COMMON_HEADERS });
   if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    log?.error(`Token: fetch failed ${res.status} ${res.statusText} (${body.slice(0, 200)})`);
     throw new Error(`Token request failed: ${res.status} ${res.statusText}`);
   }
-  const data = (await res.json()) as TokenResponse;
+  let data: TokenResponse;
+  try {
+    data = (await res.json()) as TokenResponse;
+  } catch (err) {
+    log?.errorTrace('Token: JSON parse failed', err);
+    throw new Error('Token response was not valid JSON', { cause: err });
+  }
   cachedToken = data.token;
   tokenExpiry = data.expires;
+  log?.info(`Token: acquired (expires in ${data.expires - now}s, ${Date.now() - t0}ms)`);
   return cachedToken;
 }
 
@@ -102,8 +116,9 @@ interface ZaiResponse {
 export async function chatCompletion(
   messages: ChatMessage[],
   tools?: ToolDefinition[],
+  log?: ChatLogger,
 ): Promise<ChatCompletionResult> {
-  const token = await getToken();
+  const token = await getToken(log);
 
   const body: Record<string, unknown> = {
     model: MODEL,
@@ -114,6 +129,8 @@ export async function chatCompletion(
     body.tool_choice = 'auto';
   }
 
+  log?.info(`Non-streaming request: ${messages.length} msgs, ${tools?.length ?? 0} tools`);
+  const t0 = Date.now();
   const res = await fetch(ZAI_URL, {
     method: 'POST',
     headers: {
@@ -126,10 +143,10 @@ export async function chatCompletion(
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    // Invalidate cached token on auth errors so the next call re-fetches.
     if (res.status === 401 || res.status === 403) {
       cachedToken = null;
     }
+    log?.error(`Non-streaming: HTTP ${res.status} (${Date.now() - t0}ms): ${text.slice(0, 300)}`);
     throw new Error(`Z.ai request failed (${res.status}): ${text.slice(0, 500)}`);
   }
 
@@ -137,13 +154,20 @@ export async function chatCompletion(
 
   if (data.error) {
     const msg = typeof data.error === 'string' ? data.error : data.error.message ?? 'Unknown error';
+    log?.error(`Non-streaming: API error: ${msg}`);
     throw new Error(`Z.ai API error: ${msg}`);
   }
 
   const message = data.choices?.[0]?.message;
   if (!message) {
+    log?.warn(`Non-streaming: response missing choices[0].message (${Date.now() - t0}ms)`);
     throw new Error('Z.ai response missing choices[0].message');
   }
+
+  log?.info(
+    `Non-streaming: ok (${Date.now() - t0}ms), ${(message.content ?? '').length} chars` +
+    (message.tool_calls ? `, ${message.tool_calls.length} tool calls` : ''),
+  );
 
   return {
     content: message.content ?? '',
@@ -186,8 +210,9 @@ export async function chatCompletionStream(
   tools: ToolDefinition[] | undefined,
   onDelta: (text: string) => void,
   signal?: AbortSignal,
+  log?: ChatLogger,
 ): Promise<ChatCompletionResult> {
-  const token = await getToken();
+  const token = await getToken(log);
 
   const body: Record<string, unknown> = {
     model: MODEL,
@@ -199,6 +224,8 @@ export async function chatCompletionStream(
     body.tool_choice = 'auto';
   }
 
+  log?.info(`Streaming request: ${messages.length} msgs, ${tools?.length ?? 0} tools`);
+  const t0 = Date.now();
   const res = await fetch(ZAI_URL, {
     method: 'POST',
     headers: {
@@ -215,17 +242,25 @@ export async function chatCompletionStream(
     if (res.status === 401 || res.status === 403) {
       cachedToken = null;
     }
+    log?.error(`Streaming: HTTP ${res.status} (${Date.now() - t0}ms): ${text.slice(0, 300)}`);
     throw new Error(`Z.ai request failed (${res.status}): ${text.slice(0, 500)}`);
   }
 
   if (!res.body) {
+    log?.error('Streaming: response has no body');
     throw new Error('Z.ai streaming response has no body');
   }
+
+  log?.debug(`Streaming: connection open (${Date.now() - t0}ms), reading SSE stream`);
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let content = '';
+  let chunkCount = 0;
+  let dataLineCount = 0;
+  let parseFailCount = 0;
+  let firstContentMs = 0;
   const toolCallMap = new Map<
     number,
     { id: string; name: string; arguments: string }
@@ -236,6 +271,7 @@ export async function chatCompletionStream(
       const { done, value } = await reader.read();
       if (done) break;
 
+      chunkCount++;
       buffer += decoder.decode(value, { stream: true });
 
       // SSE events are separated by blank lines; lines within an event end with \n.
@@ -249,11 +285,13 @@ export async function chatCompletionStream(
         if (!trimmed.startsWith('data: ')) continue;
         const payload = trimmed.slice(6);
         if (payload === '[DONE]') continue;
+        dataLineCount++;
 
         let chunk: ZaiStreamChunk;
         try {
           chunk = JSON.parse(payload) as ZaiStreamChunk;
         } catch {
+          parseFailCount++;
           continue; // skip malformed
         }
 
@@ -262,6 +300,7 @@ export async function chatCompletionStream(
             typeof chunk.error === 'string'
               ? chunk.error
               : chunk.error.message ?? 'Unknown error';
+          log?.error(`Streaming: API error in chunk: ${msg}`);
           throw new Error(`Z.ai API error: ${msg}`);
         }
 
@@ -269,6 +308,7 @@ export async function chatCompletionStream(
         if (!delta) continue;
 
         if (delta.content) {
+          if (!firstContentMs) firstContentMs = Date.now() - t0;
           content += delta.content;
           onDelta(delta.content);
         }
@@ -293,6 +333,7 @@ export async function chatCompletionStream(
     if (buffer.trim().startsWith('data: ')) {
       const payload = buffer.trim().slice(6);
       if (payload !== '[DONE]') {
+        dataLineCount++;
         try {
           const chunk = JSON.parse(payload) as ZaiStreamChunk;
           const delta = chunk.choices?.[0]?.delta;
@@ -313,7 +354,7 @@ export async function chatCompletionStream(
             }
           }
         } catch {
-          // ignore
+          parseFailCount++;
         }
       }
     }
@@ -332,10 +373,27 @@ export async function chatCompletionStream(
       }));
   }
 
+  const elapsed = Date.now() - t0;
+
   if (content.trim() && !tool_calls) {
-    console.log(`[llm] Stream ended with ${content.length} chars content, no tool calls`);
+    log?.info(
+      `Stream complete (${elapsed}ms): ${content.length} chars content` +
+      ` | ${chunkCount} chunks, ${dataLineCount} data lines, ${parseFailCount} parse failures` +
+      (firstContentMs ? `, first token ${firstContentMs}ms` : ''),
+    );
   } else if (tool_calls) {
-    console.log(`[llm] Stream ended with ${tool_calls.length} tool call(s): ${tool_calls.map(t => t.function.name).join(', ')}`);
+    log?.info(
+      `Stream complete (${elapsed}ms): ${tool_calls.length} tool call(s): ${tool_calls.map(t => t.function.name).join(', ')}` +
+      ` | ${chunkCount} chunks, ${dataLineCount} data lines, ${parseFailCount} parse failures`,
+    );
+  } else {
+    // ⚠️ Empty response — no content, no tool calls. This is the most likely
+    // cause of "the LLM didn't answer" — the upstream returned nothing useful.
+    log?.warn(
+      `Stream complete but EMPTY (${elapsed}ms): 0 chars, no tool calls` +
+      ` | ${chunkCount} chunks, ${dataLineCount} data lines, ${parseFailCount} parse failures` +
+      ' — possible proxy error or empty upstream response',
+    );
   }
 
   return { content, tool_calls };
