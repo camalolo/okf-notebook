@@ -50,13 +50,26 @@ function parseEvent(block: string): ChatSSEEvent | null {
  * Sends the full message history via POST and yields parsed SSE events as they
  * arrive. The response body is consumed as a `ReadableStream` and buffered so
  * that events split across network chunks are reassembled correctly.
+ *
+ * All SSE events are logged to the browser console for debugging (especially
+ * when the LLM produces no visible response). Set `localStorage.debug = 'chat'`
+ * for verbose per-event logging.
  */
+const CHAT_DEBUG = typeof localStorage !== 'undefined' && localStorage.getItem('debug')?.includes('chat');
+
+function logChat(level: 'log' | 'warn' | 'error', msg: string, ...args: unknown[]) {
+  const fn = level === 'log' ? console.log : level === 'warn' ? console.warn : console.error;
+  fn(`%c[chat]`, 'color: #6b8cff; font-weight: bold', msg, ...args);
+}
+
 export async function* streamChat(
   bundleId: string,
   messages: ChatMessage[],
   chatId?: string | null,
   signal?: AbortSignal,
 ): AsyncGenerator<ChatSSEEvent> {
+  logChat('log', `→ POST /bundles/${bundleId}/chat (${messages.length} msgs, chatId=${chatId ?? 'none'})`);
+
   const res = await fetch(
     `/api/notebook/bundles/${encodeURIComponent(bundleId)}/chat`,
     {
@@ -88,12 +101,18 @@ export async function* streamChat(
         message = text;
       }
     }
+    logChat('error', `← HTTP ${res.status}: ${message}`);
     throw new Error(message);
   }
+
+  logChat('log', `← SSE stream open (HTTP ${res.status})`);
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let eventCount = 0;
+  let sawDone = false;
+  let sawError = false;
 
   try {
     for (;;) {
@@ -110,7 +129,18 @@ export async function* streamChat(
 
       for (const block of parts) {
         const parsed = parseEvent(block);
-        if (parsed) yield parsed;
+        if (parsed) {
+          eventCount++;
+          if (parsed.event === 'done') sawDone = true;
+          if (parsed.event === 'error') sawError = true;
+          if (CHAT_DEBUG) {
+            const summary = typeof parsed.data === 'object' && parsed.data
+              ? JSON.stringify(parsed.data).slice(0, 120)
+              : String(parsed.data).slice(0, 120);
+            logChat('log', `  event #${eventCount}: ${parsed.event} ${summary}`);
+          }
+          yield parsed;
+        }
       }
     }
 
@@ -119,7 +149,22 @@ export async function* streamChat(
     buffer = buffer.replace(/\r\n/g, '\n');
     if (buffer.trim()) {
       const parsed = parseEvent(buffer);
-      if (parsed) yield parsed;
+      if (parsed) {
+        eventCount++;
+        if (parsed.event === 'done') sawDone = true;
+        if (parsed.event === 'error') sawError = true;
+        if (CHAT_DEBUG) logChat('log', `  event #${eventCount} (flushed): ${parsed.event}`);
+        yield parsed;
+      }
+    }
+
+    // Log how the stream ended — critical for debugging "LLM didn't answer"
+    if (sawError) {
+      logChat('error', `← Stream ended with ERROR (${eventCount} events received)`);
+    } else if (sawDone) {
+      logChat('log', `← Stream ended normally (${eventCount} events)`);
+    } else {
+      logChat('warn', `← Stream ended WITHOUT done/error event (${eventCount} events) — possible server crash or connection drop`);
     }
   } finally {
     reader.releaseLock();
