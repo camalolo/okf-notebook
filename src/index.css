@@ -2404,4 +2404,27 @@ img {
   .file-reader-panel {
     width: 100vw;
   }
+
+  .chat-header {
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .chat-header-left {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .chat-header-right {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .chat-new-btn,
+  .chat-compact-btn {
+    padding: 4px 8px;
+    font-size: 0.75rem;
+  }
 }
