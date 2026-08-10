@@ -198,7 +198,7 @@ const WEB_SEARCH_TOOL: ToolDefinition = {
   },
 };
 
-const READONLY_TOOLS: ToolDefinition[] = [
+export const READONLY_TOOLS: ToolDefinition[] = [
   READ_FILE_TOOL,
   LIST_FILES_TOOL,
   WEB_SEARCH_TOOL,
@@ -215,7 +215,7 @@ const FULL_TOOLS: ToolDefinition[] = [
 // --- Helpers ----------------------------------------------------------------
 
 /** Recursively list all .md file paths (relative) in a directory. */
-async function listMdFiles(dir: string, prefix: string): Promise<string[]> {
+export async function listMdFiles(dir: string, prefix: string): Promise<string[]> {
   let entries: import('node:fs').Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -299,14 +299,14 @@ function searchReplace(content: string, oldStr: string, newStr: string): string 
   return [...before, newStr, ...after].join('\n');
 }
 
-interface ToolContext {
+export interface ToolContext {
   bundle: BundleConfig;
   user?: Express.User;
 }
 
 /** Execute a single tool call, returning a JSON-serializable result object. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function executeTool(name: string, args: any, ctx: ToolContext): Promise<any> {
+export async function executeTool(name: string, args: any, ctx: ToolContext): Promise<any> {
   const { bundle } = ctx;
   const bundlePath = bundle.path;
 
@@ -487,7 +487,7 @@ async function executeTool(name: string, args: any, ctx: ToolContext): Promise<a
 }
 
 /** Build the system prompt for a bundle. */
-async function buildSystemPrompt(bundle: BundleConfig): Promise<string> {
+export async function buildSystemPrompt(bundle: BundleConfig): Promise<string> {
   const bundlePath = bundle.path;
 
   // Read AGENTS.md (if present).

@@ -11,6 +11,7 @@ import chatsRouter from './routes/chats.js';
 import authRouter from './routes/auth.js';
 import { mcpManager } from './lib/mcp-manager.js';
 import type { McpServerConfig } from './lib/mcp-manager.js';
+import { startDigestScheduler, runDigestTick } from './lib/scheduler.js';
 
 // --- MCP server configuration ------------------------------------------------
 
@@ -121,12 +122,41 @@ if (existsSync(path.join(publicDir, 'index.html'))) {
 
 // Start MCP servers then listen.
 async function main() {
+  // CLI: `node server/index.ts --run-digest [bundleId]` runs one digest tick
+  // (all bundles, or a specific one), prints a short summary, and exits.
+  // Bypasses the lastrun idempotency gate so you can iterate on the prompt.
+  const digestArgIdx = process.argv.indexOf('--run-digest');
+  if (digestArgIdx !== -1) {
+    const onlyBundleId = process.argv[digestArgIdx + 1];
+    const records = await runDigestTick({ onlyBundleId, force: true });
+    if (onlyBundleId && records.length === 0) {
+      // eslint-disable-next-line no-console
+      console.error(`Bundle not found: ${onlyBundleId}`);
+      process.exit(1);
+    }
+    for (const r of records) {
+      const detail = r.subject ? ` subject="${r.subject}"` : '';
+      // eslint-disable-next-line no-console
+      console.log(
+        `[digest] ${r.bundleId}: ${r.status} (${r.iterations} iter, ${r.durationMs}ms${detail})` +
+        (r.error ? ` ERROR: ${r.error}` : ''),
+      );
+    }
+    const anyError = records.some(
+      (r) => r.status === 'error' || r.status === 'parse_failed',
+    );
+    process.exit(anyError ? 1 : 0);
+  }
+
   await mcpManager.start(MCP_SERVERS);
 
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`Notebook API listening on port ${PORT}`);
   });
+
+  // Start the daily digest cron (no-op if DIGEST_DISABLED=1).
+  startDigestScheduler();
 }
 
 main().catch((err) => {
