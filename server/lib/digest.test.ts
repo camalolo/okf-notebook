@@ -1,184 +1,118 @@
 /**
- * Tests for the digest decision parser — the boundary that protects the email
- * channel. The LLM is instructed to return one of two JSON shapes; the runner
- * must accept well-formed replies (including common LLM quirks like fenced
- * code blocks or trailing prose) and reject anything that doesn't match the
- * schema, so a malformed reply can never trigger an email.
+ * Tests for interpretDecision — the boundary that protects the email channel.
+ *
+ * The model's terminal tool call (skip_digest / send_digest) is interpreted
+ * strictly: missing or malformed args can never trigger an email send.
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseDecision, extractJson, escapeControlCharsInStrings } from './digest.js';
+import { interpretDecision } from './digest.js';
+import type { ToolCallRecord } from './bundle-agent.js';
 
-describe('extractJson', () => {
-  it('returns raw input when it already starts with {', () => {
-    expect(extractJson('{"sendEmail": false}')).toBe('{"sendEmail": false}');
-  });
+function tc(name: string, args: unknown): ToolCallRecord {
+  return { name, args, result: { captured: true } };
+}
 
-  it('strips a ```json fenced block', () => {
-    const raw = 'Here is my decision:\n```json\n{"sendEmail": true}\n```\n';
-    expect(extractJson(raw)).toBe('{"sendEmail": true}');
-  });
-
-  it('strips a bare ``` fenced block', () => {
-    const raw = '```\n{"sendEmail": false}\n```';
-    expect(extractJson(raw)).toBe('{"sendEmail": false}');
-  });
-
-  it('extracts a trailing JSON object surrounded by prose', () => {
-    const raw = 'Sure! My answer is:\n{"sendEmail": false}\nThanks.';
-    expect(extractJson(raw)).toBe('{"sendEmail": false}');
-  });
-
-  it('returns null for empty or non-JSON input', () => {
-    expect(extractJson('')).toBeNull();
-    expect(extractJson('   ')).toBeNull();
-    expect(extractJson('just prose, no JSON')).toBeNull();
-  });
-});
-
-describe('parseDecision', () => {
-  it('accepts a clean sendEmail=false reply', () => {
-    const r = parseDecision('{"sendEmail": false}');
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.decision.sendEmail).toBe(false);
-  });
-
-  it('accepts a clean sendEmail=true reply with all required fields', () => {
-    const raw = JSON.stringify({
-      sendEmail: true,
-      urgency: 'high',
-      subject: 'Tomorrow: payment due',
-      body: 'Pay NT$576 at the office.',
+describe('interpretDecision', () => {
+  describe('skip path', () => {
+    it('accepts skip_digest with no args', () => {
+      expect(interpretDecision(tc('skip_digest', {}))).toEqual({ kind: 'skip' });
     });
-    const r = parseDecision(raw);
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.decision.sendEmail).toBe(true);
-      expect(r.decision.urgency).toBe('high');
-      expect(r.decision.subject).toBe('Tomorrow: payment due');
-    }
+
+    it('accepts skip_digest even if extra args are present', () => {
+      // The model sometimes adds unwanted fields; skip should still be skip.
+      expect(interpretDecision(tc('skip_digest', { reason: 'nothing urgent' }))).toEqual({ kind: 'skip' });
+    });
   });
 
-  it('accepts a fenced reply despite instructions saying not to fence', () => {
-    const raw = '```json\n{"sendEmail": false}\n```';
-    const r = parseDecision(raw);
-    expect(r.ok).toBe(true);
+  describe('send path', () => {
+    it('accepts send_digest with valid urgency, subject, and body', () => {
+      const r = interpretDecision(tc('send_digest', {
+        urgency: 'high',
+        subject: 'Today Aug 11: payment due',
+        body: 'Pay NT$576 at the office.',
+      }));
+      expect(r).toEqual({
+        kind: 'send',
+        urgency: 'high',
+        subject: 'Today Aug 11: payment due',
+        body: 'Pay NT$576 at the office.',
+      });
+    });
+
+    it('accepts all three urgency levels', () => {
+      for (const u of ['low', 'medium', 'high'] as const) {
+        const r = interpretDecision(tc('send_digest', { urgency: u, subject: 's', body: 'b' }));
+        expect(r.kind).toBe('send');
+        if (r.kind === 'send') expect(r.urgency).toBe(u);
+      }
+    });
+
+    it('accepts a body containing newlines (the original bug, now via tool args)', () => {
+      // Tool-call args are JSON, so newlines arrive as proper \n escapes — no
+      // control-char sanitizer needed. We still verify the body survives intact.
+      const body = 'Line 1\nLine 2\n- bullet';
+      const r = interpretDecision(tc('send_digest', { urgency: 'low', subject: 's', body }));
+      expect(r.kind).toBe('send');
+      if (r.kind === 'send') expect(r.body).toBe(body);
+    });
   });
 
-  it('rejects a non-boolean sendEmail', () => {
-    const r = parseDecision('{"sendEmail": "yes"}');
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/sendEmail/);
+  describe('invalid: send_digest with bad args', () => {
+    it('rejects an invalid urgency enum value', () => {
+      const r = interpretDecision(tc('send_digest', { urgency: 'critical', subject: 's', body: 'b' }));
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') expect(r.reason).toMatch(/urgency/);
+    });
+
+    it('rejects a missing urgency', () => {
+      const r = interpretDecision(tc('send_digest', { subject: 's', body: 'b' }));
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') expect(r.reason).toMatch(/urgency/);
+    });
+
+    it('rejects a missing subject', () => {
+      const r = interpretDecision(tc('send_digest', { urgency: 'low', body: 'b' }));
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') expect(r.reason).toMatch(/subject/);
+    });
+
+    it('rejects an empty / whitespace-only subject', () => {
+      const r = interpretDecision(tc('send_digest', { urgency: 'low', subject: '   ', body: 'b' }));
+      expect(r.kind).toBe('invalid');
+    });
+
+    it('rejects a missing body', () => {
+      const r = interpretDecision(tc('send_digest', { urgency: 'low', subject: 's' }));
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') expect(r.reason).toMatch(/body/);
+    });
+
+    it('rejects an empty body', () => {
+      const r = interpretDecision(tc('send_digest', { urgency: 'low', subject: 's', body: '' }));
+      expect(r.kind).toBe('invalid');
+    });
+
+    it('rejects a non-string subject (e.g. a number leaked in)', () => {
+      const r = interpretDecision(tc('send_digest', { urgency: 'low', subject: 42, body: 'b' }));
+      expect(r.kind).toBe('invalid');
+    });
   });
 
-  it('rejects sendEmail=true with a missing subject', () => {
-    const raw = JSON.stringify({ sendEmail: true, urgency: 'low', body: 'x' });
-    const r = parseDecision(raw);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/subject/);
+  describe('invalid: no terminal tool called', () => {
+    it('treats undefined as invalid (model ended with plain text)', () => {
+      const r = interpretDecision(undefined);
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') expect(r.reason).toMatch(/without calling/);
+    });
   });
 
-  it('rejects sendEmail=true with an empty-string subject', () => {
-    const raw = JSON.stringify({ sendEmail: true, urgency: 'low', subject: '   ', body: 'x' });
-    const r = parseDecision(raw);
-    expect(r.ok).toBe(false);
-  });
-
-  it('rejects sendEmail=true with a missing body', () => {
-    const raw = JSON.stringify({ sendEmail: true, urgency: 'low', subject: 'x' });
-    const r = parseDecision(raw);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/body/);
-  });
-
-  it('rejects sendEmail=true with an invalid urgency value', () => {
-    const raw = JSON.stringify({ sendEmail: true, urgency: 'critical', subject: 'x', body: 'y' });
-    const r = parseDecision(raw);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/urgency/);
-  });
-
-  it('rejects unparseable input without throwing', () => {
-    const r = parseDecision('the dog ate my homework');
-    expect(r.ok).toBe(false);
-  });
-
-  it('rejects an array (wrong top-level shape)', () => {
-    const r = parseDecision('[1, 2, 3]');
-    expect(r.ok).toBe(false);
-  });
-
-  it('rejects a parsed value that is not an object', () => {
-    // A bare quoted string doesn't begin with `{` so extractJson bails first;
-    // the rejection reason mentions "no JSON object found".
-    const r = parseDecision('"just a string"');
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/no JSON object/);
-  });
-});
-
-describe('escapeControlCharsInStrings', () => {
-  it('is a no-op on text with no string literals', () => {
-    expect(escapeControlCharsInStrings('12345')).toBe('12345');
-  });
-
-  it('is a no-op on already-correct JSON (no false positives)', () => {
-    const correct = '{"a":"b","c":"d\\ne"}';
-    expect(escapeControlCharsInStrings(correct)).toBe(correct);
-  });
-
-  it('escapes raw newlines inside string values', () => {
-    // LLM quirk: bare 0x0A inside the "body" string instead of \n.
-    const bad = '{"k":"line1\nline2"}'; // ← that \n is a real newline byte
-    expect(escapeControlCharsInStrings(bad)).toBe('{"k":"line1\\nline2"}');
-  });
-
-  it('escapes raw tabs inside string values', () => {
-    const bad = '{"k":"col1\tcol2"}';
-    expect(escapeControlCharsInStrings(bad)).toBe('{"k":"col1\\tcol2"}');
-  });
-
-  it('preserves existing backslash escapes (does not double-escape)', () => {
-    // Already-correct \n stays as \n; raw tab gets escaped.
-    const mixed = '{"k":"ok\\nhere\ttab"}';
-    expect(escapeControlCharsInStrings(mixed)).toBe('{"k":"ok\\nhere\\ttab"}');
-  });
-
-  it('escapes other control characters as \\uXXXX', () => {
-    const bad = '{"k":"a\u0001b"}';
-    expect(escapeControlCharsInStrings(bad)).toBe('{"k":"a\\u0001b"}');
-  });
-
-  it('leaves raw newlines OUTSIDE string literals untouched (valid JSON whitespace)', () => {
-    const text = '{\n  "k": "v"\n}';
-    expect(escapeControlCharsInStrings(text)).toBe('{\n  "k": "v"\n}');
-  });
-});
-
-describe('parseDecision with lenient JSON parsing', () => {
-  it('accepts a body containing raw newlines (the demo 2026-08-11 bug)', () => {
-    // Real production failure: the LLM wrote markdown body content with
-    // literal newline bytes instead of \n escapes, which strict JSON.parse
-    // rejects as "Bad control character in string literal".
-    const raw = [
-      '{"sendEmail": true, "urgency": "high", "subject": "Today: payment due", "body": "**Items due today:**',
-      '',
-      '- **Payment NT$576** at the office, 08:30–16:00.',
-      '- **Math class** 15:00–18:00, room 503."}',
-    ].join('\n');
-    const r = parseDecision(raw);
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.decision.sendEmail).toBe(true);
-      expect(r.decision.urgency).toBe('high');
-      expect((r.decision.body as string)).toMatch(/Payment NT\$576/);
-      expect((r.decision.body as string)).toMatch(/Math class/);
-    }
-  });
-
-  it('still rejects genuinely malformed JSON (not just unescaped control chars)', () => {
-    const r = parseDecision('{"sendEmail": true, "body":}');
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/JSON.parse failed/);
+  describe('invalid: unexpected tool name', () => {
+    it('rejects a terminal tool name we did not advertise', () => {
+      // Defensive — would only happen if the model hallucinated a name.
+      const r = interpretDecision(tc('email_digest', { subject: 's', body: 'b', urgency: 'low' }));
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') expect(r.reason).toMatch(/unexpected terminal tool/);
+    });
   });
 });

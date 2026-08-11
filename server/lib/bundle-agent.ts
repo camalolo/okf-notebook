@@ -13,7 +13,7 @@
 
 import type { BundleConfig } from '../config.js';
 import type { ChatLogger } from './logger.js';
-import type { ChatMessage } from './llm.js';
+import type { ChatMessage, ToolDefinition } from './llm.js';
 import { chatCompletionStream } from './llm.js';
 import {
   READONLY_TOOLS,
@@ -40,6 +40,13 @@ export interface RunReadOnlyTaskResult {
   iterations: number;
   /** True if the loop hit the iteration cap instead of terminating naturally. */
   capped: boolean;
+  /**
+   * The terminal tool call that ended the run, if any. Terminal tools
+   * (declared via `RunReadOnlyTaskOptions.terminalTools`) are NOT dispatched
+   * through executeTool — they're signals from the model that it has reached
+   * a decision. The caller inspects this to extract structured output.
+   */
+  terminalToolCall?: ToolCallRecord;
 }
 
 export interface RunReadOnlyTaskOptions {
@@ -54,11 +61,24 @@ export interface RunReadOnlyTaskOptions {
    * Use this to give the task its own instructions (e.g. digest rules).
    */
   systemPromptSuffix?: string;
+  /**
+   * Additional tool definitions advertised to the LLM alongside the read-only
+   * bundle tools (read_file, list_files, web_search). Use for task-specific
+   * decision tools (e.g. skip_digest / send_digest).
+   */
+  extraTools?: ToolDefinition[];
+  /**
+   * Names of tools that, when called by the model, terminate the run.
+   * Terminal tool calls are recorded in `result.terminalToolCall` (and in
+   * `result.toolCalls`) but NOT dispatched through executeTool — the caller
+   * interprets them. The loop exits as soon as the model invokes one.
+   */
+  terminalTools?: Set<string>;
 }
 
 /**
  * Run an LLM task against a bundle with read-only tools, until the model
- * produces a turn with no tool calls.
+ * produces a turn with no tool calls or invokes a terminal tool.
  *
  * @param bundle    Bundle to operate on.
  * @param userPrompt The task instruction (role: 'user').
@@ -71,6 +91,10 @@ export async function runReadOnlyTask(
 ): Promise<RunReadOnlyTaskResult> {
   const maxIterations = opts.maxIterations ?? 20;
   const ctx: ToolContext = { bundle };
+  const terminalTools = opts.terminalTools ?? new Set<string>();
+  const advertisedTools = opts.extraTools?.length
+    ? [...READONLY_TOOLS, ...opts.extraTools]
+    : READONLY_TOOLS;
 
   const baseSystem = await buildSystemPrompt(bundle);
   const systemPrompt = opts.systemPromptSuffix
@@ -86,6 +110,7 @@ export async function runReadOnlyTask(
   let content = '';
   let iterations = 0;
   let capped = false;
+  let terminalToolCall: ToolCallRecord | undefined;
 
   for (let i = 0; i < maxIterations; i++) {
     iterations = i + 1;
@@ -97,14 +122,14 @@ export async function runReadOnlyTask(
     let turnContent = '';
     const response = await chatCompletionStream(
       messages,
-      READONLY_TOOLS,
+      advertisedTools,
       (delta) => { turnContent += delta; },
       opts.signal,
       opts.log,
     );
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
-      // Terminal turn: final answer.
+      // Terminal turn: final answer (no tool calls).
       content = turnContent || response.content || '';
       break;
     }
@@ -116,6 +141,7 @@ export async function runReadOnlyTask(
       tool_calls: response.tool_calls,
     });
 
+    let terminalHit = false;
     for (const tc of response.tool_calls) {
       if (opts.signal?.aborted) break;
 
@@ -125,6 +151,16 @@ export async function runReadOnlyTask(
         parsedArgs = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
       } catch {
         parsedArgs = {};
+      }
+
+      // Terminal tool: capture and stop (do NOT dispatch through executeTool).
+      if (terminalTools.has(tc.function.name)) {
+        const record: ToolCallRecord = { name: tc.function.name, args: parsedArgs, result: { captured: true } };
+        toolCalls.push(record);
+        terminalToolCall = record;
+        opts.log?.debug(`Terminal tool: ${tc.function.name}`);
+        terminalHit = true;
+        break;
       }
 
       let result: unknown;
@@ -143,6 +179,7 @@ export async function runReadOnlyTask(
       });
     }
 
+    if (terminalHit) break;
     if (opts.signal?.aborted) break;
 
     // If this was the last allowed iteration, mark capped and stop without
@@ -153,5 +190,5 @@ export async function runReadOnlyTask(
     }
   }
 
-  return { content, toolCalls, iterations, capped };
+  return { content, toolCalls, iterations, capped, terminalToolCall };
 }

@@ -3,9 +3,13 @@
  * actionable within the next 24 hours and either send an email summary or
  * stay silent.
  *
- * The runner owns the email channel — the LLM never gets a send_mail tool.
- * It returns structured JSON; the runner parses it strictly and, only if
- * `sendEmail === true`, hands the composed subject/body to the mailer.
+ * Decision mechanism: the LLM signals its decision by calling one of two
+ * terminal tools — `skip_digest` (nothing urgent) or `send_digest` (with
+ * subject/body/urgency args). Tool-call arguments are schema-constrained
+ * JSON, so this avoids the brittleness of parsing free-text JSON replies
+ * (which previously failed on LLM-quoted control characters in markdown
+ * bodies). The runner, not the model, performs the actual SMTP send — the
+ * model never has direct control of the email channel.
  *
  * Each run produces a JSON record under data/digests/{bundleId}/{date}.json
  * so you can audit what the model read, what it concluded, and whether an
@@ -20,8 +24,67 @@ import { runReadOnlyTask, type ToolCallRecord } from './bundle-agent.js';
 import { sendMail } from './mailer.js';
 import { DIGEST_TO } from '../config.js';
 import type { BundleConfig } from '../config.js';
+import type { ToolDefinition } from './llm.js';
 
 const DATA_DIR = path.resolve(import.meta.dirname, '..', '..', 'data', 'digests');
+
+// --- Decision tools ---------------------------------------------------------
+
+/** Tool name constants. Declared as terminalTools in runReadOnlyTask. */
+const SKIP_DIGEST = 'skip_digest';
+const SEND_DIGEST = 'send_digest';
+
+const SKIP_DIGEST_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: SKIP_DIGEST,
+    description:
+      'Signal that nothing in this notebook needs attention within the next 24 hours. ' +
+      'No email will be sent. Call this when your review is complete and nothing is actionable.',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+  },
+};
+
+const SEND_DIGEST_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: SEND_DIGEST,
+    description:
+      'Signal that one or more items need attention within the next 24 hours. ' +
+      'An email with the subject and body you provide will be sent to the configured recipient. ' +
+      'Only call this when you have verified the items against files you have read.',
+    parameters: {
+      type: 'object',
+      properties: {
+        urgency: {
+          type: 'string',
+          enum: ['low', 'medium', 'high'],
+          description: 'How urgent the items are. Use "high" for same-day deadlines or anything with a hard cutoff.',
+        },
+        subject: {
+          type: 'string',
+          description: 'Short email subject, typically leading with the date and the most urgent item. e.g. "Today Aug 11: Pay NT$576 + Math class 15:00".',
+        },
+        body: {
+          type: 'string',
+          description:
+            'Markdown email body. Concise — typically 3-10 bullet points. Lead with the most urgent item. ' +
+            'Reference source files with relative markdown links like [appt](health/appointments.md). ' +
+            'Include dates, times, and timezones. Mention any web_search lookups inline briefly.',
+        },
+      },
+      required: ['urgency', 'subject', 'body'],
+    },
+  },
+};
+
+const DIGEST_DECISION_TOOLS: ToolDefinition[] = [SKIP_DIGEST_TOOL, SEND_DIGEST_TOOL];
+const TERMINAL_TOOLS = new Set<string>([SKIP_DIGEST, SEND_DIGEST]);
+
+// --- Task prompt ------------------------------------------------------------
 
 const DIGEST_TASK_PROMPT = [
   'You are doing the daily review of this notebook.',
@@ -37,31 +100,23 @@ const DIGEST_TASK_PROMPT = [
   '   (e.g. tomorrow\'s weather, a public holiday, a news event tied to a',
   '   tracked item), use web_search to look it up. Otherwise skip web_search.',
   '',
-  'Decision rule:',
-  '- If NOTHING in the bundle is due, scheduled, or flagged for action in the',
-  '  next 24 hours, reply with exactly: {"sendEmail": false}',
-  '- If something needs attention, reply with a JSON object exactly in this shape:',
-  '  {"sendEmail": true, "urgency": "low|medium|high", "subject": "<short subject>", "body": "<markdown summary>"}',
+  'When you are done, signal your decision by calling EXACTLY ONE of:',
+  '- skip_digest    — if nothing needs attention in the next 24 hours.',
+  '- send_digest    — if one or more items need attention, passing urgency,',
+  '                   subject, and body. Do not invent items; if you are unsure',
+  '                   whether something falls in the next 24h, call skip_digest.',
   '',
-  'Body guidelines:',
-  '- Be concise — typically 3-10 bullet points.',
-  '- Lead with the most urgent item.',
-  '- Reference the source file with a relative markdown link, e.g. [appt](health/appointments.md).',
-  '- Include dates and times with the timezone.',
-  '- If you used web_search to confirm a fact, mention it inline briefly.',
-  '',
-  'Hard requirements for your reply:',
-  '- Reply with ONLY the JSON object. No prose before or after.',
-  '- No markdown code fences. No "Here is...". Just the raw JSON.',
-  '- Do not invent items. If you are unsure whether something is in the next 24h,',
-  '  treat it as not actionable and set sendEmail=false.',
+  'Do not emit a final text answer. Your turn is complete once you call one of',
+  'these tools. Use plain text only between tool calls to think out loud if useful.',
 ].join('\n');
 
+// --- Types ------------------------------------------------------------------
+
 export type DigestStatus =
-  | 'ok'           // completed; no action needed (sendEmail=false)
+  | 'ok'           // completed; nothing actionable (skip_digest called)
   | 'emailed'      // completed; email sent
   | 'no_recipient' // completed; would have emailed but DIGEST_TO unset
-  | 'parse_failed' // final assistant turn was not valid JSON / wrong schema
+  | 'parse_failed' // model ended without calling skip_digest / send_digest
   | 'error';       // exception during the run
 
 export interface DigestRunRecord {
@@ -83,40 +138,14 @@ export interface DigestRunRecord {
   /** Whether the iteration cap was hit. */
   capped: boolean;
   toolCalls: ToolCallRecord[];
-  /** Final assistant turn (raw) — kept for debugging parse failures. */
+  /** Name of the terminal tool the model called, if any (skip_digest / send_digest). */
+  decisionTool: string | null;
+  /** Final assistant turn (raw text) — kept for debugging. */
   rawContent: string;
   error: string | null;
 }
 
-interface DigestDecision {
-  sendEmail: boolean;
-  urgency?: unknown;
-  subject?: unknown;
-  body?: unknown;
-}
-
-/** Today's date as YYYY-MM-DD in the configured digest timezone. */
-function todayStamp(tz: string): string {
-  return new Date().toLocaleString('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
-}
-
-/** Extract the JSON object from a model reply that may (despite instructions) wrap it in fences or prose. */
-export function extractJson(raw: string): string | null {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  // Direct JSON.
-  if (trimmed.startsWith('{')) return trimmed;
-  // Fenced ```json ... ``` or ``` ... ``` — grab contents.
-  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) return fence[1].trim();
-  // Trailing JSON after prose: find the last {...} block.
-  const firstBrace = trimmed.indexOf('{');
-  const lastBrace = trimmed.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    return trimmed.slice(firstBrace, lastBrace + 1);
-  }
-  return null;
-}
+// --- Decision interpretation ------------------------------------------------
 
 function isString(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0;
@@ -126,90 +155,44 @@ function isUrgency(v: unknown): v is 'low' | 'medium' | 'high' {
   return v === 'low' || v === 'medium' || v === 'high';
 }
 
+export type InterpretedDecision =
+  | { kind: 'skip' }
+  | { kind: 'send'; urgency: 'low' | 'medium' | 'high'; subject: string; body: string }
+  | { kind: 'invalid'; reason: string };
+
 /**
- * Escape raw control characters that appear INSIDE JSON string literals.
- *
- * LLMs frequently emit bare newlines/tabs inside string values (especially
- * when the string holds markdown) instead of the `\n` / `\t` escape sequences
- * JSON requires. Strict `JSON.parse` rejects this with "Bad control character
- * in string literal". This walker tracks string-literal state (respecting
- * backslash escapes) and rewrites only the in-string control chars to their
- * escaped forms, leaving everything else — including any raw newlines outside
- * strings, which JSON also permits as insignificant whitespace — untouched.
+ * Interpret the model's terminal tool call (or its absence) into a digest
+ * decision. This is the testable boundary between LLM output and the email
+ * channel — it never throws and never trusts malformed input.
  */
-export function escapeControlCharsInStrings(text: string): string {
-  let out = '';
-  let inString = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inString) {
-      if (c === '\\') {
-        // Preserve the backslash and the following char verbatim.
-        out += c;
-        if (i + 1 < text.length) {
-          out += text[i + 1];
-          i++;
-        }
-        continue;
-      }
-      if (c === '"') {
-        out += c;
-        inString = false;
-        continue;
-      }
-      const code = c.charCodeAt(0);
-      if (code < 0x20) {
-        if (c === '\n') out += '\\n';
-        else if (c === '\r') out += '\\r';
-        else if (c === '\t') out += '\\t';
-        else if (c === '\b') out += '\\b';
-        else if (c === '\f') out += '\\f';
-        else out += '\\u' + code.toString(16).padStart(4, '0');
-        continue;
-      }
-      out += c;
-    } else {
-      if (c === '"') inString = true;
-      out += c;
+export function interpretDecision(tc: ToolCallRecord | undefined): InterpretedDecision {
+  if (!tc) {
+    return { kind: 'invalid', reason: 'model ended without calling skip_digest or send_digest' };
+  }
+  if (tc.name === SKIP_DIGEST) {
+    return { kind: 'skip' };
+  }
+  if (tc.name === SEND_DIGEST) {
+    const args = tc.args as { urgency?: unknown; subject?: unknown; body?: unknown };
+    if (!isUrgency(args.urgency)) {
+      return { kind: 'invalid', reason: `send_digest called with invalid urgency: ${JSON.stringify(args.urgency)}` };
     }
+    if (!isString(args.subject)) {
+      return { kind: 'invalid', reason: 'send_digest called with missing or empty subject' };
+    }
+    if (!isString(args.body)) {
+      return { kind: 'invalid', reason: 'send_digest called with missing or empty body' };
+    }
+    return { kind: 'send', urgency: args.urgency, subject: args.subject, body: args.body };
   }
-  return out;
+  return { kind: 'invalid', reason: `unexpected terminal tool: ${tc.name}` };
 }
 
-/**
- * Parse JSON strictly first; on failure retry after escaping in-string control
- * characters. Surfaces the second parse error if both attempts fail.
- */
-function lenientJsonParse(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return JSON.parse(escapeControlCharsInStrings(text));
-  }
-}
+// --- Run record persistence -------------------------------------------------
 
-export function parseDecision(raw: string): { ok: true; decision: DigestDecision } | { ok: false; reason: string } {
-  const jsonText = extractJson(raw);
-  if (!jsonText) return { ok: false, reason: 'no JSON object found in reply' };
-  let parsed: unknown;
-  try {
-    parsed = lenientJsonParse(jsonText);
-  } catch (err) {
-    return { ok: false, reason: `JSON.parse failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  if (typeof parsed !== 'object' || parsed === null) {
-    return { ok: false, reason: 'parsed value is not an object' };
-  }
-  const obj = parsed as DigestDecision;
-  if (typeof obj.sendEmail !== 'boolean') {
-    return { ok: false, reason: 'missing or non-boolean "sendEmail" field' };
-  }
-  if (obj.sendEmail) {
-    if (!isString(obj.subject)) return { ok: false, reason: 'sendEmail=true but "subject" is missing/empty' };
-    if (!isString(obj.body)) return { ok: false, reason: 'sendEmail=true but "body" is missing/empty' };
-    if (!isUrgency(obj.urgency)) return { ok: false, reason: 'sendEmail=true but "urgency" must be low|medium|high' };
-  }
-  return { ok: true, decision: obj };
+/** Today's date as YYYY-MM-DD in the configured digest timezone. */
+function todayStamp(tz: string): string {
+  return new Date().toLocaleString('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
 }
 
 async function writeRecord(record: DigestRunRecord, tz: string): Promise<void> {
@@ -223,6 +206,8 @@ async function writeRecord(record: DigestRunRecord, tz: string): Promise<void> {
     console.error(`[digest] failed to write record for ${record.bundleId}:`, err);
   }
 }
+
+// --- Main runner ------------------------------------------------------------
 
 export async function runDigestForBundle(
   bundle: BundleConfig,
@@ -247,6 +232,7 @@ export async function runDigestForBundle(
     iterations: 0,
     capped: false,
     toolCalls: [],
+    decisionTool: null,
     rawContent: '',
     error: null,
   };
@@ -257,35 +243,37 @@ export async function runDigestForBundle(
     const result = await runReadOnlyTask(bundle, DIGEST_TASK_PROMPT, {
       log,
       maxIterations: 20,
+      extraTools: DIGEST_DECISION_TOOLS,
+      terminalTools: TERMINAL_TOOLS,
     });
 
     base.toolCalls = result.toolCalls;
     base.iterations = result.iterations;
     base.capped = result.capped;
     base.rawContent = result.content;
+    base.decisionTool = result.terminalToolCall?.name ?? null;
 
     if (result.capped) {
-      log.warn(`Digest hit iteration cap for ${bundle.id} (raw length=${result.content.length})`);
+      log.warn(`Digest hit iteration cap for ${bundle.id} (no decision tool called)`);
     }
 
-    const decision = parseDecision(result.content);
-    if (!decision.ok) {
+    const decision = interpretDecision(result.terminalToolCall);
+    if (decision.kind === 'invalid') {
       base.status = 'parse_failed';
       base.error = decision.reason;
       log.warn(`Digest parse_failed for ${bundle.id}: ${decision.reason}`);
       return finalize(base, tz, t0);
     }
 
-    const d = decision.decision;
-    if (!d.sendEmail) {
+    if (decision.kind === 'skip') {
       base.status = 'ok';
       log.info(`Digest ok (no action) for ${bundle.id} after ${result.iterations} iter`);
       return finalize(base, tz, t0);
     }
 
-    base.urgency = d.urgency as 'low' | 'medium' | 'high';
-    base.subject = d.subject as string;
-    const body = d.body as string;
+    // decision.kind === 'send'
+    base.urgency = decision.urgency;
+    base.subject = decision.subject;
 
     if (!DIGEST_TO) {
       base.status = 'no_recipient';
@@ -297,7 +285,7 @@ export async function runDigestForBundle(
     const mail = await sendMail({
       to: DIGEST_TO,
       subject: `[${bundle.name}] ${base.subject}`,
-      body: `${body}\n\n-- \nDaily digest from Notebook.\nBundle: ${bundle.name}`,
+      body: `${decision.body}\n\n-- \nDaily digest from Notebook.\nBundle: ${bundle.name}`,
     });
     base.status = 'emailed';
     base.emailRecipient = DIGEST_TO;
