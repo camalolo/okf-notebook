@@ -126,12 +126,74 @@ function isUrgency(v: unknown): v is 'low' | 'medium' | 'high' {
   return v === 'low' || v === 'medium' || v === 'high';
 }
 
+/**
+ * Escape raw control characters that appear INSIDE JSON string literals.
+ *
+ * LLMs frequently emit bare newlines/tabs inside string values (especially
+ * when the string holds markdown) instead of the `\n` / `\t` escape sequences
+ * JSON requires. Strict `JSON.parse` rejects this with "Bad control character
+ * in string literal". This walker tracks string-literal state (respecting
+ * backslash escapes) and rewrites only the in-string control chars to their
+ * escaped forms, leaving everything else — including any raw newlines outside
+ * strings, which JSON also permits as insignificant whitespace — untouched.
+ */
+export function escapeControlCharsInStrings(text: string): string {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === '\\') {
+        // Preserve the backslash and the following char verbatim.
+        out += c;
+        if (i + 1 < text.length) {
+          out += text[i + 1];
+          i++;
+        }
+        continue;
+      }
+      if (c === '"') {
+        out += c;
+        inString = false;
+        continue;
+      }
+      const code = c.charCodeAt(0);
+      if (code < 0x20) {
+        if (c === '\n') out += '\\n';
+        else if (c === '\r') out += '\\r';
+        else if (c === '\t') out += '\\t';
+        else if (c === '\b') out += '\\b';
+        else if (c === '\f') out += '\\f';
+        else out += '\\u' + code.toString(16).padStart(4, '0');
+        continue;
+      }
+      out += c;
+    } else {
+      if (c === '"') inString = true;
+      out += c;
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse JSON strictly first; on failure retry after escaping in-string control
+ * characters. Surfaces the second parse error if both attempts fail.
+ */
+function lenientJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return JSON.parse(escapeControlCharsInStrings(text));
+  }
+}
+
 export function parseDecision(raw: string): { ok: true; decision: DigestDecision } | { ok: false; reason: string } {
   const jsonText = extractJson(raw);
   if (!jsonText) return { ok: false, reason: 'no JSON object found in reply' };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonText);
+    parsed = lenientJsonParse(jsonText);
   } catch (err) {
     return { ok: false, reason: `JSON.parse failed: ${err instanceof Error ? err.message : String(err)}` };
   }

@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseDecision, extractJson } from './digest.js';
+import { parseDecision, extractJson, escapeControlCharsInStrings } from './digest.js';
 
 describe('extractJson', () => {
   it('returns raw input when it already starts with {', () => {
@@ -114,5 +114,71 @@ describe('parseDecision', () => {
     const r = parseDecision('"just a string"');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/no JSON object/);
+  });
+});
+
+describe('escapeControlCharsInStrings', () => {
+  it('is a no-op on text with no string literals', () => {
+    expect(escapeControlCharsInStrings('12345')).toBe('12345');
+  });
+
+  it('is a no-op on already-correct JSON (no false positives)', () => {
+    const correct = '{"a":"b","c":"d\\ne"}';
+    expect(escapeControlCharsInStrings(correct)).toBe(correct);
+  });
+
+  it('escapes raw newlines inside string values', () => {
+    // LLM quirk: bare 0x0A inside the "body" string instead of \n.
+    const bad = '{"k":"line1\nline2"}'; // ← that \n is a real newline byte
+    expect(escapeControlCharsInStrings(bad)).toBe('{"k":"line1\\nline2"}');
+  });
+
+  it('escapes raw tabs inside string values', () => {
+    const bad = '{"k":"col1\tcol2"}';
+    expect(escapeControlCharsInStrings(bad)).toBe('{"k":"col1\\tcol2"}');
+  });
+
+  it('preserves existing backslash escapes (does not double-escape)', () => {
+    // Already-correct \n stays as \n; raw tab gets escaped.
+    const mixed = '{"k":"ok\\nhere\ttab"}';
+    expect(escapeControlCharsInStrings(mixed)).toBe('{"k":"ok\\nhere\\ttab"}');
+  });
+
+  it('escapes other control characters as \\uXXXX', () => {
+    const bad = '{"k":"a\u0001b"}';
+    expect(escapeControlCharsInStrings(bad)).toBe('{"k":"a\\u0001b"}');
+  });
+
+  it('leaves raw newlines OUTSIDE string literals untouched (valid JSON whitespace)', () => {
+    const text = '{\n  "k": "v"\n}';
+    expect(escapeControlCharsInStrings(text)).toBe('{\n  "k": "v"\n}');
+  });
+});
+
+describe('parseDecision with lenient JSON parsing', () => {
+  it('accepts a body containing raw newlines (the demo 2026-08-11 bug)', () => {
+    // Real production failure: the LLM wrote markdown body content with
+    // literal newline bytes instead of \n escapes, which strict JSON.parse
+    // rejects as "Bad control character in string literal".
+    const raw = [
+      '{"sendEmail": true, "urgency": "high", "subject": "Today: payment due", "body": "**Items due today:**',
+      '',
+      '- **Payment NT$576** at the office, 08:30–16:00.',
+      '- **Math class** 15:00–18:00, room 503."}',
+    ].join('\n');
+    const r = parseDecision(raw);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.decision.sendEmail).toBe(true);
+      expect(r.decision.urgency).toBe('high');
+      expect((r.decision.body as string)).toMatch(/Payment NT\$576/);
+      expect((r.decision.body as string)).toMatch(/Math class/);
+    }
+  });
+
+  it('still rejects genuinely malformed JSON (not just unescaped control chars)', () => {
+    const r = parseDecision('{"sendEmail": true, "body":}');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/JSON.parse failed/);
   });
 });
