@@ -369,6 +369,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   /** True while files are being uploaded/extracted during send. */
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   /** Drag-over visual state for the input area. */
   const [dragOver, setDragOver] = useState(false);
 
@@ -495,6 +499,60 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     if (!fileList || fileList.length === 0) return;
     setPendingFiles((prev) => [...prev, ...Array.from(fileList)]);
   }, []);
+
+  const stopCamera = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, []);
+
+  const closeCamera = useCallback(() => {
+    stopCamera();
+    setCameraOpen(false);
+    setCameraError(null);
+  }, [stopCamera]);
+
+  const openCamera = useCallback(async () => {
+    setCameraError(null);
+    setCameraOpen(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setCameraError(
+        msg.includes('Permission') || msg.includes('NotAllowed')
+          ? 'Camera access was denied. Allow camera permission in your browser.'
+          : msg.includes('NotFound') || msg.includes('Devices')
+            ? 'No camera found on this device.'
+            : `Camera error: ${msg}`,
+      );
+    }
+  }, []);
+
+  const capturePhoto = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d')?.drawImage(video, 0, 0);
+    canvas.toBlob((blob) => {
+      if (blob) {
+        const file = new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' });
+        handleFiles({ 0: file, length: 1 } as unknown as FileList);
+      }
+      closeCamera();
+    }, 'image/jpeg', 0.92);
+  }, [handleFiles, closeCamera]);
+
+  // Cleanup camera on unmount
+  useEffect(() => stopCamera, [stopCamera]);
 
   const handleSend = useCallback(async () => {
     const rawText = input.trim();
@@ -1366,6 +1424,21 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             />
           </svg>
         </button>
+        <button
+          type="button"
+          className="chat-attach-btn"
+          onClick={() => void openCamera()}
+          disabled={loading || uploading}
+          aria-label="Take photo"
+          title="Take photo"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M9 3l-1.5 2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2.5L15 3H9zm3 5a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"
+            />
+          </svg>
+        </button>
         <textarea
           ref={inputRef}
           className="chat-input"
@@ -1411,6 +1484,44 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           </button>
         )}
       </div>
+      {cameraOpen && (
+        <div className="camera-overlay" onClick={closeCamera}>
+          <div className="camera-modal" onClick={(e) => e.stopPropagation()}>
+            {cameraError ? (
+              <div className="camera-error">
+                <p>{cameraError}</p>
+                <button type="button" className="btn" onClick={closeCamera}>Close</button>
+              </div>
+            ) : (
+              <>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="camera-video"
+                />
+                <div className="camera-controls">
+                  <button
+                    type="button"
+                    className="camera-close-btn"
+                    onClick={closeCamera}
+                    aria-label="Close camera"
+                  >
+                    ✕
+                  </button>
+                  <button
+                    type="button"
+                    className="camera-capture-btn"
+                    onClick={capturePhoto}
+                    aria-label="Capture photo"
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
