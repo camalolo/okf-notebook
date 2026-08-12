@@ -1728,6 +1728,14 @@ img {
   gap: 12px;
   margin: 16px 0;
   user-select: none;
+  cursor: pointer;
+}
+.chat-compaction-divider:hover .chat-compaction-label {
+  color: var(--text-secondary);
+}
+.chat-compaction-chevron {
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
 }
 .chat-compaction-line {
   flex: 1;
@@ -1741,6 +1749,13 @@ img {
   text-transform: uppercase;
   color: var(--text-tertiary);
   white-space: nowrap;
+}
+
+.chat-compaction-summary {
+  opacity: 0.85;
+}
+.chat-compaction-summary .chat-bubble {
+  font-size: 0.85rem;
 }
 
 .chat-history-backdrop {

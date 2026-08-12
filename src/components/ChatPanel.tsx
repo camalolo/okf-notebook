@@ -379,6 +379,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   /** Index of the last compaction summary in `messages` (null if none). */
   const [compactionIndex, setCompactionIndex] = useState<number | null>(null);
   const compactionIndexRef = useRef<number | null>(null);
+  const [compactionExpanded, setCompactionExpanded] = useState(false);
   useEffect(() => {
     compactionIndexRef.current = compactionIndex;
   }, [compactionIndex]);
@@ -1270,10 +1271,26 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                   return null;
                 })}
                 {i === compactionIndex ? (
-                  <div className="chat-compaction-divider" role="separator" aria-label="Conversation compacted">
-                    <span className="chat-compaction-line" />
-                    <span className="chat-compaction-label">compaction</span>
-                    <span className="chat-compaction-line" />
+                  <div className="chat-compaction-wrapper">
+                    <div
+                      className="chat-compaction-divider"
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={compactionExpanded}
+                      aria-label="Conversation compacted — click to toggle summary"
+                      onClick={() => setCompactionExpanded((v) => !v)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setCompactionExpanded((v) => !v); } }}
+                    >
+                      <span className="chat-compaction-line" />
+                      <span className="chat-compaction-chevron">{compactionExpanded ? '▾' : '▸'}</span>
+                      <span className="chat-compaction-label">compaction</span>
+                      <span className="chat-compaction-line" />
+                    </div>
+                    {compactionExpanded && (
+                      <div className="chat-message chat-message-assistant chat-compaction-summary">
+                        <div className="chat-bubble"><ChatMarkdown content={m.content} onNavigate={onNavigate} /></div>
+                      </div>
+                    )}
                   </div>
                 ) : (m.role === 'user' || m.content.trim()) && (
                   <div
