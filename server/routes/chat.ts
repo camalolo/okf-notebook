@@ -16,6 +16,7 @@ import { webSearch } from '../lib/web-search.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
 import { appendEvent, renameChat } from '../chats.js';
+import { sendMail } from '../lib/mailer.js';
 import type {
   ToolDefinition,
   ChatMessage,
@@ -198,6 +199,28 @@ const WEB_SEARCH_TOOL: ToolDefinition = {
   },
 };
 
+const SEND_EMAIL_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'send_email',
+    description:
+      'Send a plain-text email via the local SMTP relay. ' +
+      'Returns { messageId, response } on success. Useful for sending summaries, reminders, or notifications.',
+    parameters: {
+      type: 'object',
+      properties: {
+        to: {
+          type: 'string',
+          description: 'Recipient email address. If omitted, sends to the default configured recipient (DIGEST_TO).',
+        },
+        subject: { type: 'string', description: 'Email subject line.' },
+        body: { type: 'string', description: 'Plain-text email body.' },
+      },
+      required: ['subject', 'body'],
+    },
+  },
+};
+
 export const READONLY_TOOLS: ToolDefinition[] = [
   READ_FILE_TOOL,
   LIST_FILES_TOOL,
@@ -210,6 +233,7 @@ const FULL_TOOLS: ToolDefinition[] = [
   UNDO_EDIT_TOOL,
   CREATE_FILE_TOOL,
   GIT_COMMIT_TOOL,
+  SEND_EMAIL_TOOL,
 ];
 
 // --- Helpers ----------------------------------------------------------------
@@ -479,6 +503,20 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
         ? await g.commit(message, undefined, { '--author': author })
         : await g.commit(message);
       return { committed: true, hash: result.commit };
+    }
+
+    case 'send_email': {
+      const subject = String(args?.subject ?? '');
+      const body = String(args?.body ?? '');
+      if (!subject) return { error: 'subject is required' };
+      if (!body) return { error: 'body is required' };
+      const to = args?.to ? String(args.to) : undefined;
+      try {
+        const result = await sendMail({ to, subject, body });
+        return { messageId: result.messageId, response: result.response };
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
     }
 
     default:
