@@ -1,23 +1,18 @@
 /**
- * LLM client for the Z.ai GLM API, accessed through a local PHP proxy.
+ * LLM client for the Z.ai GLM API, accessed through the inference server.
  *
- * The proxy requires an `X-API-Token` header. Tokens are fetched from
- * `https://example.com/api/token` (IP-bound, expire in 5 min) and cached
- * until 30s before expiry. Uses Node 22 native fetch (globalThis.fetch).
+ * The inference server runs locally on port 3003. LAN requests bypass
+ * token requirements, but we keep the token logic for compatibility.
+ * Uses Node 22 native fetch (globalThis.fetch).
  */
 
 import type { ChatLogger } from './logger.js';
 
 // --- Token management -------------------------------------------------------
 
-const TOKEN_URL = 'https://example.com/api/token';
-const ZAI_URL = 'https://example.com/api/zai';
+const TOKEN_URL = 'http://127.0.0.1:3003/api/token';
+const ZAI_URL = 'http://127.0.0.1:3003/api/zai';
 const MODEL = 'glm-5.2';
-
-const COMMON_HEADERS = {
-  Origin: 'https://example.com',
-  Referer: 'https://example.com/',
-};
 
 let cachedToken: string | null = null;
 let tokenExpiry = 0;
@@ -38,7 +33,7 @@ async function getToken(log?: ChatLogger): Promise<string> {
 
   log?.info('Token: fetching fresh token from proxy');
   const t0 = Date.now();
-  const res = await fetch(TOKEN_URL, { headers: COMMON_HEADERS });
+  const res = await fetch(TOKEN_URL);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     log?.error(`Token: fetch failed ${res.status} ${res.statusText} (${body.slice(0, 200)})`);
@@ -136,7 +131,7 @@ export async function chatCompletion(
     headers: {
       'Content-Type': 'application/json',
       'X-API-Token': token,
-      ...COMMON_HEADERS,
+
     },
     body: JSON.stringify(body),
   });
@@ -231,7 +226,7 @@ export async function chatCompletionStream(
     headers: {
       'Content-Type': 'application/json',
       'X-API-Token': token,
-      ...COMMON_HEADERS,
+
     },
     body: JSON.stringify(body),
     signal,
