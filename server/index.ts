@@ -3,7 +3,7 @@ import session from 'express-session';
 import FileStore from 'session-file-store';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
-import { PORT, SESSION_SECRET, USERS } from './config.js';
+import { PORT, HOST, SESSION_SECRET, USERS } from './config.js';
 import { setupPassport, requireAuth } from './auth.js';
 import bundlesRouter from './routes/bundles.js';
 import searchRouter from './routes/search.js';
@@ -150,9 +150,9 @@ async function main() {
 
   await mcpManager.start(MCP_SERVERS);
 
-  app.listen(PORT, () => {
+  app.listen(PORT, HOST, () => {
     // eslint-disable-next-line no-console
-    console.log(`Notebook API listening on port ${PORT}`);
+    console.log(`Notebook API listening on ${HOST}:${PORT}`);
   });
 
   // Start the daily digest cron (no-op if DIGEST_DISABLED=1).

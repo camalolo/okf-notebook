@@ -21,6 +21,7 @@ export const USERS: Record<string, Role> = {
 };
 
 export const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3002;
+export const HOST = process.env.HOST || '127.0.0.1';
 export const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-me';
 export const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 export const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
