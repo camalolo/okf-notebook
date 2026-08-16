@@ -1366,6 +1366,38 @@ img {
   border-radius: var(--radius-sm);
 }
 
+.bundle-list-item-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.bundle-list-item-wrap .bundle-list-item {
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.bundle-list-item-wrap:not(:has(.bundle-access-editor)) .bundle-list-item {
+  border-radius: var(--radius-sm);
+}
+
+.bundle-list-access {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bundle-access-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
 .bundle-list-icon {
   font-size: 1.5rem;
   flex-shrink: 0;

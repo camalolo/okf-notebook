@@ -74,6 +74,7 @@ export function addBundle(data: {
   path: string;
   icon?: string;
   description?: string;
+  allowedUsers?: string[];
 }): Promise<BundleConfig> {
   return request<BundleConfig>(
     `${API_BASE}/bundles`,
@@ -83,7 +84,7 @@ export function addBundle(data: {
 
 export function updateBundle(
   id: string,
-  data: { name?: string; icon?: string; description?: string },
+  data: { name?: string; icon?: string; description?: string; allowedUsers?: string[] },
 ): Promise<BundleConfig> {
   return request<BundleConfig>(`${API_BASE}/bundles/${encodeURIComponent(id)}`, {
     ...jsonOptions(data),

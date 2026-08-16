@@ -3,6 +3,7 @@ import passport from 'passport';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, USERS } from './config.js';
 import type { User } from './config.js';
+import { getBundle, canAccessBundle } from './bundles.js';
 import { writeWorkspaceTokens } from './lib/workspace-auth.js';
 import { mcpManager } from './lib/mcp-manager.js';
 
@@ -97,6 +98,28 @@ export const requireFull: express.RequestHandler = (req, res, next) => {
     return res.status(403).json({ error: 'Forbidden: full role required' });
   }
   return next();
+};
+
+/**
+ * Middleware: require access to the bundle whose id is the first path segment
+ * after the mount point (e.g. `/demo/tree`). `full` users pass; readonly users
+ * must be in the bundle's `allowedUsers`. Unknown bundles fall through so the
+ * downstream route returns its own 404. Responds 404 (not 403) to avoid
+ * leaking which bundle ids exist. Apply after `requireAuth`.
+ */
+export const requireBundleAccess: express.RequestHandler = (req, res, next) => {
+  const user = req.user;
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const bundleId = req.path.split('/').filter(Boolean)[0];
+  if (!bundleId) return next(); // list/create endpoints — no bundle in path
+  getBundle(bundleId)
+    .then((bundle) => {
+      if (!bundle || canAccessBundle(bundle, user)) return next();
+      return res.status(404).json({ error: 'Bundle not found' });
+    })
+    .catch(next);
 };
 
 export { passport };

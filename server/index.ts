@@ -4,7 +4,7 @@ import FileStore from 'session-file-store';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { PORT, HOST, SESSION_SECRET } from './config.js';
-import { setupPassport, requireAuth } from './auth.js';
+import { setupPassport, requireAuth, requireBundleAccess } from './auth.js';
 import bundlesRouter from './routes/bundles.js';
 import searchRouter from './routes/search.js';
 import chatsRouter from './routes/chats.js';
@@ -77,9 +77,9 @@ setupPassport(app);
 
 // Routes
 app.use('/api/notebook/auth', authRouter);
-app.use('/api/notebook/bundles', requireAuth, bundlesRouter);
-app.use('/api/notebook/bundles', requireAuth, searchRouter);
-app.use('/api/notebook/chats', requireAuth, chatsRouter);
+app.use('/api/notebook/bundles', requireAuth, requireBundleAccess, bundlesRouter);
+app.use('/api/notebook/bundles', requireAuth, requireBundleAccess, searchRouter);
+app.use('/api/notebook/chats', requireAuth, requireBundleAccess, chatsRouter);
 
 // Serve built UI (production only — in dev, Vite serves the UI directly).
 // Checks for the built index.html so this is inert during development.

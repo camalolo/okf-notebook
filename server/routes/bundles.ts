@@ -9,6 +9,8 @@ import {
   updateBundle,
   BundleError,
   getBundle,
+  canAccessBundle,
+  sanitizeAllowedUsers,
 } from '../bundles.js';
 import { requireFull } from '../auth.js';
 import filesRouter from './files.js';
@@ -85,11 +87,12 @@ async function buildTree(dir: string, prefix: string): Promise<TreeNode[]> {
   return nodes;
 }
 
-/** GET / — list all bundles. */
-router.get('/', async (_req, res, next) => {
+/** GET / — list bundles the current user can access (readonly: only allowed ones). */
+router.get('/', async (req, res, next) => {
   try {
-    const bundles = await loadBundles();
-    res.json(bundles);
+    const user = req.user!;
+    const all = await loadBundles();
+    res.json(all.filter((b) => canAccessBundle(b, user)));
   } catch (err) {
     next(err);
   }
@@ -115,11 +118,17 @@ router.get('/:id/tree', async (req, res, next) => {
 /** POST / — register a new bundle directory (full role only). */
 router.post('/', requireFull, async (req, res, next) => {
   try {
-    const { name, path: bundlePath, icon, description } = req.body ?? {};
+    const { name, path: bundlePath, icon, description, allowedUsers } = req.body ?? {};
     if (!name || !bundlePath) {
       return res.status(400).json({ error: 'name and path are required' });
     }
-    const bundle = await addBundle({ name, path: bundlePath, icon, description });
+    const bundle = await addBundle({
+      name,
+      path: bundlePath,
+      icon,
+      description,
+      allowedUsers: sanitizeAllowedUsers(allowedUsers),
+    });
     res.status(201).json(bundle);
   } catch (err) {
     if (err instanceof BundleError) {
@@ -133,9 +142,14 @@ router.post('/', requireFull, async (req, res, next) => {
 /** PATCH /:id — update bundle metadata (full role only). */
 router.patch('/:id', requireFull, async (req, res, next) => {
   try {
-    const { name, icon, description } = req.body ?? {};
+    const { name, icon, description, allowedUsers } = req.body ?? {};
     const id = req.params.id as string;
-    const bundle = await updateBundle(id, { name, icon, description });
+    const bundle = await updateBundle(id, {
+      name,
+      icon,
+      description,
+      allowedUsers: sanitizeAllowedUsers(allowedUsers),
+    });
     res.json(bundle);
   } catch (err) {
     if (err instanceof BundleError) {

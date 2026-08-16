@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BUNDLES_FILE } from './config.js';
 import type { BundleConfig } from './config.js';
+import type { User } from './config.js';
 
 const BUNDLES_PATH = fileURLToPath(BUNDLES_FILE);
 
@@ -65,11 +66,33 @@ export async function getBundle(id: string): Promise<BundleConfig | undefined> {
   return bundles.find((b) => b.id === id);
 }
 
+/** Whether a user may access a bundle: `full` sees everything; readonly only when listed. */
+export function canAccessBundle(bundle: BundleConfig, user: Pick<User, 'email' | 'role'>): boolean {
+  if (user.role === 'full') return true;
+  return (bundle.allowedUsers ?? []).includes(user.email);
+}
+
+/** Normalize/copy an `allowedUsers` value from untrusted input. Returns undefined when absent. */
+export function sanitizeAllowedUsers(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) throw new BundleError('allowedUsers must be an array of emails', 'INVALID_ALLOWED_USERS');
+  const emails = [
+    ...new Set(
+      raw
+        .filter((e): e is string => typeof e === 'string')
+        .map((e) => e.trim().toLowerCase())
+        .filter((e) => /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(e)),
+    ),
+  ].sort();
+  return emails;
+}
+
 export interface NewBundleInput {
   name: string;
   path: string;
   icon?: string;
   description?: string;
+  allowedUsers?: string[];
 }
 
 /** Add a new bundle after validating that the path is an existing directory. */
@@ -92,6 +115,7 @@ export async function addBundle(data: NewBundleInput): Promise<BundleConfig> {
     path: data.path,
     icon: data.icon ?? '',
     description: data.description ?? '',
+    ...(data.allowedUsers ? { allowedUsers: data.allowedUsers } : {}),
   };
   bundles.push(bundle);
   await saveBundles(bundles);
@@ -111,7 +135,7 @@ export async function removeBundle(id: string): Promise<void> {
 /** Update a bundle's metadata (never the path). */
 export async function updateBundle(
   id: string,
-  data: Partial<Pick<BundleConfig, 'name' | 'icon' | 'description'>>,
+  data: Partial<Pick<BundleConfig, 'name' | 'icon' | 'description' | 'allowedUsers'>>,
 ): Promise<BundleConfig> {
   const bundles = await loadBundles();
   const idx = bundles.findIndex((b) => b.id === id);
@@ -123,12 +147,13 @@ export async function updateBundle(
     ...(data.name !== undefined ? { name: data.name } : {}),
     ...(data.icon !== undefined ? { icon: data.icon } : {}),
     ...(data.description !== undefined ? { description: data.description } : {}),
+    ...(data.allowedUsers !== undefined ? { allowedUsers: data.allowedUsers } : {}),
   };
   await saveBundles(bundles);
   return bundles[idx];
 }
 
-export type BundleErrorCode = 'PATH_NOT_FOUND' | 'PATH_NOT_DIRECTORY' | 'NOT_FOUND';
+export type BundleErrorCode = 'PATH_NOT_FOUND' | 'PATH_NOT_DIRECTORY' | 'NOT_FOUND' | 'INVALID_ALLOWED_USERS';
 
 export class BundleError extends Error {
   code: BundleErrorCode;

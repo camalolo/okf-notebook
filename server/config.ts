@@ -4,6 +4,8 @@ export interface BundleConfig {
   path: string;
   icon: string;
   description: string;
+  /** Emails of readonly users allowed to see this bundle. `full` users see everything. */
+  allowedUsers?: string[];
 }
 
 export type Role = 'readonly' | 'full';

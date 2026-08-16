@@ -17,6 +17,8 @@ export interface BundleConfig {
   path: string;
   icon: string;
   description: string;
+  /** Readonly users allowed to see this bundle. `full` users see everything. */
+  allowedUsers?: string[];
 }
 
 export interface TreeNode {
