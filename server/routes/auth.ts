@@ -20,6 +20,16 @@ function callbackURL(req: import('express').Request): string {
 }
 
 /**
+ * Validate a post-login redirect target: only internal paths are allowed
+ * (must start with `/` but not `//`, which is protocol-relative → open
+ * redirect to an external origin).
+ */
+function safeReturnTo(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return /^\/(?!\/)/.test(value) ? value : null;
+}
+
+/**
  * GET /auth/google — initiate Google OAuth.
  *
  * Every login requests Workspace scopes + offline access so that the MCP
@@ -31,6 +41,9 @@ function callbackURL(req: import('express').Request): string {
  */
 router.get('/google', (req, res, next) => {
   const reconnect = req.query.reconnect === '1';
+  // Remember where to send the user after login (deep links to bundles/files).
+  const returnTo = safeReturnTo(req.query.returnTo);
+  if (returnTo) (req.session as { returnTo?: string }).returnTo = returnTo;
   passport.authenticate('google', {
     scope: ['profile', 'email', ...WORKSPACE_SCOPES],
     accessType: 'offline',
@@ -56,7 +69,10 @@ router.get('/google/callback', (req, res, next) => {
       }
       req.logIn(user, (err) => {
         if (err) return next(err);
-        res.redirect('/');
+        const session = req.session as { returnTo?: string };
+        const dest = safeReturnTo(session.returnTo) ?? '/';
+        delete session.returnTo;
+        res.redirect(dest);
       });
     },
   )(req, res, next);

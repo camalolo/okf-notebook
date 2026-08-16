@@ -14,8 +14,9 @@ export async function getCurrentUser(): Promise<User | null> {
   return (await res.json()) as User;
 }
 
-export function loginWithGoogle(): void {
-  window.location.href = `${AUTH_BASE}/google`;
+export function loginWithGoogle(returnTo?: string): void {
+  const target = returnTo ? `?returnTo=${encodeURIComponent(returnTo)}` : '';
+  window.location.href = `${AUTH_BASE}/google${target}`;
 }
 
 /**

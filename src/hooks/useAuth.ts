@@ -32,7 +32,10 @@ export function useAuth(): AuthState {
   }, []);
 
   const login = useCallback(() => {
-    loginWithGoogle();
+    // Preserve the current location (e.g. a shared bundle/file deep link)
+    // across the OAuth round-trip; the server redirects back to it.
+    const here = window.location.pathname + window.location.search + window.location.hash;
+    loginWithGoogle(here === '/' ? undefined : here);
   }, []);
 
   const logout = useCallback(async () => {
