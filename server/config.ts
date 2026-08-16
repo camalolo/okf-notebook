@@ -20,6 +20,7 @@ export interface User {
 // User allowlist — emails mapped to roles
 export const USERS: Record<string, Role> = {
   'user@example.com': 'full',
+  'other@example.com': 'readonly',
 };
 
 export const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3002;
