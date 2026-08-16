@@ -211,9 +211,6 @@ in `server/lib/web-search.ts`.
   written to `~/.google-workspace-mcp/{token,credentials}.json` and the
   `google-workspace` MCP server is restarted so it picks them up. This is how the
   headless MCP gets its credentials without its own browser flow.
-- **Dev bypass**: set `DEV_BYPASS_EMAIL=<email-in-allowlist>` to auto-login
-  without OAuth. **Restricted to LAN/loopback IPs only** (`127.0.0.1`, `::1`,
-  `192.168.x.x`, `10.x`) — requests from other IPs are not auto-authenticated.
 - `app.set('trust proxy', 1)` is required so the dynamically-built OAuth
   callback URL (`callbackURL(req)`) sees `https` behind nginx.
 - OAuth callback URL is built per-request from `req.protocol` + `req.get('host')`,
@@ -308,7 +305,6 @@ shell or run with `--env-file=.env`. Variables:
 
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — OAuth (omit to disable login).
 - `SESSION_SECRET` — defaults to `dev-secret-change-me`.
-- `DEV_BYPASS_EMAIL` — skip OAuth in dev (LAN/loopback IPs only).
 - `PORT` — defaults to 3002.
 - `EXA_API_KEY` / `TAVILY_API_KEY` / `TINYFISH_API_KEY` / `SERPER_API_KEY` —
   optional, for the `web_search` tool (any one enables it).

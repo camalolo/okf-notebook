@@ -3,7 +3,7 @@ import session from 'express-session';
 import FileStore from 'session-file-store';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
-import { PORT, HOST, SESSION_SECRET, USERS } from './config.js';
+import { PORT, HOST, SESSION_SECRET } from './config.js';
 import { setupPassport, requireAuth } from './auth.js';
 import bundlesRouter from './routes/bundles.js';
 import searchRouter from './routes/search.js';
@@ -74,31 +74,6 @@ app.use(
   }),
 );
 setupPassport(app);
-
-// Dev bypass: auto-authenticate as a configured user without OAuth.
-// Activated by setting DEV_BYPASS_EMAIL in the environment.
-// Only applies to requests from the LAN (loopback or 192.168.x.x).
-const DEV_BYPASS_EMAIL = process.env.DEV_BYPASS_EMAIL || '';
-if (DEV_BYPASS_EMAIL) {
-  // eslint-disable-next-line no-console
-  console.log(`[auth] DEV_BYPASS_EMAIL set — auto-login from LAN only`);
-}
-app.use((req, res, next) => {
-  if (DEV_BYPASS_EMAIL && !req.isAuthenticated()) {
-    const ip = req.socket.remoteAddress || '';
-    const isLan = ip === '127.0.0.1' || ip === '::1' || ip.startsWith('192.168.') || ip.startsWith('10.');
-    if (isLan) {
-      const role = USERS[DEV_BYPASS_EMAIL];
-      if (role) {
-        req.login({ email: DEV_BYPASS_EMAIL, name: DEV_BYPASS_EMAIL.split('@')[0], role }, () => {
-          next();
-        });
-        return;
-      }
-    }
-  }
-  next();
-});
 
 // Routes
 app.use('/api/notebook/auth', authRouter);
