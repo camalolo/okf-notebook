@@ -34,8 +34,8 @@ export interface StoredEvent {
 export interface ChatSession {
   id: string;
   bundleId: string;
-  /** Email of the user who created this chat. Absent on legacy chats. */
-  userId?: string;
+  /** Email of the user who created this chat. */
+  userId: string;
   title: string;
   createdAt: string;
   updatedAt: string;
@@ -65,12 +65,9 @@ function validateId(id: string): void {
   }
 }
 
-/**
- * Check whether a chat belongs to the given user.
- * Legacy chats (created before userId was tracked) are accessible to all.
- */
+/** Check whether a chat belongs to the given user (strict — no legacy fallback). */
 function isOwnedBy(chat: Pick<ChatSession, 'userId'>, userId: string): boolean {
-  return !chat.userId || chat.userId === userId;
+  return chat.userId === userId;
 }
 
 /** List chat sessions for a bundle that belong to the given user (metadata only). */
