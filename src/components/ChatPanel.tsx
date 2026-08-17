@@ -587,7 +587,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
       if (ok.length > 0) {
         attachmentNote = ok
-          .map((a) => `📎 Attached: ${a.sourceName} → ${a.mdPath}${a.duplicate ? ' (duplicate)' : ''}`)
+          .map((a) =>
+            a.duplicate
+              ? `📎 Duplicate upload: "${a.sourceName}" is already in this bundle at ${a.mdPath} (unchanged, not re-imported). Inform the user and reference the existing file.`
+              : `📎 Attached: ${a.sourceName} → ${a.mdPath}`,
+          )
           .join('\n') + '\n\n';
       }
       if (failures.length > 0) {

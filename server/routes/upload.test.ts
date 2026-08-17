@@ -13,7 +13,14 @@ vi.mock('tesseract.js', () => ({
     terminate: vi.fn(async () => {}),
   })),
 }));
-import { sha256, slugifyFilename, findDuplicate, processUpload } from './upload.js';
+// Mock the LLM client — upload naming must be deterministic in tests (the
+// real inference server runs on this host at 127.0.0.1:3003).
+const llmChatCompletion = vi.fn();
+vi.mock('../lib/llm.js', () => ({
+  chatCompletion: (...args: unknown[]) => llmChatCompletion(...args),
+}));
+
+import { sha256, slugifyFilename, findDuplicate, processUpload, sanitizeSlug } from './upload.js';
 
 let tmpDir: string;
 
@@ -23,6 +30,8 @@ async function makeTmpDir(): Promise<string> {
 
 beforeEach(async () => {
   tmpDir = await makeTmpDir();
+  // Default: LLM unavailable → processUpload falls back to original filename.
+  llmChatCompletion.mockReset().mockRejectedValue(new Error('LLM unavailable in tests'));
 });
 
 afterEach(async () => {
@@ -220,5 +229,107 @@ describe('processUpload', () => {
     const parsed = matter(written);
     expect(parsed.content).toContain('| Name | Age |');
     expect(parsed.content).toContain('| Alice | 30 |');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeSlug
+// ---------------------------------------------------------------------------
+
+describe('sanitizeSlug', () => {
+  it('lowercases and kebab-cases a clean slug', () => {
+    expect(sanitizeSlug('Student-Union-Fees')).toBe('student-union-fees');
+  });
+
+  it('strips junk, quotes, and surrounding prose', () => {
+    expect(sanitizeSlug('"electricity-bill-2026.md"')).toBe('electricity-bill-2026');
+  });
+
+  it('collapses runs of invalid chars into single dashes', () => {
+    // Non-ASCII is dropped entirely (LLM is told to answer in English);
+    // leading/trailing dashes are trimmed.
+    expect(sanitizeSlug('報名表!! & 健檢+++form')).toBe('form');
+  });
+
+  it('truncates to 60 chars without a trailing dash', () => {
+    const out = sanitizeSlug('a'.repeat(80));
+    expect(out).toHaveLength(60);
+    expect(out.endsWith('-')).toBe(false);
+  });
+
+  it('returns empty string for pure junk', () => {
+    expect(sanitizeSlug('===?!?')).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LLM content-based naming
+// ---------------------------------------------------------------------------
+
+describe('LLM content naming', () => {
+  it('uses the LLM-provided slug for the output filename', async () => {
+    llmChatCompletion.mockResolvedValue({
+      content: 'student-union-fees-9815819154900256',
+      tool_calls: undefined,
+    });
+    const uploadsDir = path.join(tmpDir, 'uploads');
+
+    const result = await processUpload(
+      Buffer.from('學生會費繳費單'),
+      'rpt101-9815819154900256.txt',
+      uploadsDir,
+    );
+
+    expect(result.mdPath).toBe('uploads/student-union-fees-9815819154900256.md');
+    // Provenance preserved: original filename in frontmatter.
+    const written = await fs.readFile(
+      path.join(uploadsDir, 'student-union-fees-9815819154900256.md'),
+      'utf8',
+    );
+    const parsed = matter(written);
+    expect(parsed.data.source).toBe('rpt101-9815819154900256.txt');
+  });
+
+  it('sanitizes a messy LLM response', async () => {
+    llmChatCompletion.mockResolvedValue({
+      content: '  "Electricity Bill — August 2026"  ',
+      tool_calls: undefined,
+    });
+    const uploadsDir = path.join(tmpDir, 'uploads');
+
+    const result = await processUpload(Buffer.from(' August electricity '), 'bill.csv', uploadsDir);
+
+    expect(result.mdPath).toBe('uploads/electricity-bill-august-2026.md');
+  });
+
+  it('falls back to the original filename when the LLM fails', async () => {
+    llmChatCompletion.mockRejectedValue(new Error('upstream 429'));
+    const uploadsDir = path.join(tmpDir, 'uploads');
+
+    const result = await processUpload(Buffer.from('hello'), 'my-report.txt', uploadsDir);
+
+    expect(result.mdPath).toBe('uploads/my-report.md');
+  });
+
+  it('falls back when the LLM returns only junk', async () => {
+    llmChatCompletion.mockResolvedValue({ content: '###?!', tool_calls: undefined });
+    const uploadsDir = path.join(tmpDir, 'uploads');
+
+    const result = await processUpload(Buffer.from('hello'), 'my-report.txt', uploadsDir);
+
+    expect(result.mdPath).toBe('uploads/my-report.md');
+  });
+
+  it('does not call the LLM for duplicate uploads (short-circuit)', async () => {
+    const uploadsDir = path.join(tmpDir, 'uploads');
+    await processUpload(Buffer.from('same content'), 'doc.txt', uploadsDir);
+    llmChatCompletion.mockClear();
+
+    const dup = await processUpload(Buffer.from('same content'), 'renamed-copy.txt', uploadsDir);
+
+    expect(dup.duplicate).toBe(true);
+    expect(llmChatCompletion).not.toHaveBeenCalled();
+    // Points at the previously-written file, not a new one.
+    expect(dup.mdPath).toBe('uploads/doc.md');
   });
 });

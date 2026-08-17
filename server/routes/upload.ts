@@ -17,6 +17,8 @@ import { getBundle } from '../bundles.js';
 import { resolveBundlePath } from '../bundles.js';
 import { requireFull } from '../auth.js';
 import { extractDocument } from '../lib/doc-extract.js';
+import { chatCompletion } from '../lib/llm.js';
+import { chatLogger, newTraceId, type ChatLogger } from '../lib/logger.js';
 
 const UPLOAD_DIR = 'uploads';
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
@@ -107,6 +109,72 @@ async function uniqueSlug(uploadsDir: string, slug: string): Promise<string> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Content-based naming (LLM)
+// ---------------------------------------------------------------------------
+
+/** Sanitize an LLM-proposed slug into a safe kebab-case filename stem. */
+export function sanitizeSlug(raw: string): string {
+  return raw
+    .toLowerCase()
+      .replace(/\.md(?=[^a-z0-9]|$)/g, '')
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60)
+    .replace(/-+$/g, '');
+}
+
+/**
+ * Ask the LLM for a descriptive English kebab-case slug for an uploaded
+ * document, based on its content (and original filename for identifiers).
+ * Works for any document type — the model translates/abstracts the topic.
+ * Returns null on any failure (caller falls back to the original filename).
+ */
+export async function llmContentSlug(
+  filename: string,
+  text: string,
+  log?: ChatLogger,
+): Promise<string | null> {
+  const system = [
+    'You name uploaded documents for a knowledge base.',
+    'Given a document, reply with ONLY a filename stem: 2-5 lowercase English words',
+    'in kebab-case describing the document\u2019s subject/type.',
+    'Rules:',
+    '- Translate non-English topics to concise English (e.g. 學生會費 → student-union-fees).',
+    '- If the original filename or content contains a meaningful identifier (invoice/bill',
+    '  number, receipt number, ID, date), keep it as the final dash-separated segment.',
+    '- Do NOT include the file extension, quotes, or any explanation — just the slug.',
+    'Example: rpt101-9815819154900256.pdf about 學生會費 → student-union-fees-9815819154900256',
+  ].join('\n');
+
+  const user = [
+    `Filename: ${filename}`,
+    '',
+    'Document content (truncated):',
+    text.slice(0, 1500),
+  ].join('\n');
+
+  try {
+    const t0 = Date.now();
+    const result = await chatCompletion(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      undefined,
+      log,
+    );
+    const slug = sanitizeSlug(result.content);
+    if (!slug) return null;
+    log?.info(`Upload naming: "${filename}" → "${slug}" (${Date.now() - t0}ms)`);
+    return slug;
+  } catch (err) {
+    log?.warn(`Upload naming: LLM failed for "${filename}" — using original filename (${err instanceof Error ? err.message : String(err)})`);
+    return null;
+  }
+}
+
 export interface UploadResult {
   mdPath: string;
   sourceName: string;
@@ -117,13 +185,14 @@ export interface UploadResult {
 }
 
 /**
- * Core upload processing: hash → dedup → extract → write markdown.
+ * Core upload processing: hash → dedup → extract → LLM content naming → write.
  * Exported for testing (bypasses the HTTP layer).
  */
 export async function processUpload(
   buffer: Buffer,
   filename: string,
   uploadsDir: string,
+  log?: ChatLogger,
 ): Promise<UploadResult> {
   const hash = sha256(buffer);
 
@@ -147,8 +216,11 @@ export async function processUpload(
   // Ensure uploads directory exists.
   await fs.mkdir(uploadsDir, { recursive: true });
 
-  // Write the extracted markdown with frontmatter.
-  const slug = await uniqueSlug(uploadsDir, slugifyFilename(filename));
+  // Prefer an LLM-generated, content-descriptive English slug; fall back to
+  // the slugified original filename if the LLM is unavailable.
+  const fallbackSlug = slugifyFilename(filename);
+  const llmSlug = await llmContentSlug(filename, extracted.text, log);
+  const slug = await uniqueSlug(uploadsDir, llmSlug ?? fallbackSlug);
   const outPath = path.join(uploadsDir, slug);
 
   const frontmatter: Record<string, unknown> = {
@@ -183,6 +255,7 @@ export async function processUpload(
 // ---------------------------------------------------------------------------
 
 router.post('/:bundleId/upload', requireFull, upload.single('file'), async (req, res, next) => {
+  const log = chatLogger(newTraceId());
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file provided. Use multipart/form-data with a "file" field.' });
@@ -197,7 +270,7 @@ router.post('/:bundleId/upload', requireFull, upload.single('file'), async (req,
     // Multer decodes filenames as latin1; re-encode to UTF-8 so CJK/Unicode
     // filenames are preserved.
     const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
-    const result = await processUpload(req.file.buffer, originalName, uploadsDir);
+    const result = await processUpload(req.file.buffer, originalName, uploadsDir, log);
 
     res.status(result.duplicate ? 200 : 201).json(result);
   } catch (err) {
