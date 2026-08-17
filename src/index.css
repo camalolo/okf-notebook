@@ -265,6 +265,45 @@ img {
   border-color: var(--danger);
 }
 
+/* Stop button — pulses while the LLM is working, so the user sees activity
+   even during long silent thinking pauses. Brightness + glow + slight scale;
+   under prefers-reduced-motion only brightness/glow pulse (no motion). */
+.chat-stop-btn {
+  animation: stop-glow 1.4s ease-in-out infinite;
+}
+
+@keyframes stop-glow {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 70%, transparent);
+  }
+  50% {
+    transform: scale(1.06);
+    filter: brightness(1.3);
+    box-shadow: 0 0 18px 6px color-mix(in srgb, var(--danger) 70%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-stop-btn {
+    animation: stop-glow-static 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes stop-glow-static {
+  0%,
+  100% {
+    filter: brightness(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 70%, transparent);
+  }
+  50% {
+    filter: brightness(1.3);
+    box-shadow: 0 0 16px 5px color-mix(in srgb, var(--danger) 70%, transparent);
+  }
+}
+
 /* -------------------------------------------------------------------------
    Login screen
    ------------------------------------------------------------------------- */

@@ -1497,7 +1497,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         {loading ? (
           <button
             type="button"
-            className="btn btn-danger chat-send-btn"
+            className="btn btn-danger chat-send-btn chat-stop-btn"
             onClick={handleStop}
             aria-label="Stop generation"
           >
