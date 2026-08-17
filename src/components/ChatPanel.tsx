@@ -895,8 +895,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       compactionIndexRef.current = newIndex;
 
       void refreshChatList();
-    } catch {
-      // Best-effort — compaction failed, leave conversation unchanged.
+    } catch (err) {
+      // Compaction failed — surface the reason instead of failing silently
+      // (e.g. upstream 429 "temporarily overloaded").
+      const reason = err instanceof Error ? err.message : 'Unknown error';
+      setTurnEvents((prev) => [...prev, { kind: 'error', text: `Compaction failed: ${reason}` }]);
     } finally {
       setLoading(false);
     }
