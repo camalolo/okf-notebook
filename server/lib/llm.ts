@@ -6,6 +6,7 @@
  * Uses Node 22 native fetch (globalThis.fetch).
  */
 
+import { Agent } from 'undici';
 import type { ChatLogger } from './logger.js';
 
 // --- Token management -------------------------------------------------------
@@ -13,6 +14,14 @@ import type { ChatLogger } from './logger.js';
 const TOKEN_URL = 'http://127.0.0.1:3003/api/token';
 const ZAI_URL = 'http://127.0.0.1:3003/api/zai';
 const MODEL = 'glm-5.2';
+
+// undici's default bodyTimeout is 300s of *idle* time on the response body.
+// GLM can "think" for longer than that between SSE chunks, which kills the
+// stream mid-turn with `TypeError: terminated` (see chat route logs
+// 2026-08-16: stream active ~3min, then exactly 300s of silence → abort).
+// 0 disables the idle timeout entirely; user-initiated aborts still work via
+// the AbortSignal, so there is no hang risk beyond the client's patience.
+const llmAgent = new Agent({ bodyTimeout: 0 });
 
 let cachedToken: string | null = null;
 let tokenExpiry = 0;
@@ -101,7 +110,13 @@ interface ZaiResponse {
 }
 
 /**
- * Send a chat completion request to the Z.ai proxy.
+ * Send a chat completion request to the Z.ai proxy and return the complete
+ * result.
+ *
+ * NOTE: implemented on top of the streaming endpoint. The upstream rejects
+ * non-streaming requests (`stream: false`) with HTTP 429 code 1305 — observed
+ * 2026-08-17: 55/55 streaming calls succeeded while 0/4 non-streaming did.
+ * Deltas are simply discarded; only the accumulated result is returned.
  *
  * @param messages  Conversation history (without a leading system prompt is
  *                  fine — caller may include it).
@@ -113,61 +128,7 @@ export async function chatCompletion(
   tools?: ToolDefinition[],
   log?: ChatLogger,
 ): Promise<ChatCompletionResult> {
-  const token = await getToken(log);
-
-  const body: Record<string, unknown> = {
-    model: MODEL,
-    messages,
-  };
-  if (tools && tools.length > 0) {
-    body.tools = tools;
-    body.tool_choice = 'auto';
-  }
-
-  log?.info(`Non-streaming request: ${messages.length} msgs, ${tools?.length ?? 0} tools`);
-  const t0 = Date.now();
-  const res = await fetch(ZAI_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Token': token,
-
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    if (res.status === 401 || res.status === 403) {
-      cachedToken = null;
-    }
-    log?.error(`Non-streaming: HTTP ${res.status} (${Date.now() - t0}ms): ${text.slice(0, 300)}`);
-    throw new Error(`Z.ai request failed (${res.status}): ${text.slice(0, 500)}`);
-  }
-
-  const data = (await res.json()) as ZaiResponse;
-
-  if (data.error) {
-    const msg = typeof data.error === 'string' ? data.error : data.error.message ?? 'Unknown error';
-    log?.error(`Non-streaming: API error: ${msg}`);
-    throw new Error(`Z.ai API error: ${msg}`);
-  }
-
-  const message = data.choices?.[0]?.message;
-  if (!message) {
-    log?.warn(`Non-streaming: response missing choices[0].message (${Date.now() - t0}ms)`);
-    throw new Error('Z.ai response missing choices[0].message');
-  }
-
-  log?.info(
-    `Non-streaming: ok (${Date.now() - t0}ms), ${(message.content ?? '').length} chars` +
-    (message.tool_calls ? `, ${message.tool_calls.length} tool calls` : ''),
-  );
-
-  return {
-    content: message.content ?? '',
-    tool_calls: message.tool_calls,
-  };
+  return chatCompletionStream(messages, tools, () => {}, undefined, log);
 }
 
 // --- Streaming chat completion -----------------------------------------------
@@ -230,7 +191,8 @@ export async function chatCompletionStream(
     },
     body: JSON.stringify(body),
     signal,
-  });
+    dispatcher: llmAgent,
+  } as unknown as RequestInit);
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');

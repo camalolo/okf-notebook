@@ -2,8 +2,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { chatCompletionStream } from './llm.js';
 
 // Mirror the constants used inside llm.ts so our mock fetch can route correctly.
-const TOKEN_URL = 'https://example.com/api/token';
-const ZAI_URL = 'https://example.com/api/zai';
+const TOKEN_URL = 'http://127.0.0.1:3003/api/token';
+const ZAI_URL = 'http://127.0.0.1:3003/api/zai';
 
 /** A valid far-future token response body. */
 function tokenBody(): string {
@@ -19,8 +19,9 @@ function tokenBody(): string {
  * writes. When the AbortSignal fires, the stream is errored immediately.
  */
 function createMockFetch(chunks: string[], delayMs: number, ac?: AbortController) {
-  return async (url: string, opts: RequestInit) => {
-    if (url === TOKEN_URL) {
+  return async (url: string | URL | Request, opts?: RequestInit) => {
+    const urlStr = typeof url === 'string' ? url : url.toString();
+    if (urlStr === TOKEN_URL) {
       return new Response(tokenBody(), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -28,7 +29,7 @@ function createMockFetch(chunks: string[], delayMs: number, ac?: AbortController
     }
 
     // ZAI streaming endpoint
-    const signal = opts.signal as AbortSignal | undefined;
+    const signal = opts?.signal as AbortSignal | undefined;
     const encoder = new TextEncoder();
 
     const stream = new ReadableStream<Uint8Array>({
@@ -88,6 +89,9 @@ describe('chatCompletionStream — abort behavior', () => {
     const zaiCall = fetchMock.mock.calls.find((c) => c[0] === ZAI_URL);
     expect(zaiCall).toBeDefined();
     expect((zaiCall![1] as RequestInit).signal).toBe(ac.signal);
+    // The dispatcher (undici Agent with bodyTimeout disabled) must be forwarded
+    // — without it, undici's default 300s idle timeout kills long thinking pauses.
+    expect((zaiCall![1] as RequestInit & { dispatcher?: unknown }).dispatcher).toBeDefined();
   });
 
   // -------------------------------------------------------------------------

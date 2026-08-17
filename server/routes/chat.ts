@@ -697,6 +697,22 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       abortController.abort();
     });
 
+    // SSE heartbeat: the LLM can "think" for minutes before emitting its
+    // first token (observed: 182s). During that silence nothing is written
+    // to the client, and intermediaries with idle read timeouts close the
+    // connection — nginx's `proxy_read_timeout 180s` did exactly that
+    // ("upstream timed out while reading upstream", 2026-08-17). A comment
+    // line every 25s keeps the connection alive; SSE clients ignore it.
+    const heartbeat = setInterval(() => {
+      if (!clientConnected) return;
+      try {
+        res.write(': ping\n\n');
+      } catch {
+        clientConnected = false;
+      }
+    }, 25_000);
+    res.on('close', () => clearInterval(heartbeat));
+
     const rawEmit = makeEmitter(res);
     const emit: SSEEmit = (event, data) => {
       if (!clientConnected) return;

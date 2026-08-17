@@ -631,6 +631,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     // calls so we can compute the final snapshot accurately).
     const turnEventsLocal: TurnEvent[] = [];
     let acc = '';
+    // Set when the server sends the `done` SSE event. A stream that ends
+    // cleanly *without* `done` means an intermediary (e.g. nginx
+    // proxy_read_timeout) closed the connection mid-turn — treat it like a
+    // connection error and try to recover from the server timeline.
+    let gotDone = false;
+    let streamErr: unknown = null;
 
     try {
       for await (const ev of streamChat(bundleId, apiHistory, chatIdRef.current, controller.signal)) {
@@ -706,6 +712,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           setTurnEvents((prev) => [...prev, te]);
           turnEventsLocal.push(te);
         } else if (ev.event === 'done') {
+          gotDone = true;
           break;
         } else if (ev.event === 'error') {
           const obj = data as { message?: unknown };
@@ -715,6 +722,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         }
       }
     } catch (err) {
+      streamErr = err;
+    }
+
+    if (streamErr || !gotDone) {
       // If the user pressed STOP, do a one-shot sync with the server to
       // pick up any tool results or content that were persisted after we
       // aborted the SSE stream. The server breaks out of its loop quickly
@@ -782,8 +793,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           setReconnecting(false);
           if (recovered) return;
         }
-        // Reconnection failed — show the error
-        const chatError = err instanceof Error ? err.message : 'Chat request failed';
+        // Reconnection failed — show the error. For a clean stream end
+        // without `done` there is no Error object; surface a clear message.
+        const chatError = streamErr instanceof Error && streamErr.message
+          ? streamErr.message
+          : streamErr
+            ? 'Chat request failed'
+            : 'Connection lost before the response finished.';
         const errEvent: TurnEvent = { kind: 'error', text: chatError };
         turnEventsLocal.push(errEvent);
         setTurnEvents((prev) => [...prev, errEvent]);
