@@ -884,7 +884,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     try {
       const startIdx = compactionIndexRef.current ?? 0;
       const activeMessages = messagesRef.current.slice(startIdx);
-      const { summary } = await compactChat(bundleId, activeMessages, chatIdRef.current);
+      const { summary, title } = await compactChat(bundleId, activeMessages, chatIdRef.current);
 
       // The summary becomes a new assistant message in the display history.
       // It is NOT rendered as a bubble — the divider takes its place.
@@ -897,6 +897,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       setPastTurns((prev) => [...prev, []]); // empty turn events for the summary
       setCompactionIndex(newIndex);
       compactionIndexRef.current = newIndex;
+
+      // The same query refreshed the title via the set_title tool — just
+      // apply it (the server already persisted it).
+      if (title) {
+        setChatTitle(title);
+        chatTitleRef.current = title;
+      }
 
       void refreshChatList();
     } catch (err) {

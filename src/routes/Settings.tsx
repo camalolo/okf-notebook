@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Navigate } from 'react-router-dom';
-import type { BundleConfig, User } from '../types.ts';
+import type { BundleConfig, DigestConfig, User } from '../types.ts';
 import { addBundle, getBundles, getMcps, getSettings, removeBundle, updateBundle, updateModel } from '../services/api.ts';
 import type { AppSettingsInfo, McpServerInfo } from '../services/api.ts';
 
@@ -38,10 +38,15 @@ export function Settings({ user }: SettingsProps) {
   const [detailsSaving, setDetailsSaving] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
+  const [workspaceUsers, setWorkspaceUsers] = useState<string[]>([]);
   const [mcpsEditId, setMcpsEditId] = useState<string | null>(null);
   const [mcpsDraft, setMcpsDraft] = useState<Set<string>>(new Set());
   const [mcpsSaving, setMcpsSaving] = useState(false);
   const [mcpsError, setMcpsError] = useState<string | null>(null);
+  const [digestEditId, setDigestEditId] = useState<string | null>(null);
+  const [digestDraft, setDigestDraft] = useState<DigestConfig>({});
+  const [digestSaving, setDigestSaving] = useState(false);
+  const [digestError, setDigestError] = useState<string | null>(null);
   const [settingsInfo, setSettingsInfo] = useState<AppSettingsInfo | null>(null);
   const [modelDraft, setModelDraft] = useState('');
   const [modelSaving, setModelSaving] = useState(false);
@@ -98,8 +103,11 @@ export function Settings({ user }: SettingsProps) {
         if (active) setModelError(toMessage(err, 'Failed to load settings'));
       });
     getMcps()
-      .then((list) => {
-        if (active) setMcpServers(list);
+      .then((info) => {
+        if (active) {
+          setMcpServers(info.servers);
+          setWorkspaceUsers(info.workspaceUsers);
+        }
       })
       .catch(() => {
         // Non-fatal — the MCP editor shows a hint when the list is empty.
@@ -158,6 +166,7 @@ export function Settings({ user }: SettingsProps) {
   const openAccessEditor = (b: BundleConfig) => {
     setDetailsEditId(null);
     setMcpsEditId(null);
+    setDigestEditId(null);
     setAccessEditId(b.id);
     setAccessDraft((b.allowedUsers ?? []).join(', '));
     setAccessError(null);
@@ -166,6 +175,7 @@ export function Settings({ user }: SettingsProps) {
   const openDetailsEditor = (b: BundleConfig) => {
     setAccessEditId(null);
     setMcpsEditId(null);
+    setDigestEditId(null);
     setConfirmId(null);
     setDetailsEditId(b.id);
     setDetailsDraft({ name: b.name, icon: b.icon ?? '', description: b.description ?? '' });
@@ -175,11 +185,44 @@ export function Settings({ user }: SettingsProps) {
   const openMcpsEditor = (b: BundleConfig) => {
     setAccessEditId(null);
     setDetailsEditId(null);
+    setDigestEditId(null);
     setConfirmId(null);
     setMcpsEditId(b.id);
     // `undefined` mcps = all servers (the default for legacy bundles).
     setMcpsDraft(new Set(b.mcps ?? mcpServers.map((s) => s.name)));
     setMcpsError(null);
+  };
+
+  const openDigestEditor = (b: BundleConfig) => {
+    setAccessEditId(null);
+    setDetailsEditId(null);
+    setMcpsEditId(null);
+    setConfirmId(null);
+    setDigestEditId(b.id);
+    setDigestDraft({
+      enabled: b.digest?.enabled !== false,
+      googleUser: b.digest?.googleUser ?? '',
+    });
+    setDigestError(null);
+  };
+
+  const handleSaveDigest = async (id: string) => {
+    setDigestSaving(true);
+    setDigestError(null);
+    try {
+      await updateBundle(id, {
+        digest: {
+          enabled: digestDraft.enabled !== false,
+          ...(digestDraft.googleUser ? { googleUser: digestDraft.googleUser } : {}),
+        },
+      });
+      setDigestEditId(null);
+      refresh();
+    } catch (err: unknown) {
+      setDigestError(toMessage(err, 'Failed to update digest settings'));
+    } finally {
+      setDigestSaving(false);
+    }
   };
 
   const handleSaveMcps = async (id: string) => {
@@ -387,6 +430,10 @@ export function Settings({ user }: SettingsProps) {
                           ? 'none'
                           : b.mcps.join(', ')}
                     </span>
+                    <span className="bundle-list-access">
+                      Digest: {b.digest?.enabled === false ? 'off' : 'on'}
+                      {b.digest?.googleUser ? ` · Google: ${b.digest.googleUser}` : ''}
+                    </span>
                   </div>
                   {confirmId === b.id ? (
                     <div className="bundle-list-actions">
@@ -455,6 +502,23 @@ export function Settings({ user }: SettingsProps) {
                         {mcpsSaving ? 'Saving…' : 'Save tools'}
                       </button>
                     </div>
+                  ) : digestEditId === b.id ? (
+                    <div className="bundle-list-actions">
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setDigestEditId(null)}
+                        disabled={digestSaving}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleSaveDigest(b.id)}
+                        disabled={digestSaving}
+                      >
+                        {digestSaving ? 'Saving…' : 'Save digest'}
+                      </button>
+                    </div>
                   ) : (
                     <div className="bundle-list-actions">
                       <button
@@ -476,6 +540,12 @@ export function Settings({ user }: SettingsProps) {
                         title={mcpServers.length === 0 ? 'No MCP servers configured' : undefined}
                       >
                         Tools…
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => openDigestEditor(b)}
+                      >
+                        Digest…
                       </button>
                       <button
                         className="btn btn-danger-ghost btn-sm"
@@ -596,6 +666,53 @@ export function Settings({ user }: SettingsProps) {
                       disable MCP tools entirely. Changes apply to the next chat request.
                     </span>
                     {mcpsError && <div className="error-banner error-banner-sm">{mcpsError}</div>}
+                  </div>
+                )}
+                {digestEditId === b.id && (
+                  <div className="bundle-access-editor">
+                    <span className="form-label">Daily digest</span>
+                    <label className="mcp-check">
+                      <input
+                        type="checkbox"
+                        checked={digestDraft.enabled !== false}
+                        onChange={(e) =>
+                          setDigestDraft((prev) => ({ ...prev, enabled: e.target.checked }))
+                        }
+                      />
+                      <span>Run the daily digest for this bundle</span>
+                    </label>
+                    <label className="form-field">
+                      <span className="form-label">Google account for the digest</span>
+                      <select
+                        className="form-input"
+                        value={digestDraft.googleUser ?? ''}
+                        onChange={(e) =>
+                          setDigestDraft((prev) => ({ ...prev, googleUser: e.target.value }))
+                        }
+                        disabled={digestSaving}
+                      >
+                        <option value="">None — bundle files and web search only</option>
+                        {(digestDraft.googleUser && !workspaceUsers.includes(digestDraft.googleUser)
+                          ? [digestDraft.googleUser, ...workspaceUsers]
+                          : workspaceUsers
+                        ).map((u) => (
+                          <option key={u} value={u}>
+                            {u}
+                            {!workspaceUsers.includes(u) ? ' (not connected — log in once)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <span className="settings-section-hint">
+                      The digest runs every morning and emails anything needing attention
+                      within 24 hours. Selecting a Google account lets it read that
+                      account calendar and mail too. Each user must log in once with
+                      Google so their tokens are captured; in chat, Google tools always
+                      follow the logged-in user.
+                    </span>
+                    {digestError && (
+                      <div className="error-banner error-banner-sm">{digestError}</div>
+                    )}
                   </div>
                 )}
               </li>

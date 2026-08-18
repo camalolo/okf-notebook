@@ -11,6 +11,13 @@ export interface User {
   };
 }
 
+export interface DigestConfig {
+  /** Daily digest for this bundle. `undefined`/`true` = enabled (default). */
+  enabled?: boolean;
+  /** Google account (email) whose Calendar/Gmail the digest may read. */
+  googleUser?: string;
+}
+
 export interface BundleConfig {
   id: string;
   name: string;
@@ -21,6 +28,8 @@ export interface BundleConfig {
   allowedUsers?: string[];
   /** MCP server names enabled for this bundle. `undefined` = all servers. */
   mcps?: string[];
+  /** Daily digest settings for this bundle. */
+  digest?: DigestConfig;
 }
 
 export interface TreeNode {

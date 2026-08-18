@@ -1,4 +1,4 @@
-import type { BundleConfig, TreeNode, FileContent, ChatSummary, ChatSession, ChatMessage, StoredEvent } from '../types.ts';
+import type { BundleConfig, TreeNode, FileContent, ChatSummary, ChatSession, ChatMessage, StoredEvent, DigestConfig } from '../types.ts';
 
 const API_BASE = '/api/notebook';
 
@@ -84,7 +84,14 @@ export function addBundle(data: {
 
 export function updateBundle(
   id: string,
-  data: { name?: string; icon?: string; description?: string; allowedUsers?: string[]; mcps?: string[] },
+  data: {
+    name?: string;
+    icon?: string;
+    description?: string;
+    allowedUsers?: string[];
+    mcps?: string[];
+    digest?: DigestConfig;
+  },
 ): Promise<BundleConfig> {
   return request<BundleConfig>(`${API_BASE}/bundles/${encodeURIComponent(id)}`, {
     ...jsonOptions(data),
@@ -168,12 +175,12 @@ export function deleteChat(bundleId: string, chatId: string): Promise<void> {
   );
 }
 
-/** Compact the conversation: ask the LLM to summarise, persist, return summary. */
+/** Compact the conversation: ask the LLM to summarise, persist, return summary (+ refreshed title). */
 export function compactChat(
   bundleId: string,
   messages: ChatMessage[],
   chatId?: string | null,
-): Promise<{ summary: string }> {
+): Promise<{ summary: string; title?: string }> {
   return request<{ summary: string }>(
     `${API_BASE}/bundles/${encodeURIComponent(bundleId)}/compact`,
     jsonOptions({ messages, chatId: chatId ?? undefined }),
@@ -220,9 +227,15 @@ export interface McpServerInfo {
   toolCount: number;
 }
 
-/** Status of every configured MCP server (for per-bundle MCP toggles). */
-export function getMcps(): Promise<McpServerInfo[]> {
-  return request<McpServerInfo[]>(`${API_BASE}/mcps`);
+export interface McpsInfo {
+  servers: McpServerInfo[];
+  /** Emails with Google Workspace tokens on disk (per-user MCP instances). */
+  workspaceUsers: string[];
+}
+
+/** MCP server status + workspace-connected users (Settings UI). */
+export function getMcps(): Promise<McpsInfo> {
+  return request<McpsInfo>(`${API_BASE}/mcps`);
 }
 
 /* --- Document upload --- */
