@@ -32,6 +32,10 @@ export function Settings({ user }: SettingsProps) {
   const [accessDraft, setAccessDraft] = useState('');
   const [accessSaving, setAccessSaving] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
+  const [detailsEditId, setDetailsEditId] = useState<string | null>(null);
+  const [detailsDraft, setDetailsDraft] = useState({ name: '', icon: '', description: '' });
+  const [detailsSaving, setDetailsSaving] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
 
   const refresh = () => {
     setLoading(true);
@@ -109,9 +113,41 @@ export function Settings({ user }: SettingsProps) {
   };
 
   const openAccessEditor = (b: BundleConfig) => {
+    setDetailsEditId(null);
     setAccessEditId(b.id);
     setAccessDraft((b.allowedUsers ?? []).join(', '));
     setAccessError(null);
+  };
+
+  const openDetailsEditor = (b: BundleConfig) => {
+    setAccessEditId(null);
+    setConfirmId(null);
+    setDetailsEditId(b.id);
+    setDetailsDraft({ name: b.name, icon: b.icon ?? '', description: b.description ?? '' });
+    setDetailsError(null);
+  };
+
+  const handleSaveDetails = async (id: string) => {
+    const name = detailsDraft.name.trim();
+    if (!name) {
+      setDetailsError('Display name is required.');
+      return;
+    }
+    setDetailsSaving(true);
+    setDetailsError(null);
+    try {
+      await updateBundle(id, {
+        name,
+        icon: detailsDraft.icon.trim(),
+        description: detailsDraft.description.trim(),
+      });
+      setDetailsEditId(null);
+      refresh();
+    } catch (err: unknown) {
+      setDetailsError(toMessage(err, 'Failed to update bundle'));
+    } finally {
+      setDetailsSaving(false);
+    }
   };
 
   const handleSaveAccess = async (id: string) => {
@@ -265,8 +301,31 @@ export function Settings({ user }: SettingsProps) {
                         {accessSaving ? 'Saving…' : 'Save access'}
                       </button>
                     </div>
+                  ) : detailsEditId === b.id ? (
+                    <div className="bundle-list-actions">
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setDetailsEditId(null)}
+                        disabled={detailsSaving}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleSaveDetails(b.id)}
+                        disabled={detailsSaving}
+                      >
+                        {detailsSaving ? 'Saving…' : 'Save details'}
+                      </button>
+                    </div>
                   ) : (
                     <div className="bundle-list-actions">
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => openDetailsEditor(b)}
+                      >
+                        Details…
+                      </button>
                       <button
                         className="btn btn-ghost btn-sm"
                         onClick={() => openAccessEditor(b)}
@@ -300,6 +359,55 @@ export function Settings({ user }: SettingsProps) {
                       bundle from all readonly users. Invalid emails are dropped on save.
                     </span>
                     {accessError && <div className="error-banner error-banner-sm">{accessError}</div>}
+                  </div>
+                )}
+                {detailsEditId === b.id && (
+                  <div className="bundle-access-editor">
+                    <div className="form-row">
+                      <label className="form-field">
+                        <span className="form-label">Display name</span>
+                        <input
+                          className="form-input"
+                          type="text"
+                          value={detailsDraft.name}
+                          onChange={(e) =>
+                            setDetailsDraft((prev) => ({ ...prev, name: e.target.value }))
+                          }
+                        />
+                      </label>
+                      <label className="form-field form-field-narrow">
+                        <span className="form-label">Icon</span>
+                        <input
+                          className="form-input"
+                          type="text"
+                          value={detailsDraft.icon}
+                          onChange={(e) =>
+                            setDetailsDraft((prev) => ({ ...prev, icon: e.target.value }))
+                          }
+                          placeholder="📚"
+                          maxLength={4}
+                        />
+                      </label>
+                    </div>
+                    <label className="form-field">
+                      <span className="form-label">Description</span>
+                      <textarea
+                        className="form-textarea"
+                        value={detailsDraft.description}
+                        onChange={(e) =>
+                          setDetailsDraft((prev) => ({ ...prev, description: e.target.value }))
+                        }
+                        placeholder="A short summary of what this bundle contains."
+                        rows={3}
+                      />
+                    </label>
+                    <span className="settings-section-hint">
+                      The directory path cannot be changed after registration. Removing and
+                      re-adding the bundle is the way to repoint it.
+                    </span>
+                    {detailsError && (
+                      <div className="error-banner error-banner-sm">{detailsError}</div>
+                    )}
                   </div>
                 )}
               </li>
