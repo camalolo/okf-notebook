@@ -19,6 +19,8 @@ export interface BundleConfig {
   description: string;
   /** Readonly users allowed to see this bundle. `full` users see everything. */
   allowedUsers?: string[];
+  /** MCP server names enabled for this bundle. `undefined` = all servers. */
+  mcps?: string[];
 }
 
 export interface TreeNode {

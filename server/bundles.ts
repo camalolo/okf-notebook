@@ -87,12 +87,33 @@ export function sanitizeAllowedUsers(raw: unknown): string[] | undefined {
   return emails;
 }
 
+/**
+ * Normalize/copy an `mcps` value (enabled MCP server names) from untrusted
+ * input. Returns undefined when absent (= all servers). Unknown server names
+ * are rejected so stale bundle configs fail loudly instead of silently
+ * hiding tools.
+ */
+export function sanitizeMcps(raw: unknown, validNames: readonly string[]): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) throw new BundleError('mcps must be an array of MCP server names', 'INVALID_MCPS');
+  const names = [...new Set(raw.filter((n): n is string => typeof n === 'string' && n.trim().length > 0).map((n) => n.trim()))];
+  const unknown = names.filter((n) => !validNames.includes(n));
+  if (unknown.length > 0) {
+    throw new BundleError(
+      `Unknown MCP server(s): ${unknown.join(', ')}. Valid: ${validNames.join(', ') || '(none configured)'}`,
+      'INVALID_MCPS',
+    );
+  }
+  return names;
+}
+
 export interface NewBundleInput {
   name: string;
   path: string;
   icon?: string;
   description?: string;
   allowedUsers?: string[];
+  mcps?: string[];
 }
 
 /** Add a new bundle after validating that the path is an existing directory. */
@@ -116,6 +137,7 @@ export async function addBundle(data: NewBundleInput): Promise<BundleConfig> {
     icon: data.icon ?? '',
     description: data.description ?? '',
     ...(data.allowedUsers ? { allowedUsers: data.allowedUsers } : {}),
+    ...(data.mcps !== undefined ? { mcps: data.mcps } : {}),
   };
   bundles.push(bundle);
   await saveBundles(bundles);
@@ -135,7 +157,7 @@ export async function removeBundle(id: string): Promise<void> {
 /** Update a bundle's metadata (never the path). */
 export async function updateBundle(
   id: string,
-  data: Partial<Pick<BundleConfig, 'name' | 'icon' | 'description' | 'allowedUsers'>>,
+  data: Partial<Pick<BundleConfig, 'name' | 'icon' | 'description' | 'allowedUsers' | 'mcps'>>,
 ): Promise<BundleConfig> {
   const bundles = await loadBundles();
   const idx = bundles.findIndex((b) => b.id === id);
@@ -148,12 +170,18 @@ export async function updateBundle(
     ...(data.icon !== undefined ? { icon: data.icon } : {}),
     ...(data.description !== undefined ? { description: data.description } : {}),
     ...(data.allowedUsers !== undefined ? { allowedUsers: data.allowedUsers } : {}),
+    ...(data.mcps !== undefined ? { mcps: data.mcps } : {}),
   };
   await saveBundles(bundles);
   return bundles[idx];
 }
 
-export type BundleErrorCode = 'PATH_NOT_FOUND' | 'PATH_NOT_DIRECTORY' | 'NOT_FOUND' | 'INVALID_ALLOWED_USERS';
+export type BundleErrorCode =
+  | 'PATH_NOT_FOUND'
+  | 'PATH_NOT_DIRECTORY'
+  | 'NOT_FOUND'
+  | 'INVALID_ALLOWED_USERS'
+  | 'INVALID_MCPS';
 
 export class BundleError extends Error {
   code: BundleErrorCode;

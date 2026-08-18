@@ -1447,6 +1447,34 @@ select.form-input {
   border-radius: 0 0 var(--radius-sm) var(--radius-sm);
 }
 
+/* Per-bundle MCP server checkboxes */
+.mcp-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mcp-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.mcp-check input[type='checkbox'] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+.mcp-check-meta {
+  font-style: normal;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
 .bundle-list-icon {
   font-size: 1.5rem;
   flex-shrink: 0;

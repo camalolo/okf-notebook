@@ -84,7 +84,7 @@ export function addBundle(data: {
 
 export function updateBundle(
   id: string,
-  data: { name?: string; icon?: string; description?: string; allowedUsers?: string[] },
+  data: { name?: string; icon?: string; description?: string; allowedUsers?: string[]; mcps?: string[] },
 ): Promise<BundleConfig> {
   return request<BundleConfig>(`${API_BASE}/bundles/${encodeURIComponent(id)}`, {
     ...jsonOptions(data),
@@ -210,6 +210,19 @@ export function updateModel(model: string): Promise<AppSettingsInfo> {
     ...jsonOptions({ model }),
     method: 'PUT',
   });
+}
+
+/* --- MCP servers --- */
+
+export interface McpServerInfo {
+  name: string;
+  running: boolean;
+  toolCount: number;
+}
+
+/** Status of every configured MCP server (for per-bundle MCP toggles). */
+export function getMcps(): Promise<McpServerInfo[]> {
+  return request<McpServerInfo[]>(`${API_BASE}/mcps`);
 }
 
 /* --- Document upload --- */

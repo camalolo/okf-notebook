@@ -11,8 +11,10 @@ import {
   getBundle,
   canAccessBundle,
   sanitizeAllowedUsers,
+  sanitizeMcps,
 } from '../bundles.js';
 import { requireFull } from '../auth.js';
+import { mcpManager } from '../lib/mcp-manager.js';
 import filesRouter from './files.js';
 import gitRouter from './git.js';
 import chatRouter from './chat.js';
@@ -118,7 +120,7 @@ router.get('/:id/tree', async (req, res, next) => {
 /** POST / — register a new bundle directory (full role only). */
 router.post('/', requireFull, async (req, res, next) => {
   try {
-    const { name, path: bundlePath, icon, description, allowedUsers } = req.body ?? {};
+    const { name, path: bundlePath, icon, description, allowedUsers, mcps } = req.body ?? {};
     if (!name || !bundlePath) {
       return res.status(400).json({ error: 'name and path are required' });
     }
@@ -128,6 +130,7 @@ router.post('/', requireFull, async (req, res, next) => {
       icon,
       description,
       allowedUsers: sanitizeAllowedUsers(allowedUsers),
+      mcps: sanitizeMcps(mcps, mcpManager.getServerNames()),
     });
     res.status(201).json(bundle);
   } catch (err) {
@@ -142,13 +145,14 @@ router.post('/', requireFull, async (req, res, next) => {
 /** PATCH /:id — update bundle metadata (full role only). */
 router.patch('/:id', requireFull, async (req, res, next) => {
   try {
-    const { name, icon, description, allowedUsers } = req.body ?? {};
+    const { name, icon, description, allowedUsers, mcps } = req.body ?? {};
     const id = req.params.id as string;
     const bundle = await updateBundle(id, {
       name,
       icon,
       description,
       allowedUsers: sanitizeAllowedUsers(allowedUsers),
+      mcps: sanitizeMcps(mcps, mcpManager.getServerNames()),
     });
     res.json(bundle);
   } catch (err) {

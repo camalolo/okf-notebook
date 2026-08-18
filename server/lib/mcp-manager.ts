@@ -114,9 +114,34 @@ class McpManager {
     console.log(`[mcp] "${config.name}" ready — ${count} tools exposed`);
   }
 
-  /** All discovered tool definitions (namespaced), ready for the LLM. */
-  getToolDefinitions(): ToolDefinition[] {
-    return this.toolDefs;
+  /** Names of all configured MCP servers (started or not). */
+  getServerNames(): string[] {
+    return this.configs.map((c) => c.name);
+  }
+
+  /** Status of every configured server, for the Settings UI. */
+  listServers(): Array<{ name: string; running: boolean; toolCount: number }> {
+    return this.configs.map((c) => ({
+      name: c.name,
+      running: this.clients.has(c.name),
+      toolCount: this.toolDefs.filter(
+        (td) => this.toolMap.get(td.function.name)?.serverName === c.name,
+      ).length,
+    }));
+  }
+
+  /**
+   * Discovered tool definitions (namespaced), ready for the LLM.
+   * Pass `allowedServers` (bundle.mcps) to restrict to tools from those
+   * servers; omitted/undefined → all servers (the default).
+   */
+  getToolDefinitions(allowedServers?: string[]): ToolDefinition[] {
+    if (!allowedServers) return this.toolDefs;
+    const allowed = new Set(allowedServers);
+    return this.toolDefs.filter((td) => {
+      const mapping = this.toolMap.get(td.function.name);
+      return mapping !== undefined && allowed.has(mapping.serverName);
+    });
   }
 
   /** Whether a tool name (as the LLM sees it) belongs to an MCP server. */

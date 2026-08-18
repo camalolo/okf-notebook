@@ -6,6 +6,12 @@ export interface BundleConfig {
   description: string;
   /** Emails of readonly users allowed to see this bundle. `full` users see everything. */
   allowedUsers?: string[];
+  /**
+   * MCP server names enabled for this bundle. `undefined` = all configured
+   * servers (default); `[]` = none. Validated against the configured servers
+   * in `MCP_SERVERS` at save time.
+   */
+  mcps?: string[];
 }
 
 export type Role = 'readonly' | 'full';
@@ -28,7 +34,10 @@ export const HOST = process.env.HOST || '127.0.0.1';
 export const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-me';
 export const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 export const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
-export const BUNDLES_FILE = new URL('./bundles.json', import.meta.url);
+export const BUNDLES_FILE = new URL(
+  process.env.NOTEBOOK_BUNDLES_FILE ?? './bundles.json',
+  import.meta.url,
+);
 
 // Determine the base URL for OAuth callback (from request in auth route)
 export const OAUTH_CALLBACK_PATH = '/api/notebook/auth/google/callback';

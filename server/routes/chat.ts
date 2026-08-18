@@ -524,8 +524,15 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
   }
 }
 
-/** Build the system prompt for a bundle. */
-export async function buildSystemPrompt(bundle: BundleConfig): Promise<string> {
+/**
+ * Build the system prompt for a bundle. `mcpToolNames` are the MCP tool
+ * names actually exposed for this bundle (per bundle.mcps) — kept dynamic so
+ * the prompt never advertises tools the request doesn't have.
+ */
+export async function buildSystemPrompt(
+  bundle: BundleConfig,
+  mcpToolNames: string[] = [],
+): Promise<string> {
   const bundlePath = bundle.path;
 
   // Read AGENTS.md (if present).
@@ -585,12 +592,17 @@ export async function buildSystemPrompt(bundle: BundleConfig): Promise<string> {
     'Do NOT use raw HTML <a> tags or absolute paths starting with /. Use the',
     'relative path exactly as it appears in list_files output.',
     '',
-    'You also have access to a web_search tool for quick web searches, browser tools',
-    '(browser_navigate, browser_snapshot, browser_click, browser_type, browser_press_key)',
-    'for reading and interacting with specific web pages, and Google Workspace tools for',
-    'email and full calendar management (gw_search_emails, gw_read_email, and gw_ calendar',
-    "tools). Use web_search for general questions, browser_ tools to read a specific page,",
-    "and gw_ tools for the user's email or calendar.",
+    'You also have access to a web_search tool for quick web searches.',
+    ...(mcpToolNames.length > 0
+      ? [
+          '',
+          `Additional tools are available in this notebook: ${mcpToolNames.join(', ')}.`,
+          'Their exact capabilities are described in the tool definitions — use them',
+          'whenever the user\'s request matches what they offer (e.g. gw_ tools for the',
+          'user\'s email/calendar, browser_ tools to read specific web pages, flex_ tools',
+          'for IBKR account data).',
+        ]
+      : []),
     '',
     '## Uploaded documents',
     'Documents the user uploads (PDF, DOCX, images, CSV, …) are extracted to markdown',
@@ -678,10 +690,13 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         .catch(() => { /* best-effort */ });
     };
 
-    // Select tools based on the user's role.
+    // Select tools based on the user's role, and filter MCP tools to the
+    // servers enabled for this bundle (`mcps` undefined → all servers).
     const role = req.user?.role;
     const bundleTools = role === 'full' ? FULL_TOOLS : READONLY_TOOLS;
-    const allTools = [...bundleTools, ...mcpManager.getToolDefinitions()];
+    const mcpTools = mcpManager.getToolDefinitions(bundle.mcps);
+    const exposedMcpTools = new Set(mcpTools.map((t) => t.function.name));
+    const allTools = [...bundleTools, ...mcpTools];
 
     const ctx: ToolContext = { bundle, user: req.user };
 
@@ -733,7 +748,10 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     };
 
     // Build conversation: system prompt + user-supplied history.
-    const systemPrompt = await buildSystemPrompt(bundle);
+    const systemPrompt = await buildSystemPrompt(
+      bundle,
+      [...exposedMcpTools],
+    );
     const callMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...messages,
@@ -808,18 +826,24 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             let result: unknown;
             try {
               if (mcpManager.hasTool(toolName)) {
-                // Pre-check: if this is a Google Workspace tool, validate auth
-                // proactively (refreshing if needed). If the token can't be
-                // refreshed (e.g. 7-day test expiry), short-circuit so the MCP
-                // doesn't hang trying its own browser-based OAuth flow.
-                if (toolName.startsWith('gw_')) {
-                  const ok = await validateWorkspaceAuth();
-                  if (!ok) {
-                    result = { error: '__WORKSPACE_AUTH_REQUIRED__' };
+                if (!exposedMcpTools.has(toolName)) {
+                  // Known MCP tool but not enabled for this bundle — refuse
+                  // instead of silently executing a hidden capability.
+                  result = { error: `Tool "${toolName}" is not enabled for this bundle` };
+                } else {
+                  // Pre-check: if this is a Google Workspace tool, validate auth
+                  // proactively (refreshing if needed). If the token can't be
+                  // refreshed (e.g. 7-day test expiry), short-circuit so the MCP
+                  // doesn't hang trying its own browser-based OAuth flow.
+                  if (toolName.startsWith('gw_')) {
+                    const ok = await validateWorkspaceAuth();
+                    if (!ok) {
+                      result = { error: '__WORKSPACE_AUTH_REQUIRED__' };
+                    }
                   }
-                }
-                if (result === undefined) {
-                  result = await mcpManager.callTool(toolName, parsedArgs);
+                  if (result === undefined) {
+                    result = await mcpManager.callTool(toolName, parsedArgs);
+                  }
                 }
               } else {
                 result = await executeTool(toolName, parsedArgs, ctx);

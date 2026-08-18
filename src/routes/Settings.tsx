@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Navigate } from 'react-router-dom';
 import type { BundleConfig, User } from '../types.ts';
-import { addBundle, getBundles, getSettings, removeBundle, updateBundle, updateModel } from '../services/api.ts';
-import type { AppSettingsInfo } from '../services/api.ts';
+import { addBundle, getBundles, getMcps, getSettings, removeBundle, updateBundle, updateModel } from '../services/api.ts';
+import type { AppSettingsInfo, McpServerInfo } from '../services/api.ts';
 
 interface SettingsProps {
   user: User;
@@ -37,6 +37,11 @@ export function Settings({ user }: SettingsProps) {
   const [detailsDraft, setDetailsDraft] = useState({ name: '', icon: '', description: '' });
   const [detailsSaving, setDetailsSaving] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
+  const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
+  const [mcpsEditId, setMcpsEditId] = useState<string | null>(null);
+  const [mcpsDraft, setMcpsDraft] = useState<Set<string>>(new Set());
+  const [mcpsSaving, setMcpsSaving] = useState(false);
+  const [mcpsError, setMcpsError] = useState<string | null>(null);
   const [settingsInfo, setSettingsInfo] = useState<AppSettingsInfo | null>(null);
   const [modelDraft, setModelDraft] = useState('');
   const [modelSaving, setModelSaving] = useState(false);
@@ -92,6 +97,13 @@ export function Settings({ user }: SettingsProps) {
       .catch((err: unknown) => {
         if (active) setModelError(toMessage(err, 'Failed to load settings'));
       });
+    getMcps()
+      .then((list) => {
+        if (active) setMcpServers(list);
+      })
+      .catch(() => {
+        // Non-fatal — the MCP editor shows a hint when the list is empty.
+      });
     return () => {
       active = false;
     };
@@ -145,6 +157,7 @@ export function Settings({ user }: SettingsProps) {
 
   const openAccessEditor = (b: BundleConfig) => {
     setDetailsEditId(null);
+    setMcpsEditId(null);
     setAccessEditId(b.id);
     setAccessDraft((b.allowedUsers ?? []).join(', '));
     setAccessError(null);
@@ -152,10 +165,35 @@ export function Settings({ user }: SettingsProps) {
 
   const openDetailsEditor = (b: BundleConfig) => {
     setAccessEditId(null);
+    setMcpsEditId(null);
     setConfirmId(null);
     setDetailsEditId(b.id);
     setDetailsDraft({ name: b.name, icon: b.icon ?? '', description: b.description ?? '' });
     setDetailsError(null);
+  };
+
+  const openMcpsEditor = (b: BundleConfig) => {
+    setAccessEditId(null);
+    setDetailsEditId(null);
+    setConfirmId(null);
+    setMcpsEditId(b.id);
+    // `undefined` mcps = all servers (the default for legacy bundles).
+    setMcpsDraft(new Set(b.mcps ?? mcpServers.map((s) => s.name)));
+    setMcpsError(null);
+  };
+
+  const handleSaveMcps = async (id: string) => {
+    setMcpsSaving(true);
+    setMcpsError(null);
+    try {
+      await updateBundle(id, { mcps: [...mcpsDraft].sort() });
+      setMcpsEditId(null);
+      refresh();
+    } catch (err: unknown) {
+      setMcpsError(toMessage(err, 'Failed to update MCP tools'));
+    } finally {
+      setMcpsSaving(false);
+    }
   };
 
   const handleSaveDetails = async (id: string) => {
@@ -341,6 +379,14 @@ export function Settings({ user }: SettingsProps) {
                         ? 'Readonly access: none'
                         : `Readonly access: ${b.allowedUsers!.join(', ')}`}
                     </span>
+                    <span className="bundle-list-access">
+                      MCP tools:{' '}
+                      {b.mcps === undefined
+                        ? 'all servers'
+                        : b.mcps.length === 0
+                          ? 'none'
+                          : b.mcps.join(', ')}
+                    </span>
                   </div>
                   {confirmId === b.id ? (
                     <div className="bundle-list-actions">
@@ -392,6 +438,23 @@ export function Settings({ user }: SettingsProps) {
                         {detailsSaving ? 'Saving…' : 'Save details'}
                       </button>
                     </div>
+                  ) : mcpsEditId === b.id ? (
+                    <div className="bundle-list-actions">
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setMcpsEditId(null)}
+                        disabled={mcpsSaving}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleSaveMcps(b.id)}
+                        disabled={mcpsSaving}
+                      >
+                        {mcpsSaving ? 'Saving…' : 'Save tools'}
+                      </button>
+                    </div>
                   ) : (
                     <div className="bundle-list-actions">
                       <button
@@ -405,6 +468,14 @@ export function Settings({ user }: SettingsProps) {
                         onClick={() => openAccessEditor(b)}
                       >
                         Access…
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => openMcpsEditor(b)}
+                        disabled={mcpServers.length === 0}
+                        title={mcpServers.length === 0 ? 'No MCP servers configured' : undefined}
+                      >
+                        Tools…
                       </button>
                       <button
                         className="btn btn-danger-ghost btn-sm"
@@ -482,6 +553,49 @@ export function Settings({ user }: SettingsProps) {
                     {detailsError && (
                       <div className="error-banner error-banner-sm">{detailsError}</div>
                     )}
+                  </div>
+                )}
+                {mcpsEditId === b.id && (
+                  <div className="bundle-access-editor">
+                    <span className="form-label">MCP tool servers enabled for this bundle</span>
+                    {mcpServers.length === 0 ? (
+                      <span className="settings-section-hint">
+                        No MCP servers are configured on this Notebook instance.
+                      </span>
+                    ) : (
+                      <div className="mcp-check-list">
+                        {mcpServers.map((s) => (
+                          <label key={s.name} className="mcp-check">
+                            <input
+                              type="checkbox"
+                              checked={mcpsDraft.has(s.name)}
+                              onChange={(e) =>
+                                setMcpsDraft((prev) => {
+                                  const next = new Set(prev);
+                                  if (e.target.checked) next.add(s.name);
+                                  else next.delete(s.name);
+                                  return next;
+                                })
+                              }
+                            />
+                            <span>
+                              {s.name}
+                              <em className="mcp-check-meta">
+                                {' '}
+                                · {s.toolCount} tool{s.toolCount === 1 ? '' : 's'}
+                                {!s.running ? ' · not running' : ''}
+                              </em>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                    <span className="settings-section-hint">
+                      Enabled servers expose their tools to the chat assistant inside this notebook
+                      (web_search and file tools are always available). Uncheck everything to
+                      disable MCP tools entirely. Changes apply to the next chat request.
+                    </span>
+                    {mcpsError && <div className="error-banner error-banner-sm">{mcpsError}</div>}
                   </div>
                 )}
               </li>
