@@ -1105,7 +1105,7 @@ router.post('/:bundleId/compact', async (req, res, next) => {
           'Additionally, call the set_title tool exactly once with a concise title for the',
           'whole conversation: 4-8 words, max 60 characters, Title Case, specific nouns',
           '(file names, features, entities) over vague words, no quotes, period, or emoji.',
-          'The summary goes in your reply content; the title goes in the tool call.',
+          'Write the full summary as your message content FIRST, then call set_title.',
         ].join('\n'),
       },
       ...messages,
@@ -1117,8 +1117,42 @@ router.post('/:bundleId/compact', async (req, res, next) => {
     ];
 
     log.info(`Compact: ${messages.length} msgs, chatId=${chatId ?? 'none'}`);
-    const result = await chatCompletion(summaryRequest, [SET_TITLE_TOOL], log);
-    const summary = result.content.trim();
+
+    // Models often emit a tool call with empty content, intending to write the
+    // text after seeing the tool result — but a single completion never gets
+    // that far. Run a tiny follow-up loop: acknowledge set_title, ask again,
+    // until we have summary text (max 3 rounds).
+    let result = await chatCompletion(summaryRequest, [SET_TITLE_TOOL], log);
+    let summary = result.content.trim();
+    for (let round = 0; round < 3 && !summary && result.tool_calls?.length; round++) {
+      log.info(`Compact round ${round + 1}: content empty after tool call — requesting summary`);
+      summaryRequest.push({
+        role: 'assistant',
+        content: result.content ?? '',
+        tool_calls: result.tool_calls,
+      });
+      for (const tc of result.tool_calls) {
+        summaryRequest.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify(
+            tc.function.name === 'set_title'
+              ? { ok: true, note: 'Title set. Now write the full summary as your reply.' }
+              : { error: 'Unexpected tool — reply with the summary text instead.' },
+          ),
+        });
+      }
+      result = await chatCompletion(summaryRequest, [SET_TITLE_TOOL], log);
+      summary = result.content.trim();
+    }
+
+    // No summary text means the compaction would silently wipe context —
+    // refuse instead of persisting an empty event.
+    if (!summary) {
+      return res
+        .status(502)
+        .json({ error: 'The model returned no summary text — compaction aborted, history untouched.' });
+    }
 
     // Persist the compaction event to the chat timeline.
     if (chatId) {
