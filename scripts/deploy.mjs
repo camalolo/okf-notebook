@@ -70,6 +70,17 @@ async function main() {
   await mkdir(serverDst, { recursive: true });
   await cp(distServer, serverDst, { recursive: true, force: true });
 
+  // 2.5. Ship bundled MCP binaries (bin/ — e.g. ibkr-flex-mcp). Server code
+  // resolves them as ../bin relative to the compiled server/ directory.
+  const binSrc = path.join(ROOT, 'bin');
+  if (existsSync(binSrc)) {
+    const binDst = path.join(DEPLOY_DIR, 'bin');
+    console.log('[deploy] Copying MCP binaries →', binDst);
+    await mkdir(binDst, { recursive: true });
+    await cp(binSrc, binDst, { recursive: true, force: true });
+    execSync('chmod +x ' + binDst + '/*', { stdio: 'inherit' });
+  }
+
   // 3. Copy package files for dependency resolution.
   console.log('[deploy] Copying package.json + package-lock.json');
   await cp(path.join(ROOT, 'package.json'), path.join(serverDst, 'package.json'), { force: true });

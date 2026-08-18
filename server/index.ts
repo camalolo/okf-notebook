@@ -10,6 +10,7 @@ import searchRouter from './routes/search.js';
 import chatsRouter from './routes/chats.js';
 import authRouter from './routes/auth.js';
 import { settingsRouter } from './routes/settings.js';
+import { mcpsRouter } from './routes/mcps.js';
 import { mcpManager } from './lib/mcp-manager.js';
 import type { McpServerConfig } from './lib/mcp-manager.js';
 import { startDigestScheduler, runDigestTick } from './lib/scheduler.js';
@@ -44,6 +45,27 @@ const MCP_SERVERS: McpServerConfig[] = [
     allowTools: ['browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_press_key'],
   },
 ];
+
+// IBKR Flex Web Service (read-only account reporting: positions, trades, cash).
+// Static-musl binary in bin/ (ibkr-flex-mcp) — started only when both env
+// vars are present. The Flex Query must be configured in Client Portal
+// (Reports → Flex Queries) to emit the sections you want.
+const IBKR_FLEX_TOKEN = process.env.IBKR_FLEX_TOKEN ?? '';
+const IBKR_FLEX_QUERY_ID = process.env.IBKR_FLEX_QUERY_ID ?? '';
+if (IBKR_FLEX_TOKEN && IBKR_FLEX_QUERY_ID) {
+  MCP_SERVERS.push({
+    name: 'ibkr-flex',
+    // Resolved from server/ so it works in dev and in the deployed layout.
+    command: path.join(import.meta.dirname, '..', 'bin', 'ibkr-flex-mcp'),
+    args: [],
+    env: { IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID },
+  });
+} else {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[mcp] ibkr-flex disabled — set IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID in .env',
+  );
+}
 
 const app = express();
 
@@ -82,6 +104,7 @@ app.use('/api/notebook/bundles', requireAuth, requireBundleAccess, bundlesRouter
 app.use('/api/notebook/bundles', requireAuth, requireBundleAccess, searchRouter);
 app.use('/api/notebook/chats', requireAuth, requireBundleAccess, chatsRouter);
 app.use('/api/notebook/settings', requireAuth, settingsRouter);
+app.use('/api/notebook/mcps', requireAuth, mcpsRouter);
 
 // Serve built UI (production only — in dev, Vite serves the UI directly).
 // Checks for the built index.html so this is inert during development.

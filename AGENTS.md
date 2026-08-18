@@ -109,6 +109,8 @@ deploy/  ← nginx config for notebook.example.com
   - `/auth/*` — Google OAuth + `/me` + `/logout`
   - `/bundles/*` — bundle CRUD + composed sub-routers (`files`, `git`, `chat`)
   - `/chats/*` — chat session persistence (separate from the chat *agent* route)
+  - `/settings/*` — global settings (AI model)
+  - `/mcps` — MCP server status list (for the per-bundle toggles in Settings)
   - (full-text search is also mounted under `/bundles` — see `server/routes/search.ts`)
 
 ### Agentic chat loop (`server/routes/chat.ts`)
@@ -187,6 +189,23 @@ in a config file). Tools are namespaced with a `toolPrefix` to avoid collisions
 (`gw_` for Google Workspace). `allowTools` filters which tools each server
 exposes. Add or modify MCP servers by editing that array. `mcpManager.restartServer(name)`
 hot-restarts a single server (used after writing fresh Workspace tokens).
+
+**Per-bundle MCP availability**: each bundle may carry `mcps?: string[]` in
+`server/bundles.json` — the MCP server names enabled for that notebook
+(`undefined` = all servers, `[]` = none). Edited from Settings → "Tools…"
+per bundle (checkboxes fed by `GET /api/notebook/mcps`). Values are validated
+against the configured servers at save time (`sanitizeMcps()` in `bundles.ts`).
+The chat route filters MCP tools through `getToolDefinitions(bundle.mcps)`,
+refuses calls to hidden-but-known MCP tools, and the system prompt only
+advertises the exposed tools.
+
+**ibkr-flex** (`bin/ibkr-flex-mcp`, static-musl Rust binary): read-only IBKR
+account reporting via the Flex Web Service (`flex_positions`, `flex_trades`,
+`flex_cash`, `flex_run_query`). Started only when both `IBKR_FLEX_TOKEN` and
+`IBKR_FLEX_QUERY_ID` are set in `.env`; the Flex Query must be configured in
+Client Portal (Reports → Flex Queries) to emit the desired sections. The
+binary lives in `bin/` (committed) and is resolved as `../bin` relative to the
+server directory — deploy.mjs ships it to `{DEPLOY_DIR}/bin/`.
 
 **Google Workspace auth short-circuit**: before any `gw_*` tool call, the chat
 loop calls `validateWorkspaceAuth()` (`server/lib/workspace-auth.ts`). If the
