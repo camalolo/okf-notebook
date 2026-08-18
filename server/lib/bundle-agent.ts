@@ -15,6 +15,8 @@ import type { BundleConfig } from '../config.js';
 import type { ChatLogger } from './logger.js';
 import type { ChatMessage, ToolDefinition } from './llm.js';
 import { chatCompletionStream } from './llm.js';
+import { mcpManager } from './mcp-manager.js';
+import { validateWorkspaceAuth } from './workspace-auth.js';
 import {
   READONLY_TOOLS,
   executeTool,
@@ -68,6 +70,14 @@ export interface RunReadOnlyTaskOptions {
    */
   extraTools?: ToolDefinition[];
   /**
+   * MCP tool definitions to advertise and dispatch (e.g. the gw_ Google
+   * subset for the digest). Calls route through the MCP manager; gw_ tools
+   * additionally get a per-user auth pre-check against `mcpUserEmail`.
+   */
+  mcpTools?: ToolDefinition[];
+  /** Workspace account whose MCP instance handles gw_ calls (token pre-check). */
+  mcpUserEmail?: string;
+  /**
    * Names of tools that, when called by the model, terminate the run.
    * Terminal tool calls are recorded in `result.terminalToolCall` (and in
    * `result.toolCalls`) but NOT dispatched through executeTool — the caller
@@ -92,9 +102,12 @@ export async function runReadOnlyTask(
   const maxIterations = opts.maxIterations ?? 20;
   const ctx: ToolContext = { bundle };
   const terminalTools = opts.terminalTools ?? new Set<string>();
-  const advertisedTools = opts.extraTools?.length
-    ? [...READONLY_TOOLS, ...opts.extraTools]
-    : READONLY_TOOLS;
+  const advertisedTools = [
+    ...READONLY_TOOLS,
+    ...(opts.extraTools ?? []),
+    ...(opts.mcpTools ?? []),
+  ];
+  const mcpToolNames = new Set((opts.mcpTools ?? []).map((t) => t.function.name));
 
   const baseSystem = await buildSystemPrompt(bundle);
   const systemPrompt = opts.systemPromptSuffix
@@ -165,7 +178,20 @@ export async function runReadOnlyTask(
 
       let result: unknown;
       try {
-        result = await executeTool(tc.function.name, parsedArgs, ctx);
+        if (mcpToolNames.has(tc.function.name) && mcpManager.hasTool(tc.function.name)) {
+          if (
+            tc.function.name.startsWith('gw_') &&
+            !(await validateWorkspaceAuth(opts.mcpUserEmail ?? ''))
+          ) {
+            result = { error: 'Workspace auth expired — Google tools unavailable in this run.' };
+          } else {
+            result = await mcpManager.callTool(tc.function.name, parsedArgs, {
+              userEmail: opts.mcpUserEmail,
+            });
+          }
+        } else {
+          result = await executeTool(tc.function.name, parsedArgs, ctx);
+        }
       } catch (err) {
         result = { error: err instanceof Error ? err.message : String(err) };
       }

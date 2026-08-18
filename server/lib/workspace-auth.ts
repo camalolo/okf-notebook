@@ -1,22 +1,40 @@
 /**
- * Google Workspace MCP authentication helper.
+ * Google Workspace MCP authentication helper — per-user.
  *
  * The @alanxchen/google-workspace-mcp package stores its OAuth tokens in
- * `~/.google-workspace-mcp/{token,credentials}.json`. Instead of relying on
- * the MCP's own OAuth flow (which opens a browser on the server), we capture
- * tokens from the Notebook app's Google OAuth login and write them to those
- * files so the MCP picks them up on the next tool call / restart.
+ * `<homedir>/.google-workspace-mcp/{token,credentials}.json`, where homedir()
+ * follows $HOME on Linux. Instead of relying on the MCP's own OAuth flow (which
+ * opens a browser on the server), we capture tokens from the Notebook app's
+ * Google OAuth login and write them to a per-user directory that also serves
+ * as the $HOME of that user's dedicated MCP child process. Each logged-in user
+ * therefore gets their own Google account inside the MCP — no more
+ * last-user-to-login wins.
+ *
+ * Layout (runtime data, preserved across deploys):
+ *   server/data/workspace-auth/<sanitized-email>/
+ *     .google-workspace-mcp/{token,credentials}.json
  */
 
-import { readFile, writeFile, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join } from 'path';
-import { homedir } from 'os';
+import { join, resolve } from 'path';
 import { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET } from '../config.js';
 
-const TOKEN_DIR = join(homedir(), '.google-workspace-mcp');
-const TOKEN_PATH = join(TOKEN_DIR, 'token.json');
-const CREDENTIALS_PATH = join(TOKEN_DIR, 'credentials.json');
+/** Root dir holding one subdir per user. Sits next to sessions (preserved on deploy). */
+export const WORKSPACE_AUTH_ROOT = resolve(import.meta.dirname, '..', 'data', 'workspace-auth');
+
+/**
+ * The $HOME dir for a user's MCP instance. Email is sanitized to a safe
+ * dirname (local part + domain hash-free suffix keeps it readable).
+ */
+export function workspaceHomeDir(email: string): string {
+  const safe = email.trim().toLowerCase().replace(/[^a-z0-9@._-]+/g, '_');
+  return join(WORKSPACE_AUTH_ROOT, safe);
+}
+
+function tokenPath(email: string): string {
+  return join(workspaceHomeDir(email), '.google-workspace-mcp', 'token.json');
+}
 
 /**
  * OAuth scopes matching what the MCP server requests. Must match exactly so
@@ -46,7 +64,7 @@ interface WorkspaceToken {
  * MCP can refresh tokens independently. The `installed` key format matches what
  * google-auth-library expects (it reads `credentials.installed`).
  */
-async function writeCredentials(): Promise<void> {
+async function writeCredentials(email: string): Promise<void> {
   const credentials = {
     installed: {
       client_id: GOOGLE_CLIENT_ID,
@@ -57,20 +75,23 @@ async function writeCredentials(): Promise<void> {
       auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
     },
   };
-  await writeFile(CREDENTIALS_PATH, JSON.stringify(credentials, null, 2));
+  await writeFile(join(workspaceHomeDir(email), '.google-workspace-mcp', 'credentials.json'), JSON.stringify(credentials, null, 2));
 }
 
 /**
- * Write the MCP token.json with freshly obtained OAuth tokens.
- * Called from the Passport callback when the user connects Workspace.
+ * Capture OAuth tokens for a specific user. Called from the Passport callback
+ * when the user connects Workspace (refresh_token is only issued by Google on
+ * first consent or ?reconnect=1).
  */
 export async function writeWorkspaceTokens(
+  email: string,
   accessToken: string,
   refreshToken: string,
 ): Promise<void> {
-  await mkdir(TOKEN_DIR, { recursive: true });
+  const dir = join(workspaceHomeDir(email), '.google-workspace-mcp');
+  await mkdir(dir, { recursive: true });
 
-  await writeCredentials();
+  await writeCredentials(email);
 
   const token: WorkspaceToken = {
     access_token: accessToken,
@@ -81,8 +102,45 @@ export async function writeWorkspaceTokens(
     expiry_date: Date.now() + 3600_000,
   };
 
-  await writeFile(TOKEN_PATH, JSON.stringify(token, null, 2));
-  console.log('[workspace-auth] Tokens written to', TOKEN_PATH);
+  await writeFile(tokenPath(email), JSON.stringify(token, null, 2));
+  console.log(`[workspace-auth] Tokens written for ${email}`);
+}
+
+async function readToken(email: string): Promise<Partial<WorkspaceToken> | null> {
+  const p = tokenPath(email);
+  if (!existsSync(p)) return null;
+  try {
+    return JSON.parse(await readFile(p, 'utf-8')) as Partial<WorkspaceToken>;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a usable refresh token exists on disk for this user. */
+export async function hasWorkspaceTokens(email: string): Promise<boolean> {
+  const token = await readToken(email);
+  return !!token?.refresh_token;
+}
+
+/** Emails of every user with workspace tokens on disk (for the UI pickers). */
+export async function listWorkspaceUsers(): Promise<string[]> {
+  try {
+    const entries = await readdir(WORKSPACE_AUTH_ROOT, { withFileTypes: true });
+    const users: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
+      const tokenFile = join(WORKSPACE_AUTH_ROOT, entry.name, '.google-workspace-mcp', 'token.json');
+      try {
+        const token = JSON.parse(await readFile(tokenFile, 'utf-8')) as Partial<WorkspaceToken>;
+        if (token.refresh_token) users.push(entry.name);
+      } catch {
+        // unreadable token file — skip this user
+      }
+    }
+    return users.sort();
+  } catch {
+    return [];
+  }
 }
 
 export interface WorkspaceAuthStatus {
@@ -92,27 +150,20 @@ export interface WorkspaceAuthStatus {
 }
 
 /**
- * Check whether valid workspace tokens exist on disk.
+ * Check whether valid workspace tokens exist on disk for this user.
  * Lightweight check (no network) — used for /me status display.
  */
-export async function getWorkspaceAuthStatus(): Promise<WorkspaceAuthStatus> {
-  if (!existsSync(TOKEN_PATH)) {
-    return { connected: false };
-  }
-  try {
-    const raw = await readFile(TOKEN_PATH, 'utf-8');
-    const token = JSON.parse(raw) as Partial<WorkspaceToken>;
-    return {
-      connected: !!token.refresh_token,
-      expiresAt: token.expiry_date,
-    };
-  } catch {
-    return { connected: false };
-  }
+export async function getWorkspaceAuthStatus(email: string): Promise<WorkspaceAuthStatus> {
+  const token = await readToken(email);
+  if (!token) return { connected: false };
+  return {
+    connected: !!token.refresh_token,
+    expiresAt: token.expiry_date,
+  };
 }
 
 /**
- * Actively validate workspace auth before a gw_ tool call.
+ * Actively validate workspace auth for a user before a gw_ tool call.
  *
  * If the access token is still valid (with a 2-min buffer), returns true.
  * If the access token is expired, attempts a refresh via Google's token API.
@@ -123,18 +174,9 @@ export async function getWorkspaceAuthStatus(): Promise<WorkspaceAuthStatus> {
  * This prevents the MCP from hanging on its own browser-based OAuth flow
  * when running headless.
  */
-export async function validateWorkspaceAuth(): Promise<boolean> {
-  if (!existsSync(TOKEN_PATH)) return false;
-
-  let token: Partial<WorkspaceToken>;
-  try {
-    const raw = await readFile(TOKEN_PATH, 'utf-8');
-    token = JSON.parse(raw) as Partial<WorkspaceToken>;
-  } catch {
-    return false;
-  }
-
-  if (!token.refresh_token) return false;
+export async function validateWorkspaceAuth(email: string): Promise<boolean> {
+  const token = await readToken(email);
+  if (!token || !token.refresh_token) return false;
 
   // Access token still valid (2-min buffer) — no refresh needed.
   if (token.expiry_date && token.expiry_date > Date.now() + 120_000) {
@@ -155,7 +197,7 @@ export async function validateWorkspaceAuth(): Promise<boolean> {
     });
 
     if (!res.ok) {
-      console.error('[workspace-auth] Token refresh failed:', res.status, await res.text());
+      console.error(`[workspace-auth] Token refresh failed for ${email}:`, res.status, await res.text());
       return false;
     }
 
@@ -173,11 +215,11 @@ export async function validateWorkspaceAuth(): Promise<boolean> {
       token_type: 'Bearer',
       expiry_date: Date.now() + (data.expires_in ?? 3600) * 1000,
     };
-    await writeFile(TOKEN_PATH, JSON.stringify(updated, null, 2));
-    console.log('[workspace-auth] Token refreshed successfully');
+    await writeFile(tokenPath(email), JSON.stringify(updated, null, 2));
+    console.log(`[workspace-auth] Token refreshed for ${email}`);
     return true;
   } catch (e) {
-    console.error('[workspace-auth] Refresh attempt failed:', e);
+    console.error(`[workspace-auth] Refresh attempt failed for ${email}:`, e);
     return false;
   }
 }

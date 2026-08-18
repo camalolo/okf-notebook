@@ -22,6 +22,8 @@ import path from 'node:path';
 import { chatLogger, newTraceId } from './logger.js';
 import { runReadOnlyTask, type ToolCallRecord } from './bundle-agent.js';
 import { sendMail } from './mailer.js';
+import { mcpManager } from './mcp-manager.js';
+import { validateWorkspaceAuth } from './workspace-auth.js';
 import { DIGEST_TO } from '../config.js';
 import type { BundleConfig } from '../config.js';
 import type { ToolDefinition } from './llm.js';
@@ -109,6 +111,60 @@ const DIGEST_TASK_PROMPT = [
   'Do not emit a final text answer. Your turn is complete once you call one of',
   'these tools. Use plain text only between tool calls to think out loud if useful.',
 ].join('\n');
+
+/**
+ * Read-only Google tools offered to the digest when a googleUser is
+ * configured for the bundle (subset of the gw_ allowlist — calendar + mail
+ * reads, no event writes).
+ */
+const DIGEST_GW_TOOLS = new Set([
+  'gw_search_emails',
+  'gw_read_email',
+  'gw_list_calendars',
+  'gw_list_events',
+  'gw_get_event',
+  'gw_find_free_time',
+]);
+
+/**
+ * Resolve the Google tools available to this bundle's digest:
+ * - bundle.digest.googleUser set + tokens valid → the read-only gw_ subset,
+ *   routed to that user's MCP instance.
+ * - Otherwise → no Google tools (bundle files + web_search only).
+ */
+async function resolveGoogleTools(
+  bundle: BundleConfig,
+  log: ReturnType<typeof chatLogger>,
+): Promise<{ tools: ToolDefinition[]; promptSuffix: string; user?: string }> {
+  const googleUser = bundle.digest?.googleUser;
+  if (!googleUser) return { tools: [], promptSuffix: '' };
+
+  const authOk = await validateWorkspaceAuth(googleUser).catch(() => false);
+  if (!authOk) {
+    log.warn(`Digest googleUser ${googleUser} has no valid workspace tokens — Google tools disabled`);
+    return {
+      tools: [],
+      promptSuffix: '',
+      user: googleUser,
+    };
+  }
+
+  const tools = mcpManager
+    .getToolDefinitions(['google-workspace'])
+    .filter((t) => DIGEST_GW_TOOLS.has(t.function.name));
+  if (tools.length === 0) {
+    log.warn('google-workspace MCP server not running — Google tools unavailable for digest');
+    return { tools: [], promptSuffix: '', user: googleUser };
+  }
+
+  const promptSuffix = [
+    `You have read-only access to the Google account ${googleUser}`,
+    'through the gw_ tools (calendar: list_calendars/list_events/get_event/find_free_time;',
+    'mail: search_emails/read_email). Use them to check today\'s and tomorrow\'s calendar',
+    'events and any time-sensitive emails when deciding what needs attention.',
+  ].join(' ');
+  return { tools, promptSuffix, user: googleUser };
+}
 
 // --- Types ------------------------------------------------------------------
 
@@ -240,11 +296,19 @@ export async function runDigestForBundle(
   log.info(`Digest start: bundle=${bundle.id} (${bundle.name})`);
 
   try {
+    const google = await resolveGoogleTools(bundle, log);
     const result = await runReadOnlyTask(bundle, DIGEST_TASK_PROMPT, {
       log,
       maxIterations: 20,
       extraTools: DIGEST_DECISION_TOOLS,
       terminalTools: TERMINAL_TOOLS,
+      ...(google.tools.length > 0
+        ? {
+            mcpTools: google.tools,
+            mcpUserEmail: google.user,
+            systemPromptSuffix: google.promptSuffix,
+          }
+        : {}),
     });
 
     base.toolCalls = result.toolCalls;

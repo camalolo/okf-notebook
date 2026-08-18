@@ -20,6 +20,7 @@ import { sendMail } from '../lib/mailer.js';
 import type {
   ToolDefinition,
   ChatMessage,
+  ToolCall,
 } from '../lib/llm.js';
 import type { BundleConfig } from '../config.js';
 
@@ -757,6 +758,31 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       ...messages,
     ];
 
+    // Stamp the current date/time onto the newest user message so the LLM
+    // always knows "now" (day of week, date, time, timezone) even in long
+    // sessions — e.g. for market-hours reasoning. Only the copy sent to the
+    // LLM is stamped; the persisted message and older history stay untouched.
+    const now = new Date();
+    const taipei = now.toLocaleString('en-US', {
+      timeZone: 'Asia/Taipei',
+      weekday: 'short',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    });
+    const utc = now.toISOString().slice(11, 16);
+    const stamp = `[Current date/time: ${taipei} (UTC ${utc})]`;
+    for (let i = callMessages.length - 1; i >= 0; i--) {
+      const m = callMessages[i];
+      if (m?.role === 'user') {
+        callMessages[i] = { ...m, content: `${stamp}\n\n${m.content}` };
+        break;
+      }
+    }
+
     // Persist the new user message at the start of the turn.
     const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
     if (lastUserMsg) {
@@ -832,17 +858,19 @@ router.post('/:bundleId/chat', async (req, res, next) => {
                   result = { error: `Tool "${toolName}" is not enabled for this bundle` };
                 } else {
                   // Pre-check: if this is a Google Workspace tool, validate auth
-                  // proactively (refreshing if needed). If the token can't be
-                  // refreshed (e.g. 7-day test expiry), short-circuit so the MCP
-                  // doesn't hang trying its own browser-based OAuth flow.
+                  // for THE LOGGED-IN USER (refreshing if needed). If the token
+                  // can't be refreshed (e.g. 7-day test expiry), short-circuit
+                  // so the MCP doesn't hang trying its own browser-based OAuth.
                   if (toolName.startsWith('gw_')) {
-                    const ok = await validateWorkspaceAuth();
+                    const ok = await validateWorkspaceAuth(ctx.user?.email ?? '');
                     if (!ok) {
                       result = { error: '__WORKSPACE_AUTH_REQUIRED__' };
                     }
                   }
                   if (result === undefined) {
-                    result = await mcpManager.callTool(toolName, parsedArgs);
+                    result = await mcpManager.callTool(toolName, parsedArgs, {
+                      userEmail: ctx.user?.email,
+                    });
                   }
                 }
               } else {
@@ -981,11 +1009,52 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 // --- Compaction -------------------------------------------------------------
 
 /**
+ * Tool that lets the LLM name the chat session. Used by /compact and /retitle
+ * so the title comes out of the same query instead of a separate round-trip.
+ */
+const SET_TITLE_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'set_title',
+    description:
+      'Set the chat session title. Call exactly once with a concise title for the conversation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'Concise conversation title: 4-8 words, max 60 characters, Title Case.',
+        },
+      },
+      required: ['title'],
+    },
+  },
+};
+
+/** Extract the title from a `set_title` tool call in a completion result. */
+function extractSetTitle(result: {
+  content: string;
+  tool_calls?: ToolCall[];
+}): string | null {
+  for (const tc of result.tool_calls ?? []) {
+    if (tc.function.name !== 'set_title') continue;
+    try {
+      const args = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
+      const t = typeof args?.title === 'string' ? args.title.trim() : '';
+      if (t) return t.replace(/^["']|["']$/g, '').slice(0, 60);
+    } catch {
+      // malformed arguments — ignore this call
+    }
+  }
+  return null;
+}
+
+/**
  * POST /:bundleId/compact — summarise the conversation so far into a compact
  * context block. The summary replaces all prior messages as the starting point
  * for future LLM calls. The summary text is persisted as a `compaction` event
  * and returned to the client (which renders a divider, not the summary text).
- */
+ * The same query also refreshes the chat title via the set_title tool.
 router.post('/:bundleId/compact', async (req, res, next) => {
   const log = chatLogger(newTraceId());
   try {
@@ -1020,6 +1089,11 @@ router.post('/:bundleId/compact', async (req, res, next) => {
           '"the user asked" or "the assistant replied" — state the information directly.',
           'The summary will replace the conversation history as context for future exchanges,',
           'so it must contain everything needed to continue seamlessly.',
+          '',
+          'Additionally, call the set_title tool exactly once with a concise title for the',
+          'whole conversation: 4-8 words, max 60 characters, Title Case, specific nouns',
+          '(file names, features, entities) over vague words, no quotes, period, or emoji.',
+          'The summary goes in your reply content; the title goes in the tool call.',
         ].join('\n'),
       },
       ...messages,
@@ -1031,7 +1105,7 @@ router.post('/:bundleId/compact', async (req, res, next) => {
     ];
 
     log.info(`Compact: ${messages.length} msgs, chatId=${chatId ?? 'none'}`);
-    const result = await chatCompletion(summaryRequest, undefined, log);
+    const result = await chatCompletion(summaryRequest, [SET_TITLE_TOOL], log);
     const summary = result.content.trim();
 
     // Persist the compaction event to the chat timeline.
@@ -1046,7 +1120,17 @@ router.post('/:bundleId/compact', async (req, res, next) => {
       }
     }
 
-    res.json({ summary });
+    // Refresh the title in the same query — no separate retitle round-trip.
+    const title = extractSetTitle(result);
+    if (chatId && title) {
+      try {
+        await renameChat(bundle.id, chatId, req.user!.email, title);
+      } catch {
+        // best-effort
+      }
+    }
+
+    res.json({ summary, title: title ?? undefined });
   } catch (err) {
     log.errorTrace('Compact failed', err);
     next(err);
@@ -1085,7 +1169,8 @@ router.post('/:bundleId/retitle', async (req, res, next) => {
           '- Use specific nouns (file names, feature names, entities) over vague words',
           '- No quotes, no trailing period, no emoji',
           '- Title case',
-          'Respond with ONLY the title text, nothing else.',
+          'Analyze the conversation, then call the set_title tool with the title.',
+          'Do not reply with any other content.',
         ].join('\n'),
       },
       ...messages,
@@ -1096,8 +1181,12 @@ router.post('/:bundleId/retitle', async (req, res, next) => {
     ];
 
     log.info(`Retitle: ${messages.length} msgs, chatId=${chatId ?? 'none'}`);
-    const result = await chatCompletion(titleRequest, undefined, log);
-    const title = result.content.trim().replace(/^["']|["']$/g, '').slice(0, 60);
+    const result = await chatCompletion(titleRequest, [SET_TITLE_TOOL], log);
+    // Prefer the tool call; fall back to plain content if the model answered
+    // in text instead of calling the tool.
+    const title =
+      extractSetTitle(result) ??
+      result.content.trim().replace(/^["']|["']$/g, '').slice(0, 60);
 
     if (chatId && title) {
       try {

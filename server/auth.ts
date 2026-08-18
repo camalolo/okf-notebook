@@ -36,24 +36,25 @@ export function setupPassport(app: express.Express): void {
           passReqToCallback: true,
         },
         async (req, accessToken, refreshToken, profile, done) => {
-          // Every login requests workspace scopes + offline access. Google
-          // only returns a refresh_token on first authorization (or when
-          // prompt:consent is used via ?reconnect=1). When present, write
-          // the tokens to the MCP's token file and restart the server.
-          if (refreshToken) {
-            try {
-              await writeWorkspaceTokens(accessToken, refreshToken);
-              mcpManager
-                .restartServer('google-workspace')
-                .catch((e) => console.error('[mcp] Failed to restart after token update:', e));
-            } catch (e) {
-              console.error('[workspace-auth] Failed to write tokens:', e);
-            }
-          }
           const email = profile.emails?.[0]?.value;
           if (!email) {
             // No email in profile — cannot map to allowlist.
             return done(null, false);
+          }
+          // Every login requests workspace scopes + offline access. Google
+          // only returns a refresh_token on first authorization (or when
+          // prompt:consent is used via ?reconnect=1). When present, write
+          // per-user tokens and (re)start that user's MCP instance so their
+          // Google account — and only theirs — is used for gw_ tools.
+          if (refreshToken) {
+            try {
+              await writeWorkspaceTokens(email, accessToken, refreshToken);
+              mcpManager
+                .restartUserServer('google-workspace', email)
+                .catch((e) => console.error('[mcp] Failed to restart user instance:', e));
+            } catch (e) {
+              console.error('[workspace-auth] Failed to write tokens:', e);
+            }
           }
           const role = USERS[email];
           if (!role) {

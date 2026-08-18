@@ -9,6 +9,7 @@ process.env.NOTEBOOK_BUNDLES_FILE = path.join(tmpDir, 'bundles.json');
 
 const {
   sanitizeMcps,
+  sanitizeDigest,
   updateBundle,
   addBundle,
   loadBundles,
@@ -60,6 +61,30 @@ describe('sanitizeMcps', () => {
       expect((err as BundleError).code).toBe('INVALID_MCPS');
       expect((err as BundleError).message).toContain('nope');
     }
+  });
+});
+
+describe('sanitizeDigest', () => {
+  it('passes through undefined (meaning defaults)', () => {
+    expect(sanitizeDigest(undefined)).toBeUndefined();
+    expect(sanitizeDigest(null)).toBeUndefined();
+  });
+
+  it('normalizes a google user email and keeps flags', () => {
+    expect(sanitizeDigest({ enabled: false, googleUser: ' User@Example.com ' })).toEqual({
+      enabled: false,
+      googleUser: 'user@example.com',
+    });
+  });
+
+  it('drops an empty googleUser', () => {
+    expect(sanitizeDigest({ enabled: true, googleUser: '' })).toEqual({ enabled: true });
+  });
+
+  it('rejects malformed input', () => {
+    expect(() => sanitizeDigest('nope')).toThrow(BundleError);
+    expect(() => sanitizeDigest({ enabled: 'yes' })).toThrow(BundleError);
+    expect(() => sanitizeDigest({ googleUser: 'not-an-email' })).toThrow(BundleError);
   });
 });
 

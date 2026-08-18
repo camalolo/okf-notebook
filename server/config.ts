@@ -1,3 +1,14 @@
+export interface DigestConfig {
+  /** Daily digest for this bundle. `undefined`/`true` = enabled (default). */
+  enabled?: boolean;
+  /**
+   * Email of the Google account whose Calendar/Gmail the digest may read
+   * via gw_ MCP tools (per-notebook). Empty/undefined = no Google access.
+   * The account must have logged in once (Workspace tokens on disk).
+   */
+  googleUser?: string;
+}
+
 export interface BundleConfig {
   id: string;
   name: string;
@@ -12,6 +23,8 @@ export interface BundleConfig {
    * in `MCP_SERVERS` at save time.
    */
   mcps?: string[];
+  /** Daily digest settings for this bundle. `undefined` = defaults (enabled, no Google). */
+  digest?: DigestConfig;
 }
 
 export type Role = 'readonly' | 'full';

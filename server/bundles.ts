@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BUNDLES_FILE } from './config.js';
-import type { BundleConfig } from './config.js';
+import type { BundleConfig, DigestConfig } from './config.js';
 import type { User } from './config.js';
 
 const BUNDLES_PATH = fileURLToPath(BUNDLES_FILE);
@@ -107,6 +107,34 @@ export function sanitizeMcps(raw: unknown, validNames: readonly string[]): strin
   return names;
 }
 
+/**
+ * Normalize/copy a `digest` config from untrusted input. Returns undefined
+ * when absent (= defaults: enabled, no Google account). The google user is
+ * an email validated by shape only — the UI offers connected accounts, and
+ * a chosen account without tokens simply yields no Google tools at run time.
+ */
+export function sanitizeDigest(raw: unknown): DigestConfig | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object') {
+    throw new BundleError('digest must be an object', 'INVALID_DIGEST');
+  }
+  const { enabled, googleUser } = raw as { enabled?: unknown; googleUser?: unknown };
+  if (enabled !== undefined && typeof enabled !== 'boolean') {
+    throw new BundleError('digest.enabled must be a boolean', 'INVALID_DIGEST');
+  }
+  let user: string | undefined;
+  if (googleUser !== undefined && googleUser !== null && googleUser !== '') {
+    if (typeof googleUser !== 'string' || !/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(googleUser.trim())) {
+      throw new BundleError('digest.googleUser must be a valid email', 'INVALID_DIGEST');
+    }
+    user = googleUser.trim().toLowerCase();
+  }
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(user ? { googleUser: user } : {}),
+  };
+}
+
 export interface NewBundleInput {
   name: string;
   path: string;
@@ -114,6 +142,7 @@ export interface NewBundleInput {
   description?: string;
   allowedUsers?: string[];
   mcps?: string[];
+  digest?: DigestConfig;
 }
 
 /** Add a new bundle after validating that the path is an existing directory. */
@@ -138,6 +167,7 @@ export async function addBundle(data: NewBundleInput): Promise<BundleConfig> {
     description: data.description ?? '',
     ...(data.allowedUsers ? { allowedUsers: data.allowedUsers } : {}),
     ...(data.mcps !== undefined ? { mcps: data.mcps } : {}),
+    ...(data.digest !== undefined ? { digest: data.digest } : {}),
   };
   bundles.push(bundle);
   await saveBundles(bundles);
@@ -157,7 +187,7 @@ export async function removeBundle(id: string): Promise<void> {
 /** Update a bundle's metadata (never the path). */
 export async function updateBundle(
   id: string,
-  data: Partial<Pick<BundleConfig, 'name' | 'icon' | 'description' | 'allowedUsers' | 'mcps'>>,
+  data: Partial<Pick<BundleConfig, 'name' | 'icon' | 'description' | 'allowedUsers' | 'mcps' | 'digest'>>,
 ): Promise<BundleConfig> {
   const bundles = await loadBundles();
   const idx = bundles.findIndex((b) => b.id === id);
@@ -171,6 +201,7 @@ export async function updateBundle(
     ...(data.description !== undefined ? { description: data.description } : {}),
     ...(data.allowedUsers !== undefined ? { allowedUsers: data.allowedUsers } : {}),
     ...(data.mcps !== undefined ? { mcps: data.mcps } : {}),
+    ...(data.digest !== undefined ? { digest: data.digest } : {}),
   };
   await saveBundles(bundles);
   return bundles[idx];
@@ -181,7 +212,8 @@ export type BundleErrorCode =
   | 'PATH_NOT_DIRECTORY'
   | 'NOT_FOUND'
   | 'INVALID_ALLOWED_USERS'
-  | 'INVALID_MCPS';
+  | 'INVALID_MCPS'
+  | 'INVALID_DIGEST';
 
 export class BundleError extends Error {
   code: BundleErrorCode;

@@ -23,6 +23,9 @@ const MCP_SERVERS: McpServerConfig[] = [
     command: 'npx',
     args: ['-y', '@alanxchen/google-workspace-mcp'],
     toolPrefix: 'gw',
+    // One child process per workspace-connected user (token isolation via
+    // $HOME); tool calls route to the logged-in user's Google account.
+    perUser: true,
     allowTools: [
       // Gmail (read-only)
       'search_emails',

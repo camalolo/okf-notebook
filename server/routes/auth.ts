@@ -81,7 +81,7 @@ router.get('/google/callback', (req, res, next) => {
 /** GET /auth/me — return the current user or 401. */
 router.get('/me', async (req, res) => {
   if (req.isAuthenticated()) {
-    const workspace = await getWorkspaceAuthStatus();
+    const workspace = await getWorkspaceAuthStatus(req.user!.email);
     return res.json({ ...req.user, workspace });
   }
   return res.status(401).json({ error: 'Unauthorized' });

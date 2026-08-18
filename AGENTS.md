@@ -177,8 +177,19 @@ request — no restart needed.
 
 Two functions are exported: `chatCompletionStream` (used by the chat route —
 streams content deltas via a callback, accumulates tool-call fragments across
-chunks, accepts an `AbortSignal`) and `chatCompletion` (non-streaming, currently
-unused by the chat route but kept exported).
+chunks, accepts an `AbortSignal`) and `chatCompletion` (non-streaming, used by
+compact/retitle and tests).
+
+### Daily digest (`server/lib/digest.ts`, `server/lib/scheduler.ts`)
+
+Per-bundle config lives in `bundles.json` as `digest?: { enabled?, googleUser? }`
+(Settings → "Digest…" per bundle; `GET /api/notebook/mcps` feeds the Google
+account dropdown from `listWorkspaceUsers()`). `enabled: false` skips the
+bundle in the scheduler. `googleUser` (an email with Workspace tokens on disk)
+gives the digest read-only `gw_` tools (calendar + mail subset) routed to that
+user's MCP instance via `runReadOnlyTask({ mcpTools, mcpUserEmail })` — one
+notebook can digest the author's calendar, another Demo's. Global knobs remain
+env-based: `DIGEST_CRON`, `DIGEST_TZ`, `DIGEST_TO`, `DIGEST_DISABLED`.
 
 ### MCP servers (`server/lib/mcp-manager.ts`)
 
@@ -188,7 +199,18 @@ Configured **hardcoded** in `MCP_SERVERS` at the top of `server/index.ts` (not
 in a config file). Tools are namespaced with a `toolPrefix` to avoid collisions
 (`gw_` for Google Workspace). `allowTools` filters which tools each server
 exposes. Add or modify MCP servers by editing that array. `mcpManager.restartServer(name)`
-hot-restarts a single server (used after writing fresh Workspace tokens).
+hot-restarts a single server.
+
+**Per-user MCP instances (`perUser: true`)**: the `google-workspace` server runs
+one child process per workspace-connected user. The MCP package resolves its
+tokens from `$HOME/.google-workspace-mcp`, so each user's instance is spawned
+with `HOME=server/data/workspace-auth/<email>/` (and a shared `npm_config_cache`
+so npx doesn't re-download the package per user). Chat `gw_*` calls route to the
+**logged-in user's** instance (`callTool(name, args, { userEmail })`), started
+lazily if they have tokens on disk. At startup one instance is started per user
+in `listWorkspaceUsers()`; if none, a tokenless instance runs for tool discovery.
+`restartUserServer(name, email)` is called from the login callback after tokens
+are written.
 
 **Per-bundle MCP availability**: each bundle may carry `mcps?: string[]` in
 `server/bundles.json` — the MCP server names enabled for that notebook
@@ -208,12 +230,12 @@ binary lives in `bin/` (committed) and is resolved as `../bin` relative to the
 server directory — deploy.mjs ships it to `{DEPLOY_DIR}/bin/`.
 
 **Google Workspace auth short-circuit**: before any `gw_*` tool call, the chat
-loop calls `validateWorkspaceAuth()` (`server/lib/workspace-auth.ts`). If the
-access token is stale it attempts a silent refresh via Google's token API; if
-that fails (e.g. 7-day test refresh token expired) it returns the sentinel
-`{ error: '__WORKSPACE_AUTH_REQUIRED__' }` instead of calling the MCP — this
-prevents the MCP from hanging on its own browser-based OAuth flow when running
-headless.
+loop calls `validateWorkspaceAuth(email)` (`server/lib/workspace-auth.ts`) for
+the logged-in user. If the access token is stale it attempts a silent refresh
+via Google's token API; if that fails (e.g. 7-day test refresh token expired) it
+returns the sentinel `{ error: '__WORKSPACE_AUTH_REQUIRED__' }` instead of
+calling the MCP — this prevents the MCP from hanging on its own browser-based
+OAuth flow when running headless.
 
 ### Web search (`web_search` built-in tool)
 
@@ -235,9 +257,11 @@ in `server/lib/web-search.ts`.
   `spreadsheets`, `presentations`, `contacts`) with `accessType: 'offline'`. When
   Google returns a `refresh_token` (first authorization, or when `?reconnect=1`
   is passed to `/auth/google` to force `prompt: 'consent'`), the tokens are
-  written to `~/.google-workspace-mcp/{token,credentials}.json` and the
-  `google-workspace` MCP server is restarted so it picks them up. This is how the
-  headless MCP gets its credentials without its own browser flow.
+  written **per user** to
+  `server/data/workspace-auth/<email>/.google-workspace-mcp/{token,credentials}.json`
+  and that user's `google-workspace` MCP instance is (re)started. Each user's
+  Google account is therefore isolated — chats use the tokens of whoever is
+  logged in. A user with no tokens yet must log in once with `?reconnect=1`.
 - `app.set('trust proxy', 1)` is required so the dynamically-built OAuth
   callback URL (`callbackURL(req)`) sees `https` behind nginx.
 - OAuth callback URL is built per-request from `req.protocol` + `req.get('host')`,

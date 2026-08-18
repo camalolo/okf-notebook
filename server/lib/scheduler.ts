@@ -82,6 +82,11 @@ export async function runDigestTick(opts: {
   const records: DigestRunRecord[] = [];
 
   for (const bundle of targets) {
+    if (bundle.digest?.enabled === false) {
+      console.log(`[digest] ${bundle.id}: disabled in bundle settings, skipping`);
+      continue;
+    }
+
     if (lastrun[bundle.id] === today) {
       console.log(`[digest] ${bundle.id}: already ran today (${today}), skipping`);
       continue;

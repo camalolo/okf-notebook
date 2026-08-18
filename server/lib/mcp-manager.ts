@@ -10,7 +10,14 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { ToolDefinition } from './llm.js';
+import {
+  hasWorkspaceTokens,
+  listWorkspaceUsers,
+  workspaceHomeDir,
+} from './workspace-auth.js';
 
 export interface McpServerConfig {
   /** Identifier for this MCP server (used in logs). */
@@ -25,6 +32,13 @@ export interface McpServerConfig {
   toolPrefix?: string;
   /** Only expose these original tool names (before prefix). If omitted, expose all. */
   allowTools?: string[];
+  /**
+   * Run one child instance per workspace-connected user, each with its own
+   * $HOME (token isolation). Tool calls are routed to the caller's instance
+   * via `callTool(name, args, { userEmail })`. If no user has tokens yet, a
+   * single tokenless instance is started for tool discovery only.
+   */
+  perUser?: boolean;
 }
 
 interface ToolMapping {
@@ -37,6 +51,8 @@ type McpContent = { type: string; text?: string } | Record<string, any>;
 
 class McpManager {
   private clients = new Map<string, Client>();
+  /** Per-user instances for `perUser` servers, keyed `${serverName}|${email}`. */
+  private userClients = new Map<string, Client>();
   private toolMap = new Map<string, ToolMapping>();
   private toolDefs: ToolDefinition[] = [];
   private configs: McpServerConfig[] = [];
@@ -48,29 +64,67 @@ class McpManager {
     this.started = true;
     this.configs = configs;
 
-    await Promise.allSettled(
-      configs.map((cfg) =>
-        this.startServer(cfg).catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          // eslint-disable-next-line no-console
-          console.error(`[mcp] Failed to start "${cfg.name}": ${msg}`);
-        }),
-      ),
-    );
+    const jobs: Promise<unknown>[] = [];
+    for (const cfg of configs) {
+      if (cfg.perUser) {
+        // One instance per workspace-connected user; tokenless fallback for
+        // discovery so the tools are still advertised to the LLM.
+        jobs.push(
+          (async () => {
+            const users = await listWorkspaceUsers();
+            if (users.length > 0) {
+              await Promise.allSettled(users.map((u) => this.startUserServer(cfg.name, u)));
+            } else {
+              await this.startServer(cfg);
+            }
+          })().catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            // eslint-disable-next-line no-console
+            console.error(`[mcp] Failed to start "${cfg.name}": ${msg}`);
+          }),
+        );
+      } else {
+        jobs.push(
+          this.startServer(cfg).catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            // eslint-disable-next-line no-console
+            console.error(`[mcp] Failed to start "${cfg.name}": ${msg}`);
+          }),
+        );
+      }
+    }
+    await Promise.allSettled(jobs);
 
     const total = this.toolDefs.length;
     // eslint-disable-next-line no-console
     console.log(`[mcp] Ready — ${total} tools discovered`);
   }
 
-  private async startServer(config: McpServerConfig): Promise<void> {
+  private async startServer(config: McpServerConfig, userEmail?: string): Promise<void> {
+    const who = userEmail ? ` (user ${userEmail})` : '';
     // eslint-disable-next-line no-console
-    console.log(`[mcp] Starting "${config.name}"...`);
+    console.log(`[mcp] Starting "${config.name}"${who}...`);
+
+    let env: Record<string, string> | undefined;
+    if (config.env) {
+      env = { ...process.env, ...config.env } as Record<string, string>;
+    }
+    if (userEmail) {
+      // Token isolation: the child resolves its token dir as
+      // $HOME/.google-workspace-mcp (os.homedir() follows $HOME on Linux).
+      // Keep the npm cache on the real home so npx doesn't re-download the
+      // package once per user.
+      env = {
+        ...(env ?? (process.env as Record<string, string>)),
+        HOME: workspaceHomeDir(userEmail),
+        npm_config_cache: process.env.npm_config_cache ?? join(homedir(), '.npm'),
+      };
+    }
 
     const transport = new StdioClientTransport({
       command: config.command,
       args: config.args,
-      ...(config.env ? { env: { ...process.env, ...config.env } as Record<string, string> } : {}),
+      ...(env ? { env } : {}),
     });
 
     const client = new Client(
@@ -79,7 +133,11 @@ class McpManager {
     );
 
     await client.connect(transport);
-    this.clients.set(config.name, client);
+    if (userEmail) {
+      this.userClients.set(`${config.name}|${userEmail}`, client);
+    } else {
+      this.clients.set(config.name, client);
+    }
 
     const { tools } = await client.listTools();
     let count = 0;
@@ -90,6 +148,10 @@ class McpManager {
       const exposedName = config.toolPrefix
         ? `${config.toolPrefix}_${tool.name}`
         : tool.name;
+
+      // Tool names are identical across instances of the same server —
+      // register definitions/mappings only once.
+      if (this.toolMap.has(exposedName)) continue;
 
       this.toolMap.set(exposedName, {
         serverName: config.name,
@@ -110,8 +172,7 @@ class McpManager {
       count++;
     }
 
-    // eslint-disable-next-line no-console
-    console.log(`[mcp] "${config.name}" ready — ${count} tools exposed`);
+    console.log(`[mcp] "${config.name}"${who} ready — ${count} new tools exposed`);
   }
 
   /** Names of all configured MCP servers (started or not). */
@@ -121,13 +182,18 @@ class McpManager {
 
   /** Status of every configured server, for the Settings UI. */
   listServers(): Array<{ name: string; running: boolean; toolCount: number }> {
-    return this.configs.map((c) => ({
-      name: c.name,
-      running: this.clients.has(c.name),
-      toolCount: this.toolDefs.filter(
-        (td) => this.toolMap.get(td.function.name)?.serverName === c.name,
-      ).length,
-    }));
+    return this.configs.map((c) => {
+      const hasUserInstance = Array.from(this.userClients.keys()).some(
+        (k) => k.startsWith(`${c.name}|`),
+      );
+      return {
+        name: c.name,
+        running: this.clients.has(c.name) || hasUserInstance,
+        toolCount: this.toolDefs.filter(
+          (td) => this.toolMap.get(td.function.name)?.serverName === c.name,
+        ).length,
+      };
+    });
   }
 
   /**
@@ -149,13 +215,37 @@ class McpManager {
     return this.toolMap.has(name);
   }
 
-  /** Execute an MCP tool by its namespaced name. */
+  /** Execute an MCP tool by its namespaced name.
+   *
+   * For `perUser` servers, pass `opts.userEmail` — the call routes to that
+   * user's instance (started on demand if they have tokens on disk). Without
+   * a user (or without tokens), a tokenless shared instance is attempted.
+   */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async callTool(name: string, args: unknown): Promise<any> {
+  async callTool(name: string, args: unknown, opts?: { userEmail?: string }): Promise<any> {
     const mapping = this.toolMap.get(name);
     if (!mapping) throw new Error(`Unknown MCP tool: ${name}`);
 
-    const client = this.clients.get(mapping.serverName);
+    const config = this.configs.find((c) => c.name === mapping.serverName);
+    let client: Client | undefined;
+
+    if (config?.perUser) {
+      const email = opts?.userEmail;
+      if (email) {
+        const key = `${mapping.serverName}|${email}`;
+        client = this.userClients.get(key);
+        if (!client) {
+          if (await hasWorkspaceTokens(email)) {
+            await this.startUserServer(mapping.serverName, email);
+            client = this.userClients.get(key);
+          }
+        }
+      }
+      if (!client) client = this.clients.get(mapping.serverName); // tokenless fallback
+    } else {
+      client = this.clients.get(mapping.serverName);
+    }
+
     if (!client) throw new Error(`MCP server not connected: ${mapping.serverName}`);
 
     const result = await client.callTool({
@@ -199,7 +289,41 @@ class McpManager {
       this.clients.delete(name);
     }
 
-    // Remove tool mappings for this server
+    this.forgetServerTools(name);
+    await this.startServer(config);
+  }
+
+  /**
+   * Start the per-user instance of a `perUser` server if it isn't already
+   * running (no-op otherwise). Safe to call repeatedly, e.g. lazily before a
+   * tool call once the user's tokens land on disk.
+   */
+  async startUserServer(name: string, email: string): Promise<void> {
+    if (this.userClients.has(`${name}|${email}`)) return;
+    const config = this.configs.find((c) => c.name === name);
+    if (!config) throw new Error(`Unknown MCP server: ${name}`);
+    await this.startServer(config, email);
+  }
+
+  /**
+   * Start (or restart) the per-user instance of a `perUser` server — e.g.
+   * right after that user's workspace tokens were (re)written on login.
+   */
+  async restartUserServer(name: string, email: string): Promise<void> {
+    const config = this.configs.find((c) => c.name === name);
+    if (!config) throw new Error(`Unknown MCP server: ${name}`);
+
+    const key = `${name}|${email}`;
+    const oldClient = this.userClients.get(key);
+    if (oldClient) {
+      await oldClient.close().catch(() => {});
+      this.userClients.delete(key);
+    }
+    await this.startServer(config, email);
+  }
+
+  /** Remove tool mappings/definitions belonging to a server (shared instance). */
+  private forgetServerTools(name: string): void {
     const toolsToRemove: string[] = [];
     for (const [toolName, mapping] of this.toolMap) {
       if (mapping.serverName === name) {
@@ -207,21 +331,20 @@ class McpManager {
         this.toolMap.delete(toolName);
       }
     }
-    // Remove tool definitions belonging to this server
     this.toolDefs = this.toolDefs.filter(
       (td) => !toolsToRemove.includes(td.function.name),
     );
-
-    // Restart
-    await this.startServer(config);
   }
 
   /** Gracefully shut down all MCP child processes. */
   async stop(): Promise<void> {
     await Promise.allSettled(
-      Array.from(this.clients.values()).map((c) => c.close()),
+      [...Array.from(this.clients.values()), ...Array.from(this.userClients.values())].map((c) =>
+        c.close(),
+      ),
     );
     this.clients.clear();
+    this.userClients.clear();
     this.toolMap.clear();
     this.toolDefs = [];
     this.started = false;
