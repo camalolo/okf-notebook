@@ -4,6 +4,7 @@ const require = createRequire(import.meta.url);
 const simpleGit = require('simple-git') as (cwd: string) => import('simple-git').SimpleGit;
 import { getBundle } from '../bundles.js';
 import { requireFull } from '../auth.js';
+import { ensureGitRepo, isNoCommitsError } from '../lib/git-repo.js';
 
 const router = Router();
 
@@ -18,6 +19,7 @@ router.get('/:bundleId/git/status', async (req, res, next) => {
     const bundle = await getBundle(req.params.bundleId as string);
     if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
 
+    await ensureGitRepo(bundle.path);
     const status = await git(bundle.path).status();
     const files = status.files.map((f) => ({
       path: f.path,
@@ -63,6 +65,7 @@ router.get('/:bundleId/git/diff', async (req, res, next) => {
     if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
 
     const filePath = req.query.path as string | undefined;
+    await ensureGitRepo(bundle.path);
     const diff = filePath
       ? await git(bundle.path).diff(['--', filePath])
       : await git(bundle.path).diff();
@@ -80,15 +83,22 @@ router.get('/:bundleId/git/log', async (req, res, next) => {
     if (!bundle) return res.status(404).json({ error: 'Bundle not found' });
 
     const limit = parseInt(req.query.limit as string) || 20;
-    const log = await git(bundle.path).log({ maxCount: limit });
-    const commits = log.all.map((c) => ({
-      hash: c.hash,
-      date: c.date,
-      message: c.message,
-      author: c.author_name,
-    }));
+    await ensureGitRepo(bundle.path);
+    try {
+      const log = await git(bundle.path).log({ maxCount: limit });
+      const commits = log.all.map((c) => ({
+        hash: c.hash,
+        date: c.date,
+        message: c.message,
+        author: c.author_name,
+      }));
 
-    return res.json({ commits });
+      return res.json({ commits });
+    } catch (err) {
+      // Freshly-initialized repo — no commits yet.
+      if (isNoCommitsError(err)) return res.json({ commits: [] });
+      throw err;
+    }
   } catch (err) {
     next(err);
   }
@@ -105,6 +115,7 @@ router.post('/:bundleId/git/stage', requireFull, async (req, res, next) => {
       return res.status(400).json({ error: 'paths (string[]) is required' });
     }
 
+    await ensureGitRepo(bundle.path);
     await git(bundle.path).add(paths);
     return res.json({ ok: true, staged: paths });
   } catch (err) {
@@ -124,6 +135,7 @@ router.post('/:bundleId/git/commit', requireFull, async (req, res, next) => {
     }
 
     const g = git(bundle.path);
+    await ensureGitRepo(bundle.path);
     if (Array.isArray(paths) && paths.length > 0) {
       await g.add(paths);
     } else {

@@ -15,6 +15,7 @@ import { chatLogger, newTraceId } from '../lib/logger.js';
 import { webSearch } from '../lib/web-search.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
+import { ensureGitRepo, isNoCommitsError } from '../lib/git-repo.js';
 import { appendEvent, renameChat } from '../chats.js';
 import { sendMail } from '../lib/mailer.js';
 import type {
@@ -383,6 +384,7 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
     }
 
     case 'git_status': {
+      await ensureGitRepo(bundlePath);
       const status = await simpleGit(bundlePath).status();
       return {
         modified: status.files
@@ -397,6 +399,7 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
     }
 
     case 'git_diff': {
+      await ensureGitRepo(bundlePath);
       const filePath = args?.path ? String(args.path) : undefined;
       const diff = filePath
         ? await simpleGit(bundlePath).diff(['--', filePath])
@@ -405,16 +408,23 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
     }
 
     case 'git_log': {
+      await ensureGitRepo(bundlePath);
       const limit = Number(args?.limit) || 10;
-      const log = await simpleGit(bundlePath).log({ maxCount: limit });
-      return {
-        commits: log.all.map((c) => ({
-          hash: c.hash,
-          date: c.date,
-          message: c.message,
-          author: c.author_name,
-        })),
-      };
+      try {
+        const log = await simpleGit(bundlePath).log({ maxCount: limit });
+        return {
+          commits: log.all.map((c) => ({
+            hash: c.hash,
+            date: c.date,
+            message: c.message,
+            author: c.author_name,
+          })),
+        };
+      } catch (err) {
+        // Freshly-initialized repo — no commits yet.
+        if (isNoCommitsError(err)) return { commits: [] };
+        throw err;
+      }
     }
 
     case 'edit_file': {
@@ -492,6 +502,7 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
     case 'git_commit': {
       const message = String(args?.message ?? '');
       if (!message) return { error: 'message is required' };
+      await ensureGitRepo(bundlePath);
       const g = simpleGit(bundlePath);
       const paths = Array.isArray(args?.paths) ? args.paths : undefined;
       if (paths && paths.length > 0) {
@@ -1055,6 +1066,7 @@ function extractSetTitle(result: {
  * for future LLM calls. The summary text is persisted as a `compaction` event
  * and returned to the client (which renders a divider, not the summary text).
  * The same query also refreshes the chat title via the set_title tool.
+ */
 router.post('/:bundleId/compact', async (req, res, next) => {
   const log = chatLogger(newTraceId());
   try {
