@@ -159,11 +159,19 @@ card. Readonly-role users get only `read_file`, `list_files`, `git_*`, and
 
 ### LLM backend (`server/lib/llm.ts`)
 
-Calls the **Z.ai GLM API through a local PHP proxy** at
-`https://example.com/api/zai`, authenticated with `X-API-Token`. Tokens are
-fetched from `https://example.com/api/token` (IP-bound, 5-min expiry) and
-cached until 30s before expiry. Model is hardcoded as `glm-5.2`. The proxy is
-external infrastructure — not part of this repo.
+Calls the **Z.ai GLM API through the local inference proxy** (llm-proxy,
+`~/Sources/llm-proxy`, deployed at `/srv/inference`, port 3003) at
+`http://127.0.0.1:3003/api/zai`, authenticated with `X-API-Token`. Tokens are
+fetched from `http://127.0.0.1:3003/api/token` (IP-bound, 5-min expiry) and
+cached until 30s before expiry.
+
+**Model selection is a global setting** (Settings page → "AI model"):
+persisted in `server/data/settings.json` (`server/settings.ts`), defaults to
+`glm-5.2`, applied to every LLM call (chat, digest, uploads, retitles).
+The dropdown is populated from the API's official model list via the proxy's
+`GET /api/zai/models` passthrough (`listModels()` in `llm.ts`, 5-min cache);
+PUT validates the id against that list. Changes take effect on the next
+request — no restart needed.
 
 Two functions are exported: `chatCompletionStream` (used by the chat route —
 streams content deltas via a callback, accumulates tool-call fragments across

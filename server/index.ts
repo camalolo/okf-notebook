@@ -9,6 +9,7 @@ import bundlesRouter from './routes/bundles.js';
 import searchRouter from './routes/search.js';
 import chatsRouter from './routes/chats.js';
 import authRouter from './routes/auth.js';
+import { settingsRouter } from './routes/settings.js';
 import { mcpManager } from './lib/mcp-manager.js';
 import type { McpServerConfig } from './lib/mcp-manager.js';
 import { startDigestScheduler, runDigestTick } from './lib/scheduler.js';
@@ -80,6 +81,7 @@ app.use('/api/notebook/auth', authRouter);
 app.use('/api/notebook/bundles', requireAuth, requireBundleAccess, bundlesRouter);
 app.use('/api/notebook/bundles', requireAuth, requireBundleAccess, searchRouter);
 app.use('/api/notebook/chats', requireAuth, requireBundleAccess, chatsRouter);
+app.use('/api/notebook/settings', requireAuth, settingsRouter);
 
 // Serve built UI (production only — in dev, Vite serves the UI directly).
 // Checks for the built index.html so this is inert during development.

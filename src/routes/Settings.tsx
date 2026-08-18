@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Navigate } from 'react-router-dom';
 import type { BundleConfig, User } from '../types.ts';
-import { addBundle, getBundles, removeBundle, updateBundle } from '../services/api.ts';
+import { addBundle, getBundles, getSettings, removeBundle, updateBundle, updateModel } from '../services/api.ts';
+import type { AppSettingsInfo } from '../services/api.ts';
 
 interface SettingsProps {
   user: User;
@@ -36,6 +37,25 @@ export function Settings({ user }: SettingsProps) {
   const [detailsDraft, setDetailsDraft] = useState({ name: '', icon: '', description: '' });
   const [detailsSaving, setDetailsSaving] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
+  const [settingsInfo, setSettingsInfo] = useState<AppSettingsInfo | null>(null);
+  const [modelDraft, setModelDraft] = useState('');
+  const [modelSaving, setModelSaving] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+
+  const handleSaveModel = async () => {
+    if (!modelDraft) return;
+    setModelSaving(true);
+    setModelError(null);
+    try {
+      const info = await updateModel(modelDraft);
+      setSettingsInfo(info);
+      setModelDraft(info.model);
+    } catch (err: unknown) {
+      setModelError(toMessage(err, 'Failed to update model'));
+    } finally {
+      setModelSaving(false);
+    }
+  };
 
   const refresh = () => {
     setLoading(true);
@@ -60,6 +80,17 @@ export function Settings({ user }: SettingsProps) {
       })
       .finally(() => {
         if (active) setLoading(false);
+      });
+    getSettings()
+      .then((info) => {
+        if (active) {
+          setSettingsInfo(info);
+          setModelDraft(info.model);
+          setModelError(info.models === null ? 'Could not load the model list from the API.' : null);
+        }
+      })
+      .catch((err: unknown) => {
+        if (active) setModelError(toMessage(err, 'Failed to load settings'));
       });
     return () => {
       active = false;
@@ -180,6 +211,49 @@ export function Settings({ user }: SettingsProps) {
       </div>
 
       {error && <div className="error-banner">{error}</div>}
+
+      <section className="settings-section">
+        <h2 className="settings-section-title">AI model</h2>
+        <p className="settings-section-hint">
+          The model used for every LLM feature across all bundles — chats, digests, uploads. The list
+          comes straight from the API; changes apply to new requests immediately.
+        </p>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">Model</span>
+            <select
+              className="form-input"
+              value={modelDraft}
+              onChange={(e) => setModelDraft(e.target.value)}
+              disabled={modelSaving || !settingsInfo || settingsInfo.models === null}
+            >
+              {settingsInfo?.models === null ? (
+                <option value={settingsInfo.model}>{settingsInfo.model}</option>
+              ) : (
+                // Union so a deprecated saved model still shows as selected.
+                [...new Set([settingsInfo?.model, ...(settingsInfo?.models ?? [])] as string[])]
+                  .filter(Boolean)
+                  .map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                      {m === settingsInfo?.defaultModel ? ' (default)' : ''}
+                    </option>
+                  ))
+              )}
+            </select>
+          </label>
+          <div className="form-actions model-actions">
+            <button
+              className="btn btn-primary"
+              onClick={handleSaveModel}
+              disabled={modelSaving || !modelDraft || modelDraft === settingsInfo?.model || settingsInfo?.models === null}
+            >
+              {modelSaving ? 'Saving…' : 'Save model'}
+            </button>
+          </div>
+        </div>
+        {modelError && <div className="error-banner error-banner-sm">{modelError}</div>}
+      </section>
 
       <section className="settings-section">
         <h2 className="settings-section-title">Add bundle</h2>

@@ -8,12 +8,13 @@
 
 import { Agent } from 'undici';
 import type { ChatLogger } from './logger.js';
+import { getSettings } from '../settings.js';
 
 // --- Token management -------------------------------------------------------
 
 const TOKEN_URL = 'http://127.0.0.1:3003/api/token';
 const ZAI_URL = 'http://127.0.0.1:3003/api/zai';
-const MODEL = 'glm-5.2';
+const MODELS_URL = 'http://127.0.0.1:3003/api/zai/models';
 
 // undici's default bodyTimeout is 300s of *idle* time on the response body.
 // GLM can "think" for longer than that between SSE chunks, which kills the
@@ -93,6 +94,49 @@ export interface ChatCompletionResult {
   tool_calls?: ToolCall[];
 }
 
+// --- Model selection ---------------------------------------------------------
+
+interface ZaiModelsResponse {
+  data?: { id?: string }[];
+}
+
+let modelsCache: { at: number; models: string[] } | null = null;
+const MODELS_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * List the models officially available on the Z.ai API (via the inference
+ * proxy's `/models` passthrough — free, consumes no tokens). Cached for 5
+ * minutes; on a refresh failure the stale list is returned if one exists.
+ */
+export async function listModels(log?: ChatLogger): Promise<string[]> {
+  if (modelsCache && Date.now() - modelsCache.at < MODELS_TTL_MS) {
+    return modelsCache.models;
+  }
+  const token = await getToken(log);
+  const res = await fetch(MODELS_URL, {
+    headers: { 'X-API-Token': token },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    if (modelsCache) {
+      log?.warn(`Models list refresh failed (${res.status}) — serving stale cache`);
+      return modelsCache.models;
+    }
+    throw new Error(`Models request failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  const data = (await res.json()) as ZaiModelsResponse;
+  const models = (data.data ?? [])
+    .map((m) => m.id ?? '')
+    .filter(Boolean)
+    .sort();
+  if (models.length === 0) {
+    if (modelsCache) return modelsCache.models;
+    throw new Error('Models response contained no models');
+  }
+  modelsCache = { at: Date.now(), models };
+  return models;
+}
+
 // --- Chat completion --------------------------------------------------------
 
 interface ZaiChoice {
@@ -169,9 +213,10 @@ export async function chatCompletionStream(
   log?: ChatLogger,
 ): Promise<ChatCompletionResult> {
   const token = await getToken(log);
+  const { model } = await getSettings();
 
   const body: Record<string, unknown> = {
-    model: MODEL,
+    model,
     messages,
     stream: true,
   };
@@ -180,7 +225,7 @@ export async function chatCompletionStream(
     body.tool_choice = 'auto';
   }
 
-  log?.info(`Streaming request: ${messages.length} msgs, ${tools?.length ?? 0} tools`);
+  log?.info(`Streaming request: ${messages.length} msgs, ${tools?.length ?? 0} tools, model ${model}`);
   const t0 = Date.now();
   const res = await fetch(ZAI_URL, {
     method: 'POST',

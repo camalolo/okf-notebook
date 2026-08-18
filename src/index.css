@@ -1386,6 +1386,16 @@ img {
   gap: 10px;
 }
 
+/* Align a button row with the inputs above it inside a .form-row */
+.model-actions {
+  align-self: flex-end;
+  padding-bottom: 1px;
+}
+
+select.form-input {
+  cursor: pointer;
+}
+
 /* Bundle list */
 
 .bundle-list {

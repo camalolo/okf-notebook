@@ -192,6 +192,26 @@ export function retitleChat(
   );
 }
 
+/* --- Global settings --- */
+
+export interface AppSettingsInfo {
+  model: string;
+  defaultModel: string;
+  /** Official model ids from the API, or null when the list is unavailable. */
+  models: string[] | null;
+}
+
+export function getSettings(): Promise<AppSettingsInfo> {
+  return request<AppSettingsInfo>(`${API_BASE}/settings`);
+}
+
+export function updateModel(model: string): Promise<AppSettingsInfo> {
+  return request<AppSettingsInfo>(`${API_BASE}/settings`, {
+    ...jsonOptions({ model }),
+    method: 'PUT',
+  });
+}
+
 /* --- Document upload --- */
 
 export interface UploadResult {
