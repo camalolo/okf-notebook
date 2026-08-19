@@ -175,6 +175,47 @@ export async function chatCompletion(
   return chatCompletionStream(messages, tools, () => {}, undefined, log);
 }
 
+// --- Retry / backoff --------------------------------------------------------
+
+/** Transient upstream failures worth retrying: 429 rate limit + 5xx. */
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+const MAX_RETRIES = 3; // 1 initial attempt + 3 retries
+const RETRY_BASE_MS = 1_000; // backoff: ~1s, 2s, 4s (with jitter)
+const RETRY_MAX_MS = 30_000;
+
+/** Parse a `Retry-After` header (delta-seconds form), clamped to the cap. */
+function retryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const secs = Number(header);
+  if (!Number.isFinite(secs) || secs < 0) return null; // HTTP-date form → fall back to backoff
+  return Math.min(secs * 1000, RETRY_MAX_MS);
+}
+
+/** Exponential backoff with ±30% jitter, so concurrent callers desync. */
+function backoffMs(attempt: number): number {
+  const jitter = 0.7 + Math.random() * 0.6;
+  return Math.min(Math.round(RETRY_BASE_MS * 2 ** attempt * jitter), RETRY_MAX_MS);
+}
+
+/** Sleep that rejects promptly if the signal aborts (STOP button). */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      const reason = signal?.reason;
+      reject(reason instanceof Error ? reason : new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 // --- Streaming chat completion -----------------------------------------------
 
 interface ZaiStreamDelta {
@@ -212,7 +253,6 @@ export async function chatCompletionStream(
   signal?: AbortSignal,
   log?: ChatLogger,
 ): Promise<ChatCompletionResult> {
-  const token = await getToken(log);
   const { model } = await getSettings();
 
   const body: Record<string, unknown> = {
@@ -227,23 +267,42 @@ export async function chatCompletionStream(
 
   log?.info(`Streaming request: ${messages.length} msgs, ${tools?.length ?? 0} tools, model ${model}`);
   const t0 = Date.now();
-  const res = await fetch(ZAI_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Token': token,
 
-    },
-    body: JSON.stringify(body),
-    signal,
-    dispatcher: llmAgent,
-  } as unknown as RequestInit);
+  // Transient failures (429 rate limit "1302", 5xx) are retried with backoff.
+  // Safe point: nothing has been streamed to the caller yet, so a retry can't
+  // duplicate content. Once the SSE body starts, errors are NOT retried.
+  let res: Response;
+  for (let attempt = 0; ; attempt++) {
+    const token = await getToken(log);
+    res = await fetch(ZAI_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Token': token,
 
-  if (!res.ok) {
+      },
+      body: JSON.stringify(body),
+      signal,
+      dispatcher: llmAgent,
+    } as unknown as RequestInit);
+
+    if (res.ok) break;
+
     const text = await res.text().catch(() => '');
     if (res.status === 401 || res.status === 403) {
       cachedToken = null;
     }
+
+    if (attempt < MAX_RETRIES && isRetryableStatus(res.status) && !signal?.aborted) {
+      const waitMs = retryAfterMs(res.headers.get('retry-after')) ?? backoffMs(attempt);
+      log?.warn(
+        `Streaming: HTTP ${res.status} (attempt ${attempt + 1}/${MAX_RETRIES + 1}) — ` +
+        `retrying in ${waitMs}ms: ${text.slice(0, 200)}`,
+      );
+      await sleep(waitMs, signal); // abort during the wait rejects → AbortError propagates
+      continue;
+    }
+
     log?.error(`Streaming: HTTP ${res.status} (${Date.now() - t0}ms): ${text.slice(0, 300)}`);
     throw new Error(`Z.ai request failed (${res.status}): ${text.slice(0, 500)}`);
   }

@@ -2229,6 +2229,17 @@ select.form-input {
   margin: 4px 0;
 }
 
+/* Transient notice in the chat timeline (e.g. server retrying an upstream failure) */
+.chat-notice-event {
+  padding: 8px 14px;
+  background: var(--warning-bg, #fef3cd);
+  border: 1px solid var(--warning-border, #ffc107);
+  border-radius: var(--radius-sm);
+  color: var(--warning-text, #856404);
+  font-size: 0.84rem;
+  margin: 4px 0;
+}
+
 /* Proposed changes wrapper */
 .chat-proposed-changes {
   display: flex;

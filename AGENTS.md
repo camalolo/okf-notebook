@@ -127,14 +127,32 @@ deploy/  ← nginx config for notebook.example.com
 4. When the LLM returns plain content (no tool calls), emit a final `done`
    event and end the stream.
 
-SSE events: `tool_call`, `content`, `edit_applied`, `done`, `error`. The
+SSE events: `tool_call`, `content`, `edit_applied`, `retry`, `done`, `error`. The
 frontend (`src/services/chat.ts`) hand-parses the SSE stream from a
 `ReadableStream` (no EventSource — POST is needed).
 
-**Abort / STOP**: a client disconnect (STOP button or network drop) fires an
-`AbortController` whose signal is forwarded into the upstream `chatCompletionStream`
-fetch, so the LLM call stops promptly. The loop persists whatever assistant
-content accumulated before the abort, then ends without surfacing an error.
+**Client disconnects do NOT stop a turn.** The loop keeps running and
+persisting every event to the chat timeline even after the SSE connection
+drops (mobile network blip, tab close, proxy timeout), ending with a
+`turn_end` persisted event. A reconnecting client recovers by polling
+`loadChat` until `turn_end` appears (ChatPanel's recovery poll / background
+watcher) and then rebuilds state from the timeline.
+
+**Retry on transient LLM failures**: `chatCompletionStream` retries
+pre-stream HTTP failures (429/5xx) internally; the chat loop adds a
+turn-level retry (up to 3 retries, exponential backoff) that also covers
+mid-stream drops, API errors inside SSE chunks, and empty responses. On each
+retry the server emits a `retry` SSE event `{ attempt, maxAttempts, reason,
+waitMs }` and discards the partial content of the failed attempt (the client
+drops its trailing content and shows a transient notice); the full answer is
+re-streamed, so content is never duplicated.
+
+**Abort / STOP**: because disconnects are tolerated, the STOP button must
+call `POST /:bundleId/chat/abort` (`abortChat()` in `src/services/api.ts`)
+which aborts the turn's registered `AbortController` (tracked in the
+`activeAborts` map keyed by `bundleId/chatId`). The loop then persists
+whatever assistant content accumulated, records `turn_end`, and ends without
+surfacing an error. The client afterwards syncs from the persisted timeline.
 
 ### Direct disk editing (LLM writes immediately)
 
@@ -274,7 +292,9 @@ Chat sessions are stored as one JSON file each under
 chronological `StoredEvent[]` timeline (not a message array) capturing user
 messages, assistant messages, tool calls, applied edits (stored as `proposed`
 events with `status: 'applied'`), and errors. Each event has a monotonic `seq`
-number.
+number. Every turn's terminal state (completion, error, or abort) is marked by
+a `turn_end` event — recovery polling waits for it (timelines recorded before
+it existed fall back to "assistant message follows user message").
 
 **The server is the source of truth for persistence.** The agentic chat loop
 appends each event to the timeline as it happens via `appendEvent()` — the user

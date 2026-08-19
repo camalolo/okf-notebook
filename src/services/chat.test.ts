@@ -170,4 +170,35 @@ describe('streamChat — abort behavior', () => {
     const elapsed = Date.now() - start;
     expect(elapsed).toBeLessThan(1000);
   });
+
+  // -------------------------------------------------------------------------
+  // Test 5: `retry` events (server retrying a transient upstream failure)
+  // are yielded like any other event so the UI can show an indication.
+  // -------------------------------------------------------------------------
+  it('yields retry events with their payload', async () => {
+    const events: MockSSEEvent[] = [
+      { event: 'content', data: { text: 'partial answer…' } },
+      { event: 'retry', data: { attempt: 1, maxAttempts: 4, reason: 'TypeError: terminated', waitMs: 2000 } },
+      { event: 'content', data: { text: 'full answer' } },
+      { event: 'done', data: {} },
+    ];
+
+    vi.stubGlobal('fetch', vi.fn(createDelayedSSEFetch(events, 5)));
+
+    const received: MockSSEEvent[] = [];
+    for await (const ev of streamChat('b', [{ role: 'user', content: 'x' }])) {
+      received.push({ event: ev.event, data: ev.data });
+    }
+
+    expect(received).toHaveLength(4);
+    const retry = received[1];
+    expect(retry.event).toBe('retry');
+    expect(retry.data).toEqual({
+      attempt: 1,
+      maxAttempts: 4,
+      reason: 'TypeError: terminated',
+      waitMs: 2000,
+    });
+    expect(received[3].event).toBe('done');
+  });
 });

@@ -86,7 +86,9 @@ export type TurnEvent =
   | { kind: 'tool'; toolCall: ToolCallInfo }
   | { kind: 'content'; text: string }
   | { kind: 'proposed'; change: ProposedChange }
-  | { kind: 'error'; text: string };
+  | { kind: 'error'; text: string }
+  /** Transient informational notice (e.g. server is retrying an upstream failure). */
+  | { kind: 'notice'; text: string };
 
 /* -------------------------------------------------------------------------
    Chat persistence
@@ -105,7 +107,7 @@ export interface ChatSummary {
 export interface StoredEvent {
   ts: string;
   seq?: number; // monotonic sequence number (for resumability)
-  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error' | 'compaction';
+  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error' | 'compaction' | 'turn_end';
   content?: string;
   toolCall?: ToolCallInfo;
   change?: ProposedChange;

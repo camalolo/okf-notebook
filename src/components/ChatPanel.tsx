@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import type { KeyboardEvent } from 'react';
 import type {
   ChatMessage,
+  ChatSession,
   ChatSummary,
   ProposedChange,
   StoredEvent,
@@ -13,6 +14,7 @@ import type {
 } from '../types.ts';
 import { streamChat } from '../services/chat.ts';
 import {
+  abortChat,
   compactChat,
   createChat,
   deleteChat,
@@ -297,6 +299,7 @@ export function restoreFromEvents(events: StoredEvent[]): {
       messages.push({ role: 'assistant', content: ev.content ?? '' });
       currentTurn = [];
     }
+    // 'turn_end' is a completion marker only — nothing to render.
   }
 
   // If there are orphaned events (incomplete turn — e.g. interrupted by
@@ -315,8 +318,13 @@ export function restoreFromEvents(events: StoredEvent[]): {
 
 /**
  * Check whether a turn has completed in the stored event timeline.
- * Returns true if there's an assistant message after the last user message
- * matching `userContent`.
+ * Returns true if the turn opened by the last user message matching
+ * `userContent` has a `turn_end` marker after it.
+ *
+ * Timelines recorded before `turn_end` existed fall back to "an assistant
+ * message follows the user message". New timelines always record `turn_end`
+ * (including on error/abort), which avoids finalizing early on intermediate
+ * assistant content that precedes further tool calls.
  */
 function isTurnComplete(events: StoredEvent[], userContent: string): boolean {
   let lastUserIdx = -1;
@@ -327,10 +335,34 @@ function isTurnComplete(events: StoredEvent[], userContent: string): boolean {
     }
   }
   if (lastUserIdx === -1) return false;
-  for (let i = lastUserIdx + 1; i < events.length; i++) {
-    if (events[i].kind === 'assistant') return true;
+  return turnEndedAfter(events, lastUserIdx);
+}
+
+/**
+ * Check whether the LAST turn in a stored timeline has completed — used to
+ * detect a turn still running server-side after a reload/reconnect.
+ */
+function isLastTurnComplete(events: StoredEvent[]): boolean {
+  let lastUserIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'user') {
+      lastUserIdx = i;
+      break;
+    }
   }
-  return false;
+  if (lastUserIdx === -1) return true; // no turn open
+  return turnEndedAfter(events, lastUserIdx);
+}
+
+/** Shared completion check: does a turn-end marker follow `fromIdx`? */
+function turnEndedAfter(events: StoredEvent[], lastUserIdx: number): boolean {
+  const after = events.slice(lastUserIdx + 1);
+  if (events.some((e) => e.kind === 'turn_end')) {
+    // New-format timeline — the definitive marker must follow.
+    return after.some((e) => e.kind === 'turn_end');
+  }
+  // Legacy timeline (no turn_end markers at all).
+  return after.some((e) => e.kind === 'assistant');
 }
 
 export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, onNavigate }: ChatPanelProps) {
@@ -427,6 +459,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   const abortRef = useRef<AbortController | null>(null);
   /** True when the user explicitly pressed STOP (vs. a network drop). */
   const stoppedRef = useRef(false);
+  /**
+   * Generation counter for the background-turn watcher. Bumping it cancels
+   * any running watcher (switching chats, new chat, unmount, sending).
+   */
+  const watchGenRef = useRef(0);
+
+  // Cancel any background watcher on unmount.
+  useEffect(() => () => { watchGenRef.current++; }, []);
 
   // When a gw_ tool reports expired auth, redirect to Google login with
   // ?reconnect=1 to obtain a fresh refresh token.
@@ -483,6 +523,20 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     });
   }, []);
 
+  /**
+   * Replace the whole chat state from a server session (used by STOP-sync,
+   * reconnect recovery, and the background-turn watcher).
+   */
+  const applySession = useCallback((session: ChatSession) => {
+    const restored = restoreFromEvents(session.events);
+    setMessages(restored.messages);
+    setPastTurns(restored.pastTurns);
+    setProposedChanges(restored.proposedChanges);
+    setCompactionIndex(restored.compactionIndex);
+    compactionIndexRef.current = restored.compactionIndex;
+    setTurnEvents([]);
+  }, []);
+
   /** Fetch the current git status and update the badge. Best-effort. */
   const refreshGitStatus = useCallback(async (): Promise<void> => {
     try {
@@ -494,6 +548,48 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       // Git status is best-effort — leave the previous count in place.
     }
   }, [bundleId]);
+
+  /**
+   * Watch a chat whose turn is still running server-side (page reloaded or
+   * recovery polling gave up mid-turn). Polls the persisted timeline until
+   * the server records the turn's end, then restores the full state.
+   * Cancelled by bumping watchGenRef (selecting/creating a chat, unmount).
+   */
+  const watchBackgroundTurn = useCallback(
+    (id: string) => {
+      const gen = ++watchGenRef.current;
+      setLoading(true);
+      setReconnecting(true);
+      void (async () => {
+        // 5s × 60 = up to 5 minutes — long LLM turns with tool loops can
+        // run for minutes, and the server keeps going after disconnects.
+        for (let attempt = 0; attempt < 60; attempt++) {
+          await new Promise((r) => setTimeout(r, 5000));
+          if (watchGenRef.current !== gen) return;
+          try {
+            const session = await loadChat(bundleId, id);
+            if (watchGenRef.current !== gen) return;
+            if (isLastTurnComplete(session.events)) {
+              applySession(session);
+              setLoading(false);
+              setReconnecting(false);
+              void refreshChatList();
+              void refreshGitStatus();
+              return;
+            }
+          } catch {
+            // network hiccup — keep polling
+          }
+        }
+        // Gave up (e.g. server restarted mid-turn) — stop the indicators.
+        if (watchGenRef.current === gen) {
+          setLoading(false);
+          setReconnecting(false);
+        }
+      })();
+    },
+    [bundleId, applySession, refreshChatList, refreshGitStatus],
+  );
 
   /** Queue selected files for upload on next Send (no upload yet). */
   const handleFiles = useCallback((fileList: FileList | null) => {
@@ -559,6 +655,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     const rawText = input.trim();
     if ((!rawText && pendingFiles.length === 0) || loading || uploading) return;
     stoppedRef.current = false;
+    watchGenRef.current++; // cancel any background-turn watcher
 
     // Auto-create a chat session on first message (if none active).
     if (chatIdRef.current === null) {
@@ -702,6 +799,32 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           turnEventsLocal.push(te);
           onFilesChanged?.();
           void refreshGitStatus();
+        } else if (ev.event === 'retry') {
+          // The server hit a transient upstream failure and is retrying.
+          // Partial content from the failed attempt is discarded (the full
+          // answer is re-streamed), so drop trailing content and show a
+          // transient notice while the retry is in flight.
+          const obj = data as { attempt?: unknown; maxAttempts?: unknown; reason?: unknown };
+          const attempt = typeof obj.attempt === 'number' ? obj.attempt : '?';
+          const maxAttempts = typeof obj.maxAttempts === 'number' ? obj.maxAttempts : '?';
+          const reason = typeof obj.reason === 'string' ? `: ${trunc(obj.reason, 80)}` : '';
+          while (
+            turnEventsLocal.length > 0 &&
+            turnEventsLocal[turnEventsLocal.length - 1].kind === 'content'
+          ) {
+            turnEventsLocal.pop();
+          }
+          setTurnEvents((prev) => {
+            const p = [...prev];
+            while (p.length > 0 && p[p.length - 1].kind === 'content') p.pop();
+            return p;
+          });
+          const te: TurnEvent = {
+            kind: 'notice',
+            text: `Upstream hiccup${reason} — retrying (attempt ${attempt}/${maxAttempts})…`,
+          };
+          setTurnEvents((prev) => [...prev, te]);
+          turnEventsLocal.push(te);
         } else if (ev.event === 'commit_proposed') {
           const obj = data as { message?: unknown };
           const te: TurnEvent = {
@@ -730,55 +853,56 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     }
 
     if (streamErr || !gotDone) {
-      // If the user pressed STOP, do a one-shot sync with the server to
-      // pick up any tool results or content that were persisted after we
-      // aborted the SSE stream. The server breaks out of its loop quickly
-      // but may have completed in-flight tool calls.
+      // If the user pressed STOP, poll the server timeline briefly until the
+      // aborted turn's end is persisted, then sync from it. The server breaks
+      // out of its loop quickly but may have completed in-flight tool calls.
       if (stoppedRef.current) {
         const id = chatIdRef.current;
         if (id) {
-          // Brief delay to let the server finish persisting.
-          await new Promise((r) => setTimeout(r, 1500));
-          try {
-            const session = await loadChat(bundleId, id);
-            const restored = restoreFromEvents(session.events);
-            setMessages(restored.messages);
-            setPastTurns(restored.pastTurns);
-            setProposedChanges(restored.proposedChanges);
-            setCompactionIndex(restored.compactionIndex);
-            compactionIndexRef.current = restored.compactionIndex;
-            setTurnEvents([]);
-            setLoading(false);
-            abortRef.current = null;
-            void refreshChatList();
-            void refreshGitStatus();
-            return;
-          } catch {
-            // Sync failed — fall through to client-side finalization below.
+          for (let i = 0; i < 10; i++) {
+            // First wait lets the server finish persisting the abort.
+            await new Promise((r) => setTimeout(r, i === 0 ? 1500 : 1000));
+            try {
+              const session = await loadChat(bundleId, id);
+              if (isTurnComplete(session.events, text)) {
+                applySession(session);
+                setLoading(false);
+                abortRef.current = null;
+                void refreshChatList();
+                void refreshGitStatus();
+                return;
+              }
+            } catch {
+              // keep trying
+            }
           }
+          // Sync failed — fall through to client-side finalization below.
         }
         // Fall through to finalization below.
       } else {
-        // Attempt to recover by polling the server. The server keeps running the
-        // agentic loop after the client disconnects, persisting each event. We poll
-        // until the turn completes (assistant message appears after our user msg),
-        // then rebuild state from the server timeline.
+        // Attempt to recover by polling the server. The server keeps running
+        // the agentic loop after the client disconnects (mobile network drop,
+        // proxy timeout, …), persisting each event. We poll until the turn
+        // completes (turn_end recorded after our user message), then rebuild
+        // state from the server timeline. LLM turns can take minutes, so this
+        // polls for up to 5 minutes; a page reload mid-turn also resumes via
+        // the background watcher on chat load.
         const id = chatIdRef.current;
         if (id) {
           setReconnecting(true);
           let recovered = false;
-          for (let attempt = 0; attempt < 15; attempt++) {
-            await new Promise((r) => setTimeout(r, 2000));
+          for (let attempt = 0; attempt < 60; attempt++) {
+            await new Promise((r) => setTimeout(r, 5000));
+            if (stoppedRef.current) {
+              // User pressed STOP while reconnecting — cancel the
+              // server-side turn and do a final sync below.
+              void abortChat(bundleId, id);
+              break;
+            }
             try {
               const session = await loadChat(bundleId, id);
               if (isTurnComplete(session.events, text)) {
-                const restored = restoreFromEvents(session.events);
-                setMessages(restored.messages);
-                setPastTurns(restored.pastTurns);
-                setProposedChanges(restored.proposedChanges);
-                setCompactionIndex(restored.compactionIndex);
-                compactionIndexRef.current = restored.compactionIndex;
-                setTurnEvents([]);
+                applySession(session);
                 setLoading(false);
                 setReconnecting(false);
                 void refreshChatList();
@@ -796,14 +920,34 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           }
           setReconnecting(false);
           if (recovered) return;
+          // Stopped mid-recovery: give the server a moment to persist the
+          // aborted turn's end, then sync from the timeline if it's there.
+          if (stoppedRef.current) {
+            await new Promise((r) => setTimeout(r, 2000));
+            try {
+              const session = await loadChat(bundleId, id);
+              if (isTurnComplete(session.events, text)) {
+                applySession(session);
+                setLoading(false);
+                abortRef.current = null;
+                void refreshChatList();
+                void refreshGitStatus();
+                return;
+              }
+            } catch {
+              // fall through
+            }
+          }
         }
         // Reconnection failed — show the error. For a clean stream end
         // without `done` there is no Error object; surface a clear message.
-        const chatError = streamErr instanceof Error && streamErr.message
-          ? streamErr.message
-          : streamErr
-            ? 'Chat request failed'
-            : 'Connection lost before the response finished.';
+        const chatError = stoppedRef.current
+          ? 'Generation stopped.'
+          : streamErr instanceof Error && streamErr.message
+            ? streamErr.message
+            : streamErr
+              ? 'Chat request failed'
+              : 'Connection lost before the response finished.';
         const errEvent: TurnEvent = { kind: 'error', text: chatError };
         turnEventsLocal.push(errEvent);
         setTurnEvents((prev) => [...prev, errEvent]);
@@ -852,13 +996,19 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
     // Refresh chat list (server is now source of truth for persistence + title).
     void refreshChatList();
-  }, [bundleId, input, loading, uploading, pendingFiles, appendContent, onFilesChanged, refreshGitStatus, refreshChatList]);
+  }, [bundleId, input, loading, uploading, pendingFiles, appendContent, applySession, onFilesChanged, refreshGitStatus, refreshChatList]);
 
-  /** Stop the in-flight chat stream immediately (user pressed STOP). */
+  /**
+   * Stop the in-flight chat turn. Aborting the local SSE fetch alone no
+   * longer stops the server (disconnects are deliberately tolerated), so
+   * this also POSTs to /chat/abort to cancel the server-side loop.
+   */
   const handleStop = useCallback(() => {
     stoppedRef.current = true;
+    const id = chatIdRef.current;
+    if (id) void abortChat(bundleId, id);
     abortRef.current?.abort();
-  }, []);
+  }, [bundleId]);
 
   /**
    * Compact the conversation: send all active messages to the LLM for a
@@ -936,6 +1086,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
   /** Start a fresh, empty chat (clears state; a session is created on first send). */
   const handleNewChat = useCallback(() => {
+    watchGenRef.current++; // cancel any background-turn watcher
     setMessages([]);
     setPastTurns([]);
     setProposedChanges([]);
@@ -952,26 +1103,33 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   /** Load a past chat and restore its conversation state. */
   const handleSelectChat = useCallback(
     async (id: string): Promise<void> => {
+      watchGenRef.current++; // cancel any background-turn watcher
       try {
         const session = await loadChat(bundleId, id);
-        const { messages: msgs, pastTurns: turns, proposedChanges: changes, compactionIndex: cIdx } =
-          restoreFromEvents(session.events);
-        setMessages(msgs);
-        setPastTurns(turns);
-        setProposedChanges(changes);
-        setTurnEvents([]);
+        applySession(session);
         setChatId(session.id);
         setChatTitle(session.title);
         setShowHistory(false);
-        setCompactionIndex(cIdx);
         chatIdRef.current = session.id;
         chatTitleRef.current = session.title;
-        compactionIndexRef.current = cIdx;
+
+        // If the selected chat has a turn still running server-side (the
+        // page was reloaded mid-turn), watch the timeline in the background
+        // until the server persists the turn's end. The recency guard avoids
+        // spinning up a watcher for long-dead chats (e.g. a server crash
+        // before turn_end existed).
+        const evs = session.events;
+        if (evs.length > 0 && !isLastTurnComplete(evs)) {
+          const lastTs = Date.parse(evs[evs.length - 1].ts);
+          if (Number.isFinite(lastTs) && Date.now() - lastTs < 30 * 60_000) {
+            watchBackgroundTurn(id);
+          }
+        }
       } catch {
         // Best-effort: leave current chat in place.
       }
     },
-    [bundleId],
+    [bundleId, applySession, watchBackgroundTurn],
   );
 
   /** Delete a chat from the server and update the list. */
@@ -1288,6 +1446,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                       </div>
                     );
                   }
+                  if (ev.kind === 'notice') {
+                    return (
+                      <div className="chat-notice-event" key={`pn${i}-${j}`}>
+                        🔄 {ev.text}
+                      </div>
+                    );
+                  }
                   if (ev.kind === 'proposed') {
                     const latest =
                       proposedChanges.find((c) => c.id === ev.change.id) ?? ev.change;
@@ -1362,6 +1527,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               </div>
             );
           }
+          if (ev.kind === 'notice') {
+            return (
+              <div className="chat-notice-event" key={`n${i}`}>
+                🔄 {ev.text}
+              </div>
+            );
+          }
           if (ev.kind === 'content') {
             return (
               <div className="chat-message chat-message-assistant" key={`c${i}`}>
@@ -1404,7 +1576,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         {reconnecting && (
           <div className="chat-reconnecting">
             <span className="spinner spinner-sm" />
-            <span>Connection lost — reconnecting…</span>
+            <span>Connection lost — waiting for the server to finish your response…</span>
           </div>
         )}
       </div>

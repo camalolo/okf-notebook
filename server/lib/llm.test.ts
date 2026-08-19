@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { chatCompletionStream } from './llm.js';
 
+// Kill the real fs read in getSettings(): under fake timers the I/O macrotask
+// never completes during timer draining, so the chain would stall before the
+// first fetch. A resolved mock keeps everything on microtasks.
+vi.mock('../settings.js', () => ({
+  getSettings: vi.fn().mockResolvedValue({ model: 'test-model' }),
+}));
+
 // Mirror the constants used inside llm.ts so our mock fetch can route correctly.
 const TOKEN_URL = 'http://127.0.0.1:3003/api/token';
 const ZAI_URL = 'http://127.0.0.1:3003/api/zai';
@@ -63,6 +70,135 @@ function createMockFetch(chunks: string[], delayMs: number, ac?: AbortController
 function contentDelta(text: string): string {
   return `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
 }
+
+describe('chatCompletionStream — retry with backoff', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks(); // restores the Math.random spy
+  });
+
+  /** A 429 response in the shape Z.ai actually returns (code 1302). */
+  function rateLimitResponse(): Response {
+    return new Response(
+      JSON.stringify({ error: { code: '1302', message: 'Rate limit reached for requests' } }),
+      { status: 429, statusText: 'Too Many Requests' },
+    );
+  }
+
+  function tokenResponse(): Response {
+    return new Response(tokenBody(), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Test 4: A 429 is retried with backoff and succeeds once it clears.
+  // -------------------------------------------------------------------------
+  it('retries a 429 and succeeds once the rate limit clears', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0); // deterministic backoff: 0.7 × 1s
+
+    let zaiCalls = 0;
+    const success = createMockFetch([contentDelta('Hello'), 'data: [DONE]\n\n'], 0);
+    const fetchMock = vi.fn(async (url: string | URL | Request, opts?: RequestInit) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr !== ZAI_URL) return tokenResponse();
+      return ++zaiCalls === 1 ? rateLimitResponse() : success(url, opts);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const promise = chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, () => {});
+    // Yield until the first 429 lands and the backoff sleep is scheduled…
+    await vi.advanceTimersByTimeAsync(0);
+    // …then fire the 700ms backoff (Math.random()=0 → 0.7 × 1s) and drain the
+    // retry's recursive 0ms stream timers.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result.content).toBe('Hello');
+    expect(zaiCalls).toBe(2); // initial 429 + one retry
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 5: Retries are exhausted → original HTTP error surfaces, 4 calls.
+  // -------------------------------------------------------------------------
+  it('gives up after 3 retries and throws the HTTP error', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr !== ZAI_URL) return tokenResponse();
+      return rateLimitResponse();
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const promise = chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, () => {});
+    promise.catch(() => {}); // mark handled — rejection may fire before the await below
+    await vi.runAllTimersAsync();
+    await expect(promise).rejects.toThrow('Z.ai request failed (429)');
+
+    expect(fetchMock.mock.calls.filter((c) => c[0] === ZAI_URL)).toHaveLength(4);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 6: Abort during the backoff wait stops retrying immediately.
+  // -------------------------------------------------------------------------
+  it('stops retrying when the signal aborts during backoff', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const ac = new AbortController();
+
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr !== ZAI_URL) return tokenResponse();
+      return rateLimitResponse();
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const promise = chatCompletionStream(
+      [{ role: 'user', content: 'hi' }],
+      undefined,
+      () => {},
+      ac.signal,
+    );
+    promise.catch(() => {}); // mark handled — rejection may fire before the await below
+    // Let the first 429 land and the backoff sleep get scheduled.
+    await vi.advanceTimersByTimeAsync(0);
+    ac.abort();
+    await vi.runAllTimersAsync();
+
+    let err: unknown;
+    try {
+      await promise;
+    } catch (e) {
+      err = e;
+    }
+    expect((err as { name?: string }).name).toBe('AbortError');
+    expect(fetchMock.mock.calls.filter((c) => c[0] === ZAI_URL)).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 7: Non-transient errors (4xx other than 429) fail immediately.
+  // -------------------------------------------------------------------------
+  it('does not retry a 400', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr !== ZAI_URL) return tokenResponse();
+      return new Response('{"error":{"message":"bad request"}}', { status: 400 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, () => {}),
+    ).rejects.toThrow('Z.ai request failed (400)');
+
+    expect(fetchMock.mock.calls.filter((c) => c[0] === ZAI_URL)).toHaveLength(1);
+  });
+});
 
 describe('chatCompletionStream — abort behavior', () => {
   afterEach(() => {

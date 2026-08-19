@@ -113,6 +113,46 @@ describe('restoreFromEvents — ordering after interruption', () => {
     expect(pastTurns[1]).toHaveLength(1);
     expect(pastTurns[2]).toHaveLength(1);
   });
+  // -------------------------------------------------------------------------
+  // Test 5: `turn_end` markers are transparent to restoration.
+  // -------------------------------------------------------------------------
+  it('ignores turn_end markers when restoring a timeline', () => {
+    const events: StoredEvent[] = [
+      { ts: '0', seq: 0, kind: 'user', content: 'do the thing' },
+      { ts: '1', seq: 1, kind: 'assistant', content: 'Let me check A.' },
+      { ts: '2', seq: 2, kind: 'tool', toolCall: { name: 'read_a', args: {}, result: 'a' } },
+      { ts: '3', seq: 3, kind: 'assistant', content: 'Here\'s what I found.' },
+      { ts: '4', seq: 4, kind: 'turn_end' },
+    ];
+
+    const { messages, pastTurns } = restoreFromEvents(events);
+
+    expect(messages).toHaveLength(3);
+    expect(messages[2].content).toBe('Here\'s what I found.');
+    expect(pastTurns).toHaveLength(2);
+    expect(pastTurns[1]).toHaveLength(1);
+    expect(pastTurns[1][0].kind).toBe('tool');
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 6: a turn aborted mid-tool (user → tool → turn_end, no closing
+  // assistant) still renders its orphaned tool events with a placeholder.
+  // -------------------------------------------------------------------------
+  it('shows placeholder for a turn ended by abort before any assistant content', () => {
+    const events: StoredEvent[] = [
+      { ts: '0', seq: 0, kind: 'user', content: 'check things' },
+      { ts: '1', seq: 1, kind: 'tool', toolCall: { name: 'list_files', args: {}, result: [] } },
+      { ts: '2', seq: 2, kind: 'turn_end' },
+    ];
+
+    const { messages, pastTurns } = restoreFromEvents(events);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1].role).toBe('assistant');
+    expect(pastTurns).toHaveLength(1);
+    expect(pastTurns[0]).toHaveLength(1);
+    expect(pastTurns[0][0].kind).toBe('tool');
+  });
 });
 
 describe('mergeConsecutiveAssistants', () => {

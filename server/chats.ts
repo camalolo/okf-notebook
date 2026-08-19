@@ -18,7 +18,9 @@ const DATA_DIR = path.resolve(import.meta.dirname, '..', 'data', 'chats');
 export interface StoredEvent {
   ts: string; // ISO timestamp
   seq?: number; // monotonic sequence number (for resumability)
-  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error' | 'compaction';
+  // 'turn_end' marks the definitive end of an assistant turn (completion,
+  // error, or abort). Clients polling a background turn wait for it.
+  kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error' | 'compaction' | 'turn_end';
   content?: string; // for user/assistant/error
   toolCall?: { name: string; args: Record<string, unknown>; result?: unknown };
   change?: {

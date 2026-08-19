@@ -142,6 +142,25 @@ export function deleteFileRaw(bundleId: string, filePath: string): Promise<void>
 
 /* --- Chat persistence --- */
 
+/**
+ * Explicitly abort the active server-side turn for a chat (STOP button).
+ * Aborting the SSE fetch alone no longer stops the turn — the server keeps
+ * working through client disconnects, so stopping requires this call.
+ * Resolves when the abort was delivered; 404 (no active turn) is tolerated.
+ */
+export async function abortChat(bundleId: string, chatId: string): Promise<void> {
+  try {
+    await request<void>(
+      `${API_BASE}/bundles/${encodeURIComponent(bundleId)}/chat/abort`,
+      jsonOptions({ chatId }),
+    );
+  } catch (err) {
+    // No active turn (already finished) or transient network failure —
+    // either way the server-side turn will end on its own.
+    if (err instanceof Error && err.message === 'Session expired') throw err;
+  }
+}
+
 export function listChats(bundleId: string): Promise<ChatSummary[]> {
   return request<ChatSummary[]>(`${API_BASE}/chats/${encodeURIComponent(bundleId)}`);
 }

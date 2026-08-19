@@ -10,6 +10,7 @@ import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
   chatCompletion,
   chatCompletionStream,
+  sleep,
 } from '../lib/llm.js';
 import { chatLogger, newTraceId } from '../lib/logger.js';
 import { webSearch } from '../lib/web-search.js';
@@ -21,6 +22,7 @@ import { sendMail } from '../lib/mailer.js';
 import type {
   ToolDefinition,
   ChatMessage,
+  ChatCompletionResult,
   ToolCall,
 } from '../lib/llm.js';
 import type { BundleConfig } from '../config.js';
@@ -653,7 +655,46 @@ function makeEmitter(res: import('express').Response): SSEEmit {
   };
 }
 
+// --- Active turn registry -----------------------------------------------------
+
+/**
+ * AbortControllers for live chat turns, keyed by `${bundleId}/${chatId}`.
+ *
+ * Client disconnects (mobile network drops, tab closes) do NOT abort a turn
+ * anymore — the loop keeps running and persisting so the client can recover
+ * by reloading the timeline. The only way to stop a turn is the explicit
+ * `POST /:bundleId/chat/abort` endpoint (the UI's STOP button).
+ */
+const activeAborts = new Map<string, { controller: AbortController; userId: string }>();
+
 // --- Route ------------------------------------------------------------------
+
+/**
+ * POST /:bundleId/chat/abort — explicitly abort the active turn of a chat
+ * (the UI's STOP button). Client disconnects alone no longer cancel turns,
+ * so stopping requires this call. Returns 404 when no turn is active.
+ */
+router.post('/:bundleId/chat/abort', async (req, res, next) => {
+  try {
+    const bundleId = req.params.bundleId as string;
+    const chatId = typeof req.body?.chatId === 'string' ? req.body.chatId : '';
+    if (!chatId) {
+      return res.status(400).json({ error: 'chatId is required' });
+    }
+    const entry = activeAborts.get(`${bundleId}/${chatId}`);
+    if (!entry) {
+      return res.status(404).json({ error: 'No active turn for this chat' });
+    }
+    if (entry.userId !== req.user?.email) {
+      return res.status(403).json({ error: 'Not your chat' });
+    }
+    chatLogger(newTraceId()).info(`Explicit abort: bundle=${bundleId} chatId=${chatId}`);
+    entry.controller.abort();
+    return res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
 
 /**
  * POST /:bundleId/chat — agentic chat with server-side tool use, streamed as
@@ -663,13 +704,26 @@ function makeEmitter(res: import('express').Response): SSEEmit {
  * When `chatId` is provided, the server persists each event to the chat
  * timeline as it happens (user message, tool calls, assistant response).
  *
- * SSE events: `tool_call`, `content`, `edit_applied`, `done`, `error`.
+ * SSE events: `tool_call`, `content`, `edit_applied`, `retry`, `done`, `error`.
+ *
+ * A `retry` event is emitted when a transient LLM failure (mid-stream drop,
+ * rate limit, empty response) is being retried. It carries
+ * `{ attempt, maxAttempts, reason, waitMs }`; any partial content streamed
+ * for the failed attempt is discarded and fully re-streamed after the retry,
+ * so clients should drop trailing content on receipt.
+ *
+ * Client disconnects do NOT stop the turn — the loop keeps running and
+ * persisting to the timeline (ended by a `turn_end` event) so a reconnecting
+ * client can catch up. Only POST /chat/abort (STOP button) cancels work.
  */
 router.post('/:bundleId/chat', async (req, res, next) => {
   const bundleId = req.params.bundleId as string;
   const traceId = newTraceId();
   const log = chatLogger(traceId);
   const tStart = Date.now();
+  // Registry key for the explicit-abort endpoint — declared here so the
+  // outer finally can always unregister the turn.
+  let abortKey: string | null = null;
 
   try {
     const bundle = await getBundle(bundleId);
@@ -721,16 +775,24 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     });
     res.flushHeaders?.();
 
-    // Track client connection state so the loop can stop promptly when the
-    // client disconnects (including when the user presses STOP in the UI).
+    // Track client connection state. A disconnect (mobile network drop, tab
+    // close, STOP-button fetch abort) does NOT abort the turn — the loop
+    // keeps running below and persists every event, so a reconnecting client
+    // can catch up from the timeline. Only POST /chat/abort cancels work.
     let clientConnected = true;
     const abortController = new AbortController();
+    abortKey = chatId ? `${bundleId}/${chatId}` : null;
+    if (abortKey) {
+      activeAborts.set(abortKey, { controller: abortController, userId: req.user!.email });
+    }
     req.on('close', () => {
       if (clientConnected) {
-        log.info(`Client disconnected (after ${Date.now() - tStart}ms) — aborting upstream calls`);
+        log.info(
+          `Client disconnected (after ${Date.now() - tStart}ms) — ` +
+          'continuing the turn in the background (persists to the timeline)',
+        );
       }
       clientConnected = false;
-      abortController.abort();
     });
 
     // SSE heartbeat: the LLM can "think" for minutes before emitting its
@@ -808,28 +870,61 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       for (;;) {
         loopIteration++;
 
-        // If the client disconnected (STOP button or network drop), stop
-        // processing — persist whatever assistant content we accumulated.
-        if (!clientConnected) {
-          log.info(`Loop exit: client disconnected (iter=${loopIteration})`);
-          if (turnContent.trim()) {
-            persist({ kind: 'assistant', content: turnContent });
-          }
-          return;
-        }
+        // NOTE: no clientConnected check here — a disconnected client must
+        // not stop the turn. The loop runs to completion (or an explicit
+        // abort), persisting everything to the timeline.
 
         // Stream content deltas to the client as they arrive.
         log.debug(`Loop iter ${loopIteration}: calling LLM (${callMessages.length} messages in context)`);
-        const response = await chatCompletionStream(
-          callMessages,
-          allTools,
-          (delta) => {
-            turnContent += delta;
-            emit('content', { text: delta });
-          },
-          abortController.signal,
-          log,
-        );
+
+        // LLM call with turn-level retry. `chatCompletionStream` already
+        // retries pre-stream HTTP failures (429/5xx); this layer additionally
+        // recovers mid-stream drops ("TypeError: terminated"), API errors
+        // surfaced inside SSE chunks, and completely empty responses. On a
+        // retry, any partial content streamed for the failed attempt is
+        // discarded (server-side via turnContent reset, client-side via the
+        // `retry` event) and the same request is re-issued — content can
+        // never be duplicated.
+        const MAX_ATTEMPTS = 4; // 1 initial + 3 retries
+        let response: ChatCompletionResult;
+        for (let attempt = 1; ; attempt++) {
+          try {
+            response = await chatCompletionStream(
+              callMessages,
+              allTools,
+              (delta) => {
+                turnContent += delta;
+                emit('content', { text: delta });
+              },
+              abortController.signal,
+              log,
+            );
+            if (response.content.trim() === '' && !response.tool_calls?.length) {
+              throw new Error('empty response (no content, no tool calls)');
+            }
+            break;
+          } catch (err) {
+            // Explicit abort (STOP) — never retried.
+            if (
+              abortController.signal.aborted ||
+              (err instanceof Error && err.name === 'AbortError')
+            ) {
+              throw err;
+            }
+            if (attempt >= MAX_ATTEMPTS) throw err;
+            const reason = err instanceof Error ? err.message : String(err);
+            const waitMs = Math.min(2_000 * 2 ** (attempt - 1), 15_000);
+            log.warn(
+              `LLM call failed (attempt ${attempt}/${MAX_ATTEMPTS}): ${reason} — ` +
+              `retrying in ${waitMs}ms (discarding ${turnContent.length} partial chars)`,
+            );
+            // Discard partial content from the failed attempt and tell the
+            // client to do the same before the retry re-streams the answer.
+            turnContent = '';
+            emit('retry', { attempt, maxAttempts: MAX_ATTEMPTS, reason, waitMs });
+            await sleep(waitMs, abortController.signal); // abort during wait throws
+          }
+        }
 
         if (response.tool_calls && response.tool_calls.length > 0) {
           // Persist any content accumulated before the tool calls so the
@@ -848,8 +943,8 @@ router.post('/:bundleId/chat', async (req, res, next) => {
 
           // Execute each tool call and feed results back.
           for (const tc of response.tool_calls) {
-            // Stop executing remaining tools if the client disconnected.
-            if (!clientConnected) break;
+            // NOTE: no clientConnected check — tools run to completion even
+            // after a disconnect so the persisted timeline stays complete.
             const toolName = tc.function.name;
             let parsedArgs: unknown = {};
             try {
@@ -959,13 +1054,6 @@ router.post('/:bundleId/chat', async (req, res, next) => {
               content: JSON.stringify(result),
             });
           }
-          // If the client disconnected during tool execution, stop here.
-          if (!clientConnected) {
-            if (turnContent.trim()) {
-              persist({ kind: 'assistant', content: turnContent });
-            }
-            return;
-          }
           // Continue the loop — the model may issue more calls or answer.
           continue;
         }
@@ -978,18 +1066,20 @@ router.post('/:bundleId/chat', async (req, res, next) => {
           log.info(`Turn complete (${Date.now() - tStart}ms, ${loopIteration} iter, ${turnContent.length} chars)`);
         }
         persist({ kind: 'assistant', content: turnContent });
+        persist({ kind: 'turn_end' });
         emit('done', {});
         if (clientConnected) res.end();
         return;
       }
     } catch (err) {
-      // If the abort signal fired (user pressed STOP), persist what we have
-      // without surfacing an error.
+      // If the abort signal fired (explicit STOP via /chat/abort), persist
+      // what we have without surfacing an error.
       if (abortController.signal.aborted) {
-        log.info(`Loop aborted by client disconnect (after ${Date.now() - tStart}ms, ${turnContent.length} chars accumulated)`);
+        log.info(`Turn aborted by explicit stop (after ${Date.now() - tStart}ms, ${turnContent.length} chars accumulated)`);
         if (turnContent.trim()) {
           persist({ kind: 'assistant', content: turnContent });
         }
+        persist({ kind: 'turn_end' });
         if (clientConnected) res.end();
         return;
       }
@@ -998,6 +1088,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       // Persist error + whatever content was accumulated.
       persist({ kind: 'error', content: errMsg });
       persist({ kind: 'assistant', content: turnContent || '⚠️ This response was interrupted.' });
+      persist({ kind: 'turn_end' });
       emit('error', { message: errMsg });
       if (clientConnected) res.end();
     }
@@ -1014,6 +1105,8 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       // ignore
     }
     res.end();
+  } finally {
+    if (abortKey) activeAborts.delete(abortKey);
   }
 });
 
