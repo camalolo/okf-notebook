@@ -201,6 +201,7 @@ export function Settings({ user }: SettingsProps) {
     setDigestEditId(b.id);
     setDigestDraft({
       enabled: b.digest?.enabled !== false,
+      cleanup: b.digest?.cleanup === true,
       googleUser: b.digest?.googleUser ?? '',
     });
     setDigestError(null);
@@ -213,6 +214,7 @@ export function Settings({ user }: SettingsProps) {
       await updateBundle(id, {
         digest: {
           enabled: digestDraft.enabled !== false,
+          cleanup: digestDraft.cleanup === true,
           ...(digestDraft.googleUser ? { googleUser: digestDraft.googleUser } : {}),
         },
       });
@@ -432,6 +434,7 @@ export function Settings({ user }: SettingsProps) {
                     </span>
                     <span className="bundle-list-access">
                       Digest: {b.digest?.enabled === false ? 'off' : 'on'}
+                      {b.digest?.cleanup ? ' · OKF cleanup: on' : ''}
                       {b.digest?.googleUser ? ` · Google: ${b.digest.googleUser}` : ''}
                     </span>
                   </div>
@@ -681,6 +684,16 @@ export function Settings({ user }: SettingsProps) {
                       />
                       <span>Run the daily digest for this bundle</span>
                     </label>
+                    <label className="mcp-check">
+                      <input
+                        type="checkbox"
+                        checked={digestDraft.cleanup === true}
+                        onChange={(e) =>
+                          setDigestDraft((prev) => ({ ...prev, cleanup: e.target.checked }))
+                        }
+                      />
+                      <span>Run an OKF cleanup pass first (LLM edits and commits)</span>
+                    </label>
                     <label className="form-field">
                       <span className="form-label">Google account for the digest</span>
                       <select
@@ -705,7 +718,13 @@ export function Settings({ user }: SettingsProps) {
                     </label>
                     <span className="settings-section-hint">
                       The digest runs every morning and emails anything needing attention
-                      within 24 hours. Selecting a Google account lets it read that
+                      within 24 hours. The optional cleanup pass runs first: the LLM
+                      organizes, deduplicates, and validates the .md files against the
+                      bundle's OKF.md spec and commits the changes (as "Notebook
+                      Maintenance") before the digest review. Uncommitted work is
+                      snapshotted in its own commit before the pass starts, so nothing
+                      can be lost — reset to that restore point to undo everything the
+                      pass did. Selecting a Google account lets the digest read that
                       account calendar and mail too. Each user must log in once with
                       Google so their tokens are captured; in chat, Google tools always
                       follow the logged-in user.

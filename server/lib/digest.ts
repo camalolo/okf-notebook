@@ -21,6 +21,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { chatLogger, newTraceId } from './logger.js';
 import { runReadOnlyTask, type ToolCallRecord } from './bundle-agent.js';
+import { runCleanupForBundle, type CleanupRunRecord } from './cleanup.js';
 import { sendMail } from './mailer.js';
 import { mcpManager } from './mcp-manager.js';
 import { validateWorkspaceAuth } from './workspace-auth.js';
@@ -196,6 +197,13 @@ export interface DigestRunRecord {
   toolCalls: ToolCallRecord[];
   /** Name of the terminal tool the model called, if any (skip_digest / send_digest). */
   decisionTool: string | null;
+  /**
+   * OKF maintenance pass (opt-in via digest.cleanup): ran before the digest
+   * review, edited/deduplicated files per OKF.md, and committed. Present only
+   * when the pass was enabled for this run. Failures are recorded here and do
+   * NOT abort the digest.
+   */
+  cleanup?: CleanupRunRecord;
   /** Final assistant turn (raw text) — kept for debugging. */
   rawContent: string;
   error: string | null;
@@ -296,6 +304,17 @@ export async function runDigestForBundle(
   log.info(`Digest start: bundle=${bundle.id} (${bundle.name})`);
 
   try {
+    // Phase 0 (opt-in): OKF maintenance pass — organize/dedupe/validate the
+    // .md files against OKF.md and commit, so the review below (and any
+    // links it follows) sees a clean, conformant bundle. Never throws.
+    if (bundle.digest?.cleanup === true) {
+      log.info(`Cleanup phase enabled for ${bundle.id} — running OKF maintenance pass first`);
+      base.cleanup = await runCleanupForBundle(bundle, log);
+      if (base.cleanup.status === 'error') {
+        log.warn(`Cleanup phase failed for ${bundle.id}: ${base.cleanup.error} — proceeding with digest`);
+      }
+    }
+
     const google = await resolveGoogleTools(bundle, log);
     const result = await runReadOnlyTask(bundle, DIGEST_TASK_PROMPT, {
       log,

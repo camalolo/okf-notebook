@@ -77,6 +77,15 @@ describe('sanitizeDigest', () => {
     });
   });
 
+  it('keeps the cleanup flag and rejects non-boolean values', () => {
+    expect(sanitizeDigest({ enabled: true, cleanup: true })).toEqual({
+      enabled: true,
+      cleanup: true,
+    });
+    expect(sanitizeDigest({ cleanup: false })).toEqual({ cleanup: false });
+    expect(() => sanitizeDigest({ cleanup: 'yes' })).toThrow(BundleError);
+  });
+
   it('drops an empty googleUser', () => {
     expect(sanitizeDigest({ enabled: true, googleUser: '' })).toEqual({ enabled: true });
   });

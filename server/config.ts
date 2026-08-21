@@ -2,6 +2,13 @@ export interface DigestConfig {
   /** Daily digest for this bundle. `undefined`/`true` = enabled (default). */
   enabled?: boolean;
   /**
+   * Run an OKF maintenance pass before the daily digest: the LLM organizes,
+   * deduplicates, and validates the .md files against the bundle's OKF.md
+   * spec, then commits the changes before the digest review runs.
+   * `undefined`/`false` = off (default).
+   */
+  cleanup?: boolean;
+  /**
    * Email of the Google account whose Calendar/Gmail the digest may read
    * via gw_ MCP tools (per-notebook). Empty/undefined = no Google access.
    * The account must have logged in once (Workspace tokens on disk).

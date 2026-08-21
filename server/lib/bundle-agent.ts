@@ -1,14 +1,16 @@
 /**
- * Reusable, request-independent agent runner for read-only LLM tasks.
+ * Reusable, request-independent agent runner for background LLM tasks.
  *
  * This is a strict subset of the agentic loop in `server/routes/chat.ts`:
  * it shares the same tool definitions and dispatcher, but strips out all
- * Express/SSE/persistence concerns. The model can call `read_file`,
- * `list_files`, and `web_search` to gather information; it cannot mutate
- * the bundle (no `edit_file`/`create_file`/`git_commit` are advertised).
+ * Express/SSE/persistence concerns. By default the model can call
+ * `read_file`, `list_files`, and `web_search` to gather information.
  *
- * Use this for server-side scheduled tasks (daily digest) or any future
- * background job that needs to "ask the LLM to read this bundle and answer".
+ * Trusted server-side tasks (e.g. the digest's OKF cleanup pass) may also
+ * pass write tools (edit_file / create_file / delete_file / git_commit —
+ * see WRITE_TOOLS in routes/chat.ts) via `extraTools`; those dispatch
+ * through the same executeTool path as interactive chats. Set `user` to
+ * attribute git commits made during the run.
  */
 
 import type { BundleConfig } from '../config.js';
@@ -59,6 +61,12 @@ export interface RunReadOnlyTaskOptions {
   /** Max loop iterations (default 20). Guards against runaway tool loops. */
   maxIterations?: number;
   /**
+   * Acting user for tool execution. Only used for git_commit authorship
+   * (background tasks pass a synthetic service identity). Omit for commits
+   * to fall back to the repo's default author.
+   */
+  user?: Express.User;
+  /**
    * Extra system-prompt text appended after buildSystemPrompt() output.
    * Use this to give the task its own instructions (e.g. digest rules).
    */
@@ -100,7 +108,7 @@ export async function runReadOnlyTask(
   opts: RunReadOnlyTaskOptions = {},
 ): Promise<RunReadOnlyTaskResult> {
   const maxIterations = opts.maxIterations ?? 20;
-  const ctx: ToolContext = { bundle };
+  const ctx: ToolContext = { bundle, ...(opts.user ? { user: opts.user } : {}) };
   const terminalTools = opts.terminalTools ?? new Set<string>();
   const advertisedTools = [
     ...READONLY_TOOLS,

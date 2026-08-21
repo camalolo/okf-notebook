@@ -203,14 +203,38 @@ compact/retitle and tests).
 
 ### Daily digest (`server/lib/digest.ts`, `server/lib/scheduler.ts`)
 
-Per-bundle config lives in `bundles.json` as `digest?: { enabled?, googleUser? }`
+Per-bundle config lives in `bundles.json` as
+`digest?: { enabled?, cleanup?, googleUser? }`
 (Settings → "Digest…" per bundle; `GET /api/notebook/mcps` feeds the Google
 account dropdown from `listWorkspaceUsers()`). `enabled: false` skips the
-bundle in the scheduler. `googleUser` (an email with Workspace tokens on disk)
+bundle in the scheduler. `cleanup: true` runs the OKF maintenance pass
+first (see below). `googleUser` (an email with Workspace tokens on disk)
 gives the digest read-only `gw_` tools (calendar + mail subset) routed to that
 user's MCP instance via `runReadOnlyTask({ mcpTools, mcpUserEmail })` — one
 notebook can digest the author's calendar, another Demo's. Global knobs remain
 env-based: `DIGEST_CRON`, `DIGEST_TZ`, `DIGEST_TO`, `DIGEST_DISABLED`.
+
+**OKF cleanup pass** (`server/lib/cleanup.ts`, `server/lib/okf-lint.ts`):
+opt-in pre-digest maintenance phase. In order: (0) **fast skip** — if the
+working tree is clean and the last commit already is a completed OKF
+cleanup commit (`chore(okf):` …, but not the pre-run snapshot message),
+the pass is skipped entirely (record `skipped: true`); (1) **pre-cleanup
+snapshot commit** — any uncommitted WIP is committed first (message
+`chore(okf): snapshot working tree before cleanup`, author "Notebook
+Maintenance") so nothing can be lost by mistake; the record's `restorePoint`
+is the commit to `git reset --hard` to for undoing the whole pass; (2)
+`lintBundle()` computes deterministic OKF conformance issues (missing
+`type`/`title`/`description`, unparseable frontmatter, empty bodies,
+duplicate titles) to ground the model; (3) an agent loop
+(`runReadOnlyTask` + `WRITE_TOOLS` from `chat.ts`: `edit_file`,
+`create_file`, `delete_file`, `git_commit` — note `delete_file` is also new
+in the chat toolset) fixes the files against the bundle's OKF.md spec and
+commits with a `chore(okf):` message; (4) if the tree is still dirty
+afterwards, the runner makes a safety commit itself so the digest phase
+always starts from a committed state. Cleanup failures are recorded in the
+digest record (`cleanup` field) and do NOT abort the digest. Preview a run
+manually with `node server/index.ts --run-cleanup [bundleId]` (runs
+regardless of the per-bundle setting).
 
 ### MCP servers (`server/lib/mcp-manager.ts`)
 

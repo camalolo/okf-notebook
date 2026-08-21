@@ -14,6 +14,7 @@ import { mcpsRouter } from './routes/mcps.js';
 import { mcpManager } from './lib/mcp-manager.js';
 import type { McpServerConfig } from './lib/mcp-manager.js';
 import { startDigestScheduler, runDigestTick } from './lib/scheduler.js';
+import { runCleanupTick } from './lib/cleanup.js';
 
 // --- MCP server configuration ------------------------------------------------
 
@@ -125,6 +126,32 @@ if (existsSync(path.join(publicDir, 'index.html'))) {
 
 // Start MCP servers then listen.
 async function main() {
+  // CLI: `node server/index.ts --run-cleanup [bundleId]` runs ONLY the OKF
+  // cleanup pass (all bundles, or a specific one — regardless of the
+  // digest.cleanup setting), prints a summary, and exits. Use it to preview
+  // what the maintenance agent would change before enabling it per bundle.
+  const cleanupArgIdx = process.argv.indexOf('--run-cleanup');
+  if (cleanupArgIdx !== -1) {
+    const onlyBundleId = process.argv[cleanupArgIdx + 1];
+    const records = await runCleanupTick({ onlyBundleId });
+    if (onlyBundleId && records.length === 0) {
+      // eslint-disable-next-line no-console
+      console.error(`Bundle not found: ${onlyBundleId}`);
+      process.exit(1);
+    }
+    for (const r of records) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[cleanup] ${r.status}${r.skipped ? ' (skipped — last commit is an OKF cleanup commit, tree clean)' : ''}: ` +
+          `lint=${r.lintViolations} violations / ${r.lintDuplicates} dup-groups, ` +
+          `${r.commits.length} commit(s), ${r.iterations} iter` +
+          (r.restorePoint ? `, restore=${r.restorePoint.slice(0, 12)}` : '') +
+          (r.error ? ` ERROR: ${r.error}` : ` summary="${r.summary.slice(0, 120)}"`),
+      );
+    }
+    process.exit(records.some((r) => r.status === 'error') ? 1 : 0);
+  }
+
   // CLI: `node server/index.ts --run-digest [bundleId]` runs one digest tick
   // (all bundles, or a specific one), prints a short summary, and exits.
   // Bypasses the lastrun idempotency gate so you can iterate on the prompt.

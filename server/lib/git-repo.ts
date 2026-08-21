@@ -14,6 +14,11 @@ import { join } from 'node:path';
 const require = createRequire(import.meta.url);
 const simpleGit = require('simple-git') as (cwd: string) => import('simple-git').SimpleGit;
 
+/** Open a SimpleGit instance for a bundle directory (does NOT init). */
+export function openGit(bundlePath: string): import('simple-git').SimpleGit {
+  return simpleGit(bundlePath);
+}
+
 /**
  * Ensure the bundle directory is a git repository, running `git init` when it
  * isn't. Returns true when a fresh repo was created (callers may use this to
