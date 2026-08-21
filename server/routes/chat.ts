@@ -14,6 +14,7 @@ import {
 } from '../lib/llm.js';
 import { chatLogger, newTraceId } from '../lib/logger.js';
 import { webSearch } from '../lib/web-search.js';
+import { evalMaths } from '../lib/maths.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
 import { ensureGitRepo, isNoCommitsError } from '../lib/git-repo.js';
@@ -222,6 +223,34 @@ const WEB_SEARCH_TOOL: ToolDefinition = {
   },
 };
 
+const EVAL_MATHS_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'eval_maths',
+    description:
+      'Evaluate a mathematical expression with EXACT arithmetic (BigInt rationals — no floating-point ' +
+      'errors). Use this for ANY non-trivial calculation instead of computing mentally: sums, products, ' +
+      'percentages, ratios, powers, factorials, unit-free finance/quantity maths, etc. Supports ' +
+      '+ - * / % (spaced = modulo), ^ (power), ! (factorial), attached % (percent, e.g. 15%), ' +
+      'parentheses, implicit multiplication (2(3+4), 2pi), scientific notation (1.5e3), constants ' +
+      '(pi, e, tau, phi), and functions: abs min max gcd lcm mod pow sqrt cbrt floor ceil round trunc ' +
+      'sign fact factorial comb binom deg rad exp ln log log2 log10 sin cos tan asin acos atan sinh ' +
+      'cosh tanh. Rational results are exact (1/3 stays 1/3); irrational results (sqrt(2), pi, trig) ' +
+      'are approximate and flagged as such. Returns { result, decimal, fraction?, approximate? } or { error }.',
+    parameters: {
+      type: 'object',
+      properties: {
+        expression: {
+          type: 'string',
+          description:
+            'The expression to evaluate, e.g. "0.1 + 0.2", "2^100", "15% * 8400", "comb(52,5)", "(1+2/3)*12".',
+        },
+      },
+      required: ['expression'],
+    },
+  },
+};
+
 const SEND_EMAIL_TOOL: ToolDefinition = {
   type: 'function',
   function: {
@@ -247,6 +276,7 @@ const SEND_EMAIL_TOOL: ToolDefinition = {
 export const READONLY_TOOLS: ToolDefinition[] = [
   READ_FILE_TOOL,
   LIST_FILES_TOOL,
+  EVAL_MATHS_TOOL,
   WEB_SEARCH_TOOL,
 ];
 
@@ -413,6 +443,12 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
       if (!query) return { error: 'query is required' };
       const numResults = Number(args?.num_results) || 5;
       return webSearch(query, numResults);
+    }
+
+    case 'eval_maths': {
+      const expression = String(args?.expression ?? '').trim();
+      if (!expression) return { error: 'expression is required' };
+      return evalMaths(expression);
     }
 
     case 'git_status': {
@@ -653,7 +689,9 @@ export async function buildSystemPrompt(
     'Do NOT use raw HTML <a> tags or absolute paths starting with /. Use the',
     'relative path exactly as it appears in list_files output.',
     '',
-    'You also have access to a web_search tool for quick web searches.',
+    'You also have access to a web_search tool for quick web searches, and an eval_maths',
+    'tool for exact calculations — ALWAYS call eval_maths for arithmetic beyond trivial',
+    'mental math instead of guessing: it is exact (no floating-point errors) and free.',
     ...(mcpToolNames.length > 0
       ? [
           '',
