@@ -282,8 +282,30 @@ export function restoreFromEvents(events: StoredEvent[]): {
   let currentTurn: TurnEvent[] = [];
   let compactionIndex: number | null = null;
 
+  // Attach pending turn events (tools/edits/errors without a closing
+  // assistant message) as a synthetic interrupted turn, anchored to a
+  // placeholder assistant message so pastTurns stay 1:1 aligned with
+  // assistant messages.
+  const flushInterruptedTurn = () => {
+    if (currentTurn.length === 0) return;
+    pastTurns.push(currentTurn);
+    messages.push({
+      role: 'assistant',
+      content: '⚠️ This response was interrupted.',
+    });
+    currentTurn = [];
+  };
+
   for (const ev of events) {
     if (ev.kind === 'user') {
+      // A user message arriving while turn events are still pending means
+      // the previous turn never persisted a closing assistant message
+      // (interrupted, aborted, or the user typed while it was running).
+      // Flush those events in place — discarding them would drop their
+      // proposed changes out of the inline timeline while they stay in
+      // `proposedChanges`, making them render out of order at the bottom
+      // of the chat.
+      flushInterruptedTurn();
       messages.push({ role: 'user', content: ev.content ?? '' });
       currentTurn = [];
     } else if (ev.kind === 'tool') {
@@ -311,16 +333,10 @@ export function restoreFromEvents(events: StoredEvent[]): {
     // 'turn_end' is a completion marker only — nothing to render.
   }
 
-  // If there are orphaned events (incomplete turn — e.g. interrupted by
-  // error), attach them as a synthetic turn with a placeholder assistant
-  // message so they're visible in the timeline.
-  if (currentTurn.length > 0) {
-    pastTurns.push(currentTurn);
-    messages.push({
-      role: 'assistant',
-      content: '⚠️ This response was interrupted.',
-    });
-  }
+  // If there are orphaned events at the end of the timeline (incomplete
+  // turn — e.g. interrupted by error), attach them as a synthetic turn
+  // with a placeholder assistant message so they're visible.
+  flushInterruptedTurn();
 
   return { messages, pastTurns, proposedChanges, compactionIndex };
 }

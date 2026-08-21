@@ -153,6 +153,104 @@ describe('restoreFromEvents — ordering after interruption', () => {
     expect(pastTurns[0]).toHaveLength(1);
     expect(pastTurns[0][0].kind).toBe('tool');
   });
+
+  // -------------------------------------------------------------------------
+  // Test 7: regression — a turn interrupted right after applied edits, with
+  // the next user message persisted before any closing assistant message.
+  // The edits must stay inline in the interrupted turn (rendered in
+  // chronological position), NOT fall out of the turn timeline — otherwise
+  // they render out of order at the bottom of the chat via the
+  // `pastProposed` fallback.
+  //
+  // Real-world shape (investing bundle, Aug 2026): user → assistant →
+  // edit_file ×3 (applied) → user "Resume" → assistant → … → compaction →
+  // user "flex your flex" → assistant → tools.
+  // -------------------------------------------------------------------------
+  it('keeps edits from an interrupted turn inline when a user message follows', () => {
+    const change = (id: string, path: string): StoredEvent['change'] => ({
+      id,
+      type: 'edit',
+      path,
+      oldContent: 'old',
+      newContent: 'new',
+      status: 'applied',
+    });
+    const events: StoredEvent[] = [
+      { ts: '0', seq: 0, kind: 'user', content: 'triple-check the exit' },
+      { ts: '1', seq: 1, kind: 'assistant', content: 'Triple-check time.' },
+      { ts: '2', seq: 2, kind: 'tool', toolCall: { name: 'edit_file', args: {}, result: 'ok' } },
+      { ts: '3', seq: 3, kind: 'proposed', change: change('e1', 'strategies/moat-exit.md') },
+      { ts: '4', seq: 4, kind: 'tool', toolCall: { name: 'edit_file', args: {}, result: 'ok' } },
+      { ts: '5', seq: 5, kind: 'proposed', change: change('e2', 'log.md') },
+      // Interrupted here — next event is the user typing again.
+      { ts: '6', seq: 6, kind: 'user', content: 'Resume' },
+      { ts: '7', seq: 7, kind: 'assistant', content: 'All consolidated.' },
+      { ts: '8', seq: 8, kind: 'compaction', content: '# Summary' },
+      { ts: '9', seq: 9, kind: 'user', content: 'flex your flex' },
+      { ts: '10', seq: 10, kind: 'assistant', content: 'Flexing all three at once.' },
+      { ts: '11', seq: 11, kind: 'tool', toolCall: { name: 'flex_positions', args: {}, result: {} } },
+    ];
+
+    const { messages, pastTurns, proposedChanges, compactionIndex } = restoreFromEvents(events);
+
+    // Invariant the renderer relies on: every proposed change appears in
+    // some pastTurns entry, so it renders inline instead of via the
+    // bottom-of-chat `pastProposed` fallback.
+    const inlineIds = new Set(
+      pastTurns.flat().filter((e) => e.kind === 'proposed').map((e) => (e as { kind: 'proposed'; change: { id: string } }).change.id),
+    );
+    for (const c of proposedChanges) {
+      expect(inlineIds.has(c.id)).toBe(true);
+    }
+
+    // pastTurns stay 1:1 aligned with assistant messages.
+    const assistantCount = messages.filter((m) => m.role === 'assistant').length;
+    expect(pastTurns).toHaveLength(assistantCount);
+
+    // The interrupted turn's edits are anchored BEFORE the "Resume" user
+    // message, via a placeholder assistant message.
+    const resumeIdx = messages.findIndex((m) => m.role === 'user' && m.content === 'Resume');
+    expect(resumeIdx).toBeGreaterThan(0);
+    expect(messages[resumeIdx - 1].role).toBe('assistant');
+    expect(messages[resumeIdx - 1].content).toContain('interrupted');
+
+    // Compaction still tracks the summary message.
+    expect(compactionIndex).toBe(messages.findIndex((m) => m.content === '# Summary'));
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 8: same interruption shape but with a turn_end marker (new-format
+  // timelines where the turn was aborted after edits, then the user sent a
+  // new message).
+  // -------------------------------------------------------------------------
+  it('keeps orphaned edits inline across turn_end followed by a user message', () => {
+    const events: StoredEvent[] = [
+      { ts: '0', seq: 0, kind: 'user', content: 'do edits' },
+      { ts: '1', seq: 1, kind: 'tool', toolCall: { name: 'edit_file', args: {}, result: 'ok' } },
+      {
+        ts: '2',
+        seq: 2,
+        kind: 'proposed',
+        change: { id: 'e1', type: 'edit', path: 'log.md', newContent: 'x', status: 'applied' },
+      },
+      { ts: '3', seq: 3, kind: 'turn_end' },
+      { ts: '4', seq: 4, kind: 'user', content: 'next request' },
+      { ts: '5', seq: 5, kind: 'assistant', content: 'Done.' },
+    ];
+
+    const { messages, pastTurns, proposedChanges } = restoreFromEvents(events);
+
+    const inlineIds = new Set(
+      pastTurns.flat().filter((e) => e.kind === 'proposed').map((e) => (e as { kind: 'proposed'; change: { id: string } }).change.id),
+    );
+    expect(inlineIds.has('e1')).toBe(true);
+    expect(proposedChanges).toHaveLength(1);
+
+    const nextIdx = messages.findIndex((m) => m.role === 'user' && m.content === 'next request');
+    expect(messages[nextIdx - 1].content).toContain('interrupted');
+    const assistantCount = messages.filter((m) => m.role === 'assistant').length;
+    expect(pastTurns).toHaveLength(assistantCount);
+  });
 });
 
 describe('mergeConsecutiveAssistants', () => {
