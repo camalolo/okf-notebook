@@ -21,6 +21,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { chatLogger, newTraceId } from './logger.js';
 import { runReadOnlyTask, type ToolCallRecord } from './bundle-agent.js';
+import { GIT_TOOLS } from '../routes/chat.js';
 import { runCleanupForBundle, type CleanupRunRecord } from './cleanup.js';
 import { sendMail } from './mailer.js';
 import { mcpManager } from './mcp-manager.js';
@@ -96,10 +97,12 @@ const DIGEST_TASK_PROMPT = [
   '',
   'Steps:',
   '1. Call list_files to see the structure of the bundle.',
-  '2. Call read_file on anything plausibly time-sensitive — calendars, todo',
+  '2. Call git_log (and git_diff for a specific change) to see what changed',
+  '   since the previous digest — recent edits are prime candidates for review.',
+  '3. Call read_file on anything plausibly time-sensitive — calendars, todo',
   '   lists, deadlines, appointment notes, scheduled maintenance, expiring',
   '   items, reminders. Skip purely historical or reference material.',
-  '3. If a timely external fact would clarify whether something needs action',
+  '4. If a timely external fact would clarify whether something needs action',
   '   (e.g. tomorrow\'s weather, a public holiday, a news event tied to a',
   '   tracked item), use web_search to look it up. Otherwise skip web_search.',
   '',
@@ -319,7 +322,7 @@ export async function runDigestForBundle(
     const result = await runReadOnlyTask(bundle, DIGEST_TASK_PROMPT, {
       log,
       maxIterations: 20,
-      extraTools: DIGEST_DECISION_TOOLS,
+      extraTools: [...GIT_TOOLS, ...DIGEST_DECISION_TOOLS],
       terminalTools: TERMINAL_TOOLS,
       ...(google.tools.length > 0
         ? {

@@ -281,6 +281,18 @@ export const READONLY_TOOLS: ToolDefinition[] = [
 ];
 
 /**
+ * Git inspection tools (git_status, git_diff, git_log) — read-only git
+ * operations, exposed to full-role users only (NOT in READONLY_TOOLS —
+ * removed for everyone in 6cb3ac3 by mistake, restored 2026-08-21 as
+ * full-role-only). Also given to background agents via extraTools (digest).
+ */
+export const GIT_TOOLS: ToolDefinition[] = [
+  GIT_STATUS_TOOL,
+  GIT_DIFF_TOOL,
+  GIT_LOG_TOOL,
+];
+
+/**
  * Write-capable tools (no send_email — background tasks route mail decisions
  * through their own runner, like the digest's send_digest terminal tool).
  * Used by full-role chat users and by trusted server-side agents (digest
@@ -296,6 +308,7 @@ export const WRITE_TOOLS: ToolDefinition[] = [
 
 const FULL_TOOLS: ToolDefinition[] = [
   ...READONLY_TOOLS,
+  ...GIT_TOOLS,
   ...WRITE_TOOLS,
   SEND_EMAIL_TOOL,
 ];
@@ -624,13 +637,29 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
 /**
  * Build the system prompt for a bundle. `mcpToolNames` are the MCP tool
  * names actually exposed for this bundle (per bundle.mcps) — kept dynamic so
- * the prompt never advertises tools the request doesn't have.
+ * the prompt never advertises tools the request doesn't have. `toolNames`
+ * likewise lists the built-in tools exposed to THIS request (role-dependent);
+ * the capability sentences are derived from it so e.g. readonly users are
+ * never told they can check git status or edit files.
  */
 export async function buildSystemPrompt(
   bundle: BundleConfig,
   mcpToolNames: string[] = [],
+  toolNames: string[] = READONLY_TOOLS.map((t) => t.function.name),
 ): Promise<string> {
   const bundlePath = bundle.path;
+  const has = (name: string) => toolNames.includes(name);
+
+  const capabilities = [
+    ...(has('read_file') ? ['read files'] : []),
+    ...(has('git_status') ? ['check git status and history'] : []),
+    ...(has('edit_file') ? ['edit files directly'] : []),
+  ];
+  // "A", "A and B", or "A, B, and C".
+  const capSentence =
+    capabilities.length <= 1
+      ? capabilities.join('')
+      : `${capabilities.slice(0, -1).join(', ')}, and ${capabilities[capabilities.length - 1]!}`;
 
   // Read AGENTS.md (if present).
   let agentsContent = '(none)';
@@ -666,10 +695,15 @@ export async function buildSystemPrompt(
       timeZoneName: 'short',
     })}`,
     '',
-    'You can read files, check git status, and edit files directly. When the user asks you to',
-    'make changes, use the edit_file or create_file tools. Changes are applied immediately.',
-    '',
-    'After making edits, use git_commit to commit the changes if appropriate.',
+    capabilities.length > 0 ? `You can ${capSentence}.` : '',
+    ...(has('edit_file')
+      ? [
+          'When the user asks you to make changes, use the edit_file or create_file tools.',
+          'Changes are applied immediately.',
+          '',
+          'After making edits, use git_commit to commit the changes if appropriate.',
+        ]
+      : []),
     '',
     '## Formatting your responses',
     'Your responses are rendered as GitHub-Flavored Markdown. Use markdown formatting',
@@ -910,6 +944,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     const systemPrompt = await buildSystemPrompt(
       bundle,
       [...exposedMcpTools],
+      allTools.map((t) => t.function.name),
     );
     const callMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },

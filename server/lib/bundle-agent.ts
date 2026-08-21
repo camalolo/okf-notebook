@@ -117,7 +117,11 @@ export async function runReadOnlyTask(
   ];
   const mcpToolNames = new Set((opts.mcpTools ?? []).map((t) => t.function.name));
 
-  const baseSystem = await buildSystemPrompt(bundle);
+  const baseSystem = await buildSystemPrompt(
+    bundle,
+    [],
+    advertisedTools.map((t) => t.function.name),
+  );
   const systemPrompt = opts.systemPromptSuffix
     ? `${baseSystem}\n\n${opts.systemPromptSuffix}`
     : baseSystem;

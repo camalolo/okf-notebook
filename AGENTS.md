@@ -177,8 +177,13 @@ gate. For `full`-role users the editing tools are:
 Each successful `edit_file`/`create_file`/`delete_file`/`undo_edit` emits an
 `edit_applied` SSE
 event carrying the diff/contents so the frontend can render a collapsible diff
-card. Readonly-role users get only `read_file`, `list_files`, `git_*`, and
-`web_search`.
+card. Readonly-role users get only `read_file`, `list_files`, `eval_maths`,
+and `web_search`. Git inspection (`git_status`, `git_diff`, `git_log`) is
+**full-role only** (`GIT_TOOLS` in `chat.ts`, spread into `FULL_TOOLS`;
+also given to the digest agent) — they were removed from `READONLY_TOOLS`
+by mistake in 6cb3ac3 and restored 2026-08-21. `buildSystemPrompt` derives
+its capability sentences from the actually-exposed tool names so the prompt
+never advertises tools the request doesn't have.
 
 ### Exact maths (`eval_maths` built-in tool)
 
