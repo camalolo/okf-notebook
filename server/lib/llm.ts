@@ -1,8 +1,17 @@
 /**
- * LLM client for the Z.ai GLM API, accessed through the inference server.
+ * LLM client for the inference server's OpenRouter-style routed endpoint.
  *
- * The inference server runs locally on port 3003. LAN requests bypass
- * token requirements, but we keep the token logic for compatibility.
+ * All requests go to POST /api/v1/chat/completions with a logical model name
+ * (e.g. glm-5.2); the inference server picks the provider (zai first, deepseek
+ * as paid fallback) with automatic failover on 429/5xx and a circuit breaker.
+ * Model lists come from /api/v1/models (everything routable).
+ *
+ * Authentication: client API key (`Authorization: Bearer ik-...`) from the
+ * INFERENCE_API_KEY env var. The inference server is on the same host and LAN
+ * requests bypass auth, but we send the key anyway so this also works the day
+ * the LAN bypass is disabled, and so requests are attributed per-key in the
+ * proxy's stats.
+ *
  * Uses Node 22 native fetch (globalThis.fetch).
  */
 
@@ -10,11 +19,17 @@ import { Agent } from 'undici';
 import type { ChatLogger } from './logger.js';
 import { getSettings } from '../settings.js';
 
-// --- Token management -------------------------------------------------------
+// --- Endpoints ---------------------------------------------------------------
 
-const TOKEN_URL = 'http://127.0.0.1:3003/api/token';
-const ZAI_URL = 'http://127.0.0.1:3003/api/zai';
-const MODELS_URL = 'http://127.0.0.1:3003/api/zai/models';
+const V1_URL = 'http://127.0.0.1:3003/api/v1/chat/completions';
+const MODELS_URL = 'http://127.0.0.1:3003/api/v1/models';
+
+/** Client API key for the inference server (see Admin → API Keys). */
+const API_KEY = process.env.INFERENCE_API_KEY ?? '';
+
+function authHeaders(): Record<string, string> {
+  return API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {};
+}
 
 // undici's default bodyTimeout is 300s of *idle* time on the response body.
 // GLM can "think" for longer than that between SSE chunks, which kills the
@@ -23,44 +38,6 @@ const MODELS_URL = 'http://127.0.0.1:3003/api/zai/models';
 // 0 disables the idle timeout entirely; user-initiated aborts still work via
 // the AbortSignal, so there is no hang risk beyond the client's patience.
 const llmAgent = new Agent({ bodyTimeout: 0 });
-
-let cachedToken: string | null = null;
-let tokenExpiry = 0;
-
-interface TokenResponse {
-  token: string;
-  expires: number; // Unix timestamp (seconds)
-}
-
-/** Fetch a fresh token from the proxy, caching it until 30s before expiry. */
-async function getToken(log?: ChatLogger): Promise<string> {
-  // Reuse cached token if it's still valid (with a 30s safety margin).
-  const now = Math.floor(Date.now() / 1000);
-  if (cachedToken && tokenExpiry - now > 30) {
-    log?.debug('Token: using cached token');
-    return cachedToken;
-  }
-
-  log?.info('Token: fetching fresh token from proxy');
-  const t0 = Date.now();
-  const res = await fetch(TOKEN_URL);
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    log?.error(`Token: fetch failed ${res.status} ${res.statusText} (${body.slice(0, 200)})`);
-    throw new Error(`Token request failed: ${res.status} ${res.statusText}`);
-  }
-  let data: TokenResponse;
-  try {
-    data = (await res.json()) as TokenResponse;
-  } catch (err) {
-    log?.errorTrace('Token: JSON parse failed', err);
-    throw new Error('Token response was not valid JSON', { cause: err });
-  }
-  cachedToken = data.token;
-  tokenExpiry = data.expires;
-  log?.info(`Token: acquired (expires in ${data.expires - now}s, ${Date.now() - t0}ms)`);
-  return cachedToken;
-}
 
 // --- Types ------------------------------------------------------------------
 
@@ -107,15 +84,17 @@ const MODELS_TTL_MS = 5 * 60 * 1000;
  * List the models officially available on the Z.ai API (via the inference
  * proxy's `/models` passthrough — free, consumes no tokens). Cached for 5
  * minutes; on a refresh failure the stale list is returned if one exists.
+ *
+ * The proxy's model list includes its whole routable catalog (e.g. OpenRouter
+ * imports). This picker is curated to the GLM/DeepSeek families so the UI
+ * stays usable and spend stays on the intended providers; any other routable
+ * model can still be entered manually in Settings.
  */
 export async function listModels(log?: ChatLogger): Promise<string[]> {
   if (modelsCache && Date.now() - modelsCache.at < MODELS_TTL_MS) {
     return modelsCache.models;
   }
-  const token = await getToken(log);
-  const res = await fetch(MODELS_URL, {
-    headers: { 'X-API-Token': token },
-  });
+  const res = await fetch(MODELS_URL, { headers: authHeaders() });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     if (modelsCache) {
@@ -128,6 +107,10 @@ export async function listModels(log?: ChatLogger): Promise<string[]> {
   const models = (data.data ?? [])
     .map((m) => m.id ?? '')
     .filter(Boolean)
+    // Curated: GLM family + the cheap DeepSeek tiers. Auto-imported entries
+    // (e.g. deepseek-v4-*) are deliberately excluded until vetted/priced —
+    // they stay routable by explicit request but aren't offered in the UI.
+    .filter((id) => /^(glm-|deepseek-(chat|reasoner)$)/.test(id))
     .sort();
   if (models.length === 0) {
     if (modelsCache) return modelsCache.models;
@@ -268,18 +251,17 @@ export async function chatCompletionStream(
   log?.info(`Streaming request: ${messages.length} msgs, ${tools?.length ?? 0} tools, model ${model}`);
   const t0 = Date.now();
 
-  // Transient failures (429 rate limit "1302", 5xx) are retried with backoff.
-  // Safe point: nothing has been streamed to the caller yet, so a retry can't
-  // duplicate content. Once the SSE body starts, errors are NOT retried.
+  // Transient failures (429 after all route candidates are exhausted, 5xx)
+  // are retried with backoff. Safe point: nothing has been streamed to the
+  // caller yet, so a retry can't duplicate content. Once the SSE body
+  // starts, errors are NOT retried.
   let res: Response;
   for (let attempt = 0; ; attempt++) {
-    const token = await getToken(log);
-    res = await fetch(ZAI_URL, {
+    res = await fetch(V1_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Token': token,
-
+        ...authHeaders(),
       },
       body: JSON.stringify(body),
       signal,
@@ -289,9 +271,6 @@ export async function chatCompletionStream(
     if (res.ok) break;
 
     const text = await res.text().catch(() => '');
-    if (res.status === 401 || res.status === 403) {
-      cachedToken = null;
-    }
 
     if (attempt < MAX_RETRIES && isRetryableStatus(res.status) && !signal?.aborted) {
       const waitMs = retryAfterMs(res.headers.get('retry-after')) ?? backoffMs(attempt);
@@ -304,7 +283,7 @@ export async function chatCompletionStream(
     }
 
     log?.error(`Streaming: HTTP ${res.status} (${Date.now() - t0}ms): ${text.slice(0, 300)}`);
-    throw new Error(`Z.ai request failed (${res.status}): ${text.slice(0, 500)}`);
+    throw new Error(`Inference request failed (${res.status}): ${text.slice(0, 500)}`);
   }
 
   if (!res.body) {

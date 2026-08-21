@@ -8,17 +8,8 @@ vi.mock('../settings.js', () => ({
   getSettings: vi.fn().mockResolvedValue({ model: 'test-model' }),
 }));
 
-// Mirror the constants used inside llm.ts so our mock fetch can route correctly.
-const TOKEN_URL = 'http://127.0.0.1:3003/api/token';
-const ZAI_URL = 'http://127.0.0.1:3003/api/zai';
-
-/** A valid far-future token response body. */
-function tokenBody(): string {
-  return JSON.stringify({
-    token: 'test-token',
-    expires: Math.floor(Date.now() / 1000) + 3600,
-  });
-}
+// Mirror the constant used inside llm.ts so our mock fetch can route correctly.
+const V1_URL = 'http://127.0.0.1:3003/api/v1/chat/completions';
 
 /**
  * Create a mock fetch that returns a streaming Response for the Z.ai endpoint.
@@ -27,15 +18,7 @@ function tokenBody(): string {
  */
 function createMockFetch(chunks: string[], delayMs: number, ac?: AbortController) {
   return async (url: string | URL | Request, opts?: RequestInit) => {
-    const urlStr = typeof url === 'string' ? url : url.toString();
-    if (urlStr === TOKEN_URL) {
-      return new Response(tokenBody(), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    // ZAI streaming endpoint
+    // Routed streaming endpoint
     const signal = opts?.signal as AbortSignal | undefined;
     const encoder = new TextEncoder();
 
@@ -86,13 +69,6 @@ describe('chatCompletionStream — retry with backoff', () => {
     );
   }
 
-  function tokenResponse(): Response {
-    return new Response(tokenBody(), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
   // -------------------------------------------------------------------------
   // Test 4: A 429 is retried with backoff and succeeds once it clears.
   // -------------------------------------------------------------------------
@@ -104,7 +80,6 @@ describe('chatCompletionStream — retry with backoff', () => {
     const success = createMockFetch([contentDelta('Hello'), 'data: [DONE]\n\n'], 0);
     const fetchMock = vi.fn(async (url: string | URL | Request, opts?: RequestInit) => {
       const urlStr = typeof url === 'string' ? url : url.toString();
-      if (urlStr !== ZAI_URL) return tokenResponse();
       return ++zaiCalls === 1 ? rateLimitResponse() : success(url, opts);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -131,7 +106,6 @@ describe('chatCompletionStream — retry with backoff', () => {
 
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       const urlStr = typeof url === 'string' ? url : url.toString();
-      if (urlStr !== ZAI_URL) return tokenResponse();
       return rateLimitResponse();
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -139,9 +113,9 @@ describe('chatCompletionStream — retry with backoff', () => {
     const promise = chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, () => {});
     promise.catch(() => {}); // mark handled — rejection may fire before the await below
     await vi.runAllTimersAsync();
-    await expect(promise).rejects.toThrow('Z.ai request failed (429)');
+    await expect(promise).rejects.toThrow('Inference request failed (429)');
 
-    expect(fetchMock.mock.calls.filter((c) => c[0] === ZAI_URL)).toHaveLength(4);
+    expect(fetchMock.mock.calls.filter((c) => c[0] === V1_URL)).toHaveLength(4);
   });
 
   // -------------------------------------------------------------------------
@@ -154,7 +128,6 @@ describe('chatCompletionStream — retry with backoff', () => {
 
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       const urlStr = typeof url === 'string' ? url : url.toString();
-      if (urlStr !== ZAI_URL) return tokenResponse();
       return rateLimitResponse();
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -178,7 +151,7 @@ describe('chatCompletionStream — retry with backoff', () => {
       err = e;
     }
     expect((err as { name?: string }).name).toBe('AbortError');
-    expect(fetchMock.mock.calls.filter((c) => c[0] === ZAI_URL)).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter((c) => c[0] === V1_URL)).toHaveLength(1);
   });
 
   // -------------------------------------------------------------------------
@@ -187,16 +160,16 @@ describe('chatCompletionStream — retry with backoff', () => {
   it('does not retry a 400', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       const urlStr = typeof url === 'string' ? url : url.toString();
-      if (urlStr !== ZAI_URL) return tokenResponse();
+      if (urlStr !== V1_URL) return new Response('{}', { status: 200 });
       return new Response('{"error":{"message":"bad request"}}', { status: 400 });
     });
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(
       chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, () => {}),
-    ).rejects.toThrow('Z.ai request failed (400)');
+    ).rejects.toThrow('Inference request failed (400)');
 
-    expect(fetchMock.mock.calls.filter((c) => c[0] === ZAI_URL)).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter((c) => c[0] === V1_URL)).toHaveLength(1);
   });
 });
 
@@ -221,13 +194,12 @@ describe('chatCompletionStream — abort behavior', () => {
       ac.signal,
     );
 
-    // Find the ZAI call (not the token call)
-    const zaiCall = fetchMock.mock.calls.find((c) => c[0] === ZAI_URL);
-    expect(zaiCall).toBeDefined();
-    expect((zaiCall![1] as RequestInit).signal).toBe(ac.signal);
+    const v1Call = fetchMock.mock.calls.find((c) => c[0] === V1_URL);
+    expect(v1Call).toBeDefined();
+    expect((v1Call![1] as RequestInit).signal).toBe(ac.signal);
     // The dispatcher (undici Agent with bodyTimeout disabled) must be forwarded
     // — without it, undici's default 300s idle timeout kills long thinking pauses.
-    expect((zaiCall![1] as RequestInit & { dispatcher?: unknown }).dispatcher).toBeDefined();
+    expect((v1Call![1] as RequestInit & { dispatcher?: unknown }).dispatcher).toBeDefined();
   });
 
   // -------------------------------------------------------------------------
