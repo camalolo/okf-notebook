@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -47,8 +47,17 @@ interface ToolCallLabel {
 
 type ProposedEvent = Extract<TurnEvent, { kind: 'proposed' }>;
 
-/** Renders markdown content inside chat bubbles (GFM tables, code, etc.). */
-function ChatMarkdown({ content, onNavigate }: { content: string; onNavigate?: (path: string) => void }) {
+/** Renders markdown content inside chat bubbles (GFM tables, code, etc.).
+ *  Memoized: the composer's `input` state re-renders the whole history on
+ *  every keystroke — without memo, remark re-parses every settled message
+ *  each keystroke and typing feels sluggish. */
+const ChatMarkdown = memo(function ChatMarkdown({
+  content,
+  onNavigate,
+}: {
+  content: string;
+  onNavigate?: (path: string) => void;
+}) {
   const components: Components = {
     a({ href, children }) {
       if (href && onNavigate && !href.startsWith('http') && href.endsWith('.md')) {
@@ -81,7 +90,7 @@ function ChatMarkdown({ content, onNavigate }: { content: string; onNavigate?: (
       {content}
     </ReactMarkdown>
   );
-}
+});
 
 function trunc(s: string, max = 60): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;

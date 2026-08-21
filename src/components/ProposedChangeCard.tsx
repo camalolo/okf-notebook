@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import type { ProposedChange } from '../types.ts';
 
 interface ProposedChangeCardProps {
@@ -83,7 +83,12 @@ function lineDiff(oldText: string, newText: string, context = 3): DiffLine[] {
 
 const MAX_DIFF_LINES = 300;
 
-export function ProposedChangeCard({ change }: ProposedChangeCardProps) {
+// Memoized: the chat history re-renders on every composer keystroke and every
+// streaming chunk — without memo, the O(m·n) LCS diff below re-runs for every
+// card on each of those renders.
+export const ProposedChangeCard = memo(function ProposedChangeCard({
+  change,
+}: ProposedChangeCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const isCreate = change.type === 'create';
@@ -142,4 +147,4 @@ export function ProposedChangeCard({ change }: ProposedChangeCardProps) {
       )}
     </div>
   );
-}
+});
