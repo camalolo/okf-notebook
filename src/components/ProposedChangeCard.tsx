@@ -87,12 +87,15 @@ export function ProposedChangeCard({ change }: ProposedChangeCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const isCreate = change.type === 'create';
+  const isDelete = change.type === 'delete';
   const oldText = change.oldContent ?? '';
   const newText = change.newContent ?? '';
 
   const diffLines = isCreate
     ? newText.split('\n').map((text) => ({ type: 'added' as const, text }))
-    : lineDiff(oldText, newText);
+    : isDelete
+      ? oldText.split('\n').map((text) => ({ type: 'removed' as const, text }))
+      : lineDiff(oldText, newText);
 
   const shown = diffLines.slice(0, MAX_DIFF_LINES);
   const truncated = diffLines.length > MAX_DIFF_LINES;
@@ -112,7 +115,7 @@ export function ProposedChangeCard({ change }: ProposedChangeCardProps) {
       >
         <span className="pc-chevron" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         <span className={`pc-badge pc-badge-${change.type}`}>
-          {isCreate ? '✨ Create' : '✏️ Edit'}
+          {isCreate ? '✨ Create' : isDelete ? '🗑 Delete' : '✏️ Edit'}
         </span>
         <code className="pc-path">{change.path}</code>
         {!isCreate && (

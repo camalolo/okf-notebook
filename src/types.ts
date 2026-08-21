@@ -14,6 +14,12 @@ export interface User {
 export interface DigestConfig {
   /** Daily digest for this bundle. `undefined`/`true` = enabled (default). */
   enabled?: boolean;
+  /**
+   * OKF maintenance pass before the digest: the LLM organizes, deduplicates,
+   * and validates the .md files against OKF.md, then commits the changes.
+   * `undefined`/`false` = off (default).
+   */
+  cleanup?: boolean;
   /** Google account (email) whose Calendar/Gmail the digest may read. */
   googleUser?: string;
 }
@@ -63,7 +69,7 @@ export interface ChatMessage {
 
 export interface ProposedChange {
   id: string;
-  type: 'edit' | 'create';
+  type: 'edit' | 'create' | 'delete';
   path: string;
   oldContent?: string;
   newContent: string;

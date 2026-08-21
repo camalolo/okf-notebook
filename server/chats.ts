@@ -25,7 +25,7 @@ export interface StoredEvent {
   toolCall?: { name: string; args: Record<string, unknown>; result?: unknown };
   change?: {
     id: string;
-    type: 'edit' | 'create';
+    type: 'edit' | 'create' | 'delete';
     path: string;
     oldContent?: string;
     newContent: string;

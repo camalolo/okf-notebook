@@ -774,7 +774,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           }
 
           // Refresh git badge after commits and file edits.
-          if (toolCall.name === 'git_commit' || toolCall.name === 'edit_file' || toolCall.name === 'undo_edit' || toolCall.name === 'create_file') {
+          if (toolCall.name === 'git_commit' || toolCall.name === 'edit_file' || toolCall.name === 'undo_edit' || toolCall.name === 'create_file' || toolCall.name === 'delete_file') {
             void refreshGitStatus();
           }
         } else if (ev.event === 'edit_applied') {
@@ -786,7 +786,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           };
           const change: ProposedChange = {
             id: makeId(),
-            type: obj.type === 'create' ? 'create' : 'edit',
+            type:
+              obj.type === 'create' ? 'create'
+              : obj.type === 'delete' ? 'delete'
+              : 'edit',
             path: typeof obj.path === 'string' ? obj.path : '',
             oldContent:
               typeof obj.oldContent === 'string' ? obj.oldContent : undefined,

@@ -2316,6 +2316,11 @@ select.form-input {
   color: var(--success);
 }
 
+.pc-badge-delete {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .pc-path {
   font-family: var(--font-mono);
   font-size: 0.8rem;

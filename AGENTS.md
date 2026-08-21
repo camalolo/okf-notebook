@@ -167,12 +167,15 @@ gate. For `full`-role users the editing tools are:
   telling the LLM to re-read the file. After applying, the old/new content pair
   is pushed onto a per-file edit-history map.
 - `create_file` — writes a new file (any type, not just `.md`); creates parent dirs.
+- `delete_file` — removes a file (used by dedup/moves; recoverable via git history
+  if the file was committed).
 - `undo_edit` — pops the most recent `edit_file` from the in-memory edit-history
   map and restores the previous content. **History is session-scoped only** (a
   module-level `Map` in `chat.ts`, not persisted) — restarting the server wipes it.
 - `git_commit` — stages and commits (author set from the logged-in user).
 
-Each successful `edit_file`/`create_file`/`undo_edit` emits an `edit_applied` SSE
+Each successful `edit_file`/`create_file`/`delete_file`/`undo_edit` emits an
+`edit_applied` SSE
 event carrying the diff/contents so the frontend can render a collapsible diff
 card. Readonly-role users get only `read_file`, `list_files`, `git_*`, and
 `web_search`.

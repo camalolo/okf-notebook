@@ -147,6 +147,25 @@ const CREATE_FILE_TOOL: ToolDefinition = {
   },
 };
 
+const DELETE_FILE_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'delete_file',
+    description:
+      'Delete a file from the bundle. Writes to disk immediately (recoverable via git ' +
+      'history if the file was committed). Use for removing duplicate or obsolete files ' +
+      'after merging their content elsewhere. To move a file, create_file the new path ' +
+      'then delete_file the old one. Returns { deleted: true, path } or { error }.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative path to the file to delete.' },
+      },
+      required: ['path'],
+    },
+  },
+};
+
 const UNDO_EDIT_TOOL: ToolDefinition = {
   type: 'function',
   function: {
@@ -231,12 +250,23 @@ export const READONLY_TOOLS: ToolDefinition[] = [
   WEB_SEARCH_TOOL,
 ];
 
-const FULL_TOOLS: ToolDefinition[] = [
-  ...READONLY_TOOLS,
+/**
+ * Write-capable tools (no send_email — background tasks route mail decisions
+ * through their own runner, like the digest's send_digest terminal tool).
+ * Used by full-role chat users and by trusted server-side agents (digest
+ * cleanup) via bundle-agent's extraTools.
+ */
+export const WRITE_TOOLS: ToolDefinition[] = [
   EDIT_FILE_TOOL,
   UNDO_EDIT_TOOL,
   CREATE_FILE_TOOL,
+  DELETE_FILE_TOOL,
   GIT_COMMIT_TOOL,
+];
+
+const FULL_TOOLS: ToolDefinition[] = [
+  ...READONLY_TOOLS,
+  ...WRITE_TOOLS,
   SEND_EMAIL_TOOL,
 ];
 
@@ -499,6 +529,23 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
       await fs.mkdir(path.dirname(resolved), { recursive: true });
       await fs.writeFile(resolved, content, 'utf8');
       return { applied: true, path: rel, content };
+    }
+
+    case 'delete_file': {
+      const rel = String(args?.path ?? '');
+      const resolved = resolveBundlePath(bundlePath, rel);
+      let oldContent: string;
+      try {
+        oldContent = await fs.readFile(resolved, 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          return { error: `File not found: ${rel}` };
+        }
+        throw err;
+      }
+      await fs.rm(resolved);
+      const displayDiff = makeDiff(rel, oldContent, '');
+      return { deleted: true, path: rel, oldContent, newContent: '', diff: displayDiff };
     }
 
     case 'git_commit': {
@@ -1041,6 +1088,32 @@ router.post('/:bundleId/chat', async (req, res, next) => {
                     type: 'create',
                     path: r.path ?? '',
                     newContent: r.content ?? '',
+                    status: 'applied',
+                  },
+                });
+              }
+            } else if (toolName === 'delete_file') {
+              const r = result as {
+                path?: string;
+                oldContent?: string;
+                diff?: string;
+                error?: string;
+              };
+              if (!r.error) {
+                emit('edit_applied', {
+                  type: 'delete',
+                  path: r.path,
+                  oldContent: r.oldContent,
+                  diff: r.diff,
+                });
+                persist({
+                  kind: 'proposed',
+                  change: {
+                    id: tc.id,
+                    type: 'delete',
+                    path: r.path ?? '',
+                    oldContent: r.oldContent,
+                    newContent: '',
                     status: 'applied',
                   },
                 });
