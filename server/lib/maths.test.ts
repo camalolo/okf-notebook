@@ -141,10 +141,38 @@ describe('evalMaths — functions', () => {
     expect(res('sqrt(2)^2').result).toBe('2'); // was 2.000000000000000444…
     expect(res('sin(pi/6)').result).toBe('0.5'); // was 0.49999999999999994
     expect(res('cbrt(-8)').result).toBe('-2');
-    // Purely rational chains of approximate constants keep their ~50 honest
-    // digits — only double-based functions are snapped.
-    expect(res('pi').decimal.startsWith('3.141592653589793238462643383279')).toBe(true);
+    // Purely rational chains of approximate constants keep their honest
+    // digits (constants are computed to 120 at load) — only double-based
+    // functions are snapped.
     expect(res('2*pi*6371').decimal.length).toBeGreaterThan(20);
+  });
+
+  it('computed constants match known digit prefixes', () => {
+    // pi to 50 significant digits (classic 100-digit grouping).
+    expect(res('pi').decimal).toBe('3.1415926535897932384626433832795028841971693993751');
+    expect(res('tau').decimal.startsWith('6.283185307179586476925286766559')).toBe(true);
+    // e — verify the unambiguous prefix from the series definition.
+    expect(res('e').decimal.startsWith('2.718281828459045235360287471352662497757247093')).toBe(true);
+    // phi = (1+sqrt(5))/2.
+    expect(res('phi').decimal.startsWith('1.61803398874989484820458683436563811772030917980')).toBe(true);
+    // tau is exactly 2·pi (same rational, doubled).
+    expect(res('pi').approximate).toBe(true);
+  });
+
+  it('snaps trig dust to zero (special angles on pi)', () => {
+    expect(res('sin(pi)').result).toBe('0'); // was 1.22e-16
+    expect(res('cos(pi/2)').result).toBe('0'); // 6.1e-17
+    expect(res('sind(180)').result).toBe('0');
+    expect(res('cosd(90)').result).toBe('0');
+    // Genuinely small results are preserved.
+    expect(res('sin(0.001)').decimal.startsWith('0.000999999833333342')).toBe(true);
+    expect(res('sin(1e-10)').result).not.toBe('0');
+  });
+
+  it('phi identities come out clean with computed constants', () => {
+    // phi² = phi + 1 exactly; with 120-digit constants the truncation dust
+    // sits far beyond the 50-digit render, so this shows a clean 1.0.
+    expect(res('phi^2 - phi').result).toBe('1.0');
   });
 
   it('degree-based trig: sind/cosd/tand and inverses', () => {

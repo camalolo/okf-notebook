@@ -109,16 +109,6 @@ function numberToRat(x: number): Rational {
   return sign ? rNeg(r) : r;
 }
 
-/** Parse a plain decimal string ("1.25", "-0.5") into a Rational. */
-function parseDecimalRat(s: string): Rational {
-  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(s);
-  if (!m || (!m[2] && !m[3])) throw new MathError(`Invalid number: ${s}`);
-  const sign = m[1] === '-' ? -1n : 1n;
-  const frac = m[3] || '';
-  const n = sign * BigInt((m[2] || '0') + frac || '0');
-  return makeRat(n, 10n ** BigInt(frac.length));
-}
-
 // --- Values (rational + exactness flags) ------------------------------------------
 
 interface Value {
@@ -160,20 +150,64 @@ function guardSize(r: Rational, what: string): void {
   }
 }
 
-// --- Constants (50 significant digits, approximate) -------------------------------
+// --- Constants — computed at load to 120 significant digits -----------------------
+// Derived with exact BigInt arithmetic (Machin's formula for pi, the Taylor
+// series for e, isqrt for phi) rather than hand-typed digit strings, so any
+// truncation dust lands beyond the 50 significant digits we ever render —
+// e.g. phi^2 − phi comes out 1.000…0 instead of 1 + 8e-49.
 
-const PI_50 = '3.1415926535897932384626433832795028841971693993751';
-const E_50 = '2.7182818284590452353602874713526624977572470937000';
-const PHI_50 = '1.6180339887498948482045868343656381177203091798058';
+const CONST_DIGITS = 120;
+const CONST_GUARD = 20;
+/** Renders of approximate values are capped at this many significant digits. */
+const APPROX_RENDER_SIG = 50;
 
-const PI_VAL = val(parseDecimalRat(PI_50), true);
-const E_VAL = val(parseDecimalRat(E_50), true);
+/** atan(1/x)·S via the alternating Taylor series (x ≥ 2, S = scale). */
+function atanInvScaled(x: bigint, S: bigint): bigint {
+  const x2 = x * x;
+  let term = S / x; // S/x^(2k+1), k = 0
+  let sum = 0n;
+  let k = 0n;
+  let sign = 1n;
+  while (term > 0n) {
+    sum += (sign * term) / (2n * k + 1n);
+    term /= x2;
+    sign = -sign;
+    k += 1n;
+  }
+  return sum;
+}
+
+function computeConstants(): { pi: Rational; e: Rational; phi: Rational } {
+  const S = 10n ** BigInt(CONST_DIGITS + CONST_GUARD);
+  // Machin: pi/4 = 4·atan(1/5) − atan(1/239)
+  const piN = 16n * atanInvScaled(5n, S) - 4n * atanInvScaled(239n, S);
+  // e = Σ 1/k! — accumulate term = S/k! by successive division.
+  let term = S;
+  let eSum = 0n;
+  for (let k = 1n; term > 0n; k++) {
+    eSum += term;
+    term /= k;
+  }
+  // phi = (1 + sqrt(5)) / 2
+  const sqrt5 = isqrt(5n * S * S);
+  const cut = 10n ** BigInt(CONST_GUARD);
+  return {
+    pi: makeRat(piN / cut, S / cut),
+    e: makeRat(eSum / cut, S / cut),
+    phi: makeRat(S / cut + sqrt5 / cut, 2n * (S / cut)),
+  };
+}
+
+const CONST_RATS = computeConstants();
+
+const PI_VAL = val(CONST_RATS.pi, true);
+const E_VAL = val(CONST_RATS.e, true);
 
 const CONSTANTS: Record<string, Value> = {
   pi: PI_VAL,
-  tau: val(rMul(parseDecimalRat(PI_50), rInt(2n)), true),
+  tau: val(rMul(CONST_RATS.pi, rInt(2n)), true),
   e: E_VAL,
-  phi: val(parseDecimalRat(PHI_50), true),
+  phi: val(CONST_RATS.phi, true),
 };
 
 // --- Exact helpers -----------------------------------------------------------------
@@ -285,6 +319,22 @@ interface FuncDef {
 function approxResult(args: Value[], f: (xs: number[]) => number): Value {
   const out = f(args.map((a) => rToNumber(a.r)));
   if (!Number.isFinite(out)) throw new MathError('Result is not a finite number');
+  return val(numberToRat(out), true, true);
+}
+
+/**
+ * Trig variant of approxResult: results that are zero to within double
+ * precision (|out| ≤ 1e-14 for arguments above 1e-6) snap to exact 0 —
+ * sin(pi), cos(pi/2), sind(180) return 0 instead of 1.2e-16-style dust.
+ * Genuinely small results (small arguments) are preserved untouched.
+ */
+function trigResult(args: Value[], f: (xs: number[]) => number): Value {
+  const out = f(args.map((a) => rToNumber(a.r)));
+  if (!Number.isFinite(out)) throw new MathError('Result is not a finite number');
+  const maxArg = Math.max(...args.map((a) => Math.abs(rToNumber(a.r))), 0);
+  if (maxArg > 1e-6 && Math.abs(out) <= 1e-14) {
+    return val({ n: 0n, d: 1n }, true, true);
+  }
   return val(numberToRat(out), true, true);
 }
 
@@ -420,17 +470,17 @@ const FUNCTIONS: Record<string, FuncDef> = {
   sind: {
     minArgs: 1,
     maxArgs: 1,
-    fn: (as) => approxResult(as, ([x]) => Math.sin((x * Math.PI) / 180)),
+    fn: (as) => trigResult(as, ([x]) => Math.sin((x * Math.PI) / 180)),
   },
   cosd: {
     minArgs: 1,
     maxArgs: 1,
-    fn: (as) => approxResult(as, ([x]) => Math.cos((x * Math.PI) / 180)),
+    fn: (as) => trigResult(as, ([x]) => Math.cos((x * Math.PI) / 180)),
   },
   tand: {
     minArgs: 1,
     maxArgs: 1,
-    fn: (as) => approxResult(as, ([x]) => Math.tan((x * Math.PI) / 180)),
+    fn: (as) => trigResult(as, ([x]) => Math.tan((x * Math.PI) / 180)),
   },
   asind: {
     minArgs: 1,
@@ -458,9 +508,9 @@ const FUNCTIONS: Record<string, FuncDef> = {
   },
   log2: { minArgs: 1, maxArgs: 1, fn: (as) => approxResult(as, ([x]) => Math.log2(x)) },
   log10: { minArgs: 1, maxArgs: 1, fn: (as) => approxResult(as, ([x]) => Math.log10(x)) },
-  sin: { minArgs: 1, maxArgs: 1, fn: (as) => approxResult(as, ([x]) => Math.sin(x)) },
-  cos: { minArgs: 1, maxArgs: 1, fn: (as) => approxResult(as, ([x]) => Math.cos(x)) },
-  tan: { minArgs: 1, maxArgs: 1, fn: (as) => approxResult(as, ([x]) => Math.tan(x)) },
+  sin: { minArgs: 1, maxArgs: 1, fn: (as) => trigResult(as, ([x]) => Math.sin(x)) },
+  cos: { minArgs: 1, maxArgs: 1, fn: (as) => trigResult(as, ([x]) => Math.cos(x)) },
+  tan: { minArgs: 1, maxArgs: 1, fn: (as) => trigResult(as, ([x]) => Math.tan(x)) },
   asin: { minArgs: 1, maxArgs: 1, fn: (as) => approxResult(as, ([x]) => Math.asin(x)) },
   acos: { minArgs: 1, maxArgs: 1, fn: (as) => approxResult(as, ([x]) => Math.acos(x)) },
   atan: { minArgs: 1, maxArgs: 1, fn: (as) => approxResult(as, ([x]) => Math.atan(x)) },
@@ -755,31 +805,38 @@ function terminatingDecimal(r: Rational): string | null {
   return s;
 }
 
-/** Decimal rendering: exact for integers/terminating decimals, else rounded to 30 significant digits. */
-function decimalString(r: Rational): string {
+/**
+ * Decimal rendering: exact for integers/terminating decimals, else rounded
+ * to `sig` significant digits. `allowExactTerminating: false` (used for
+ * approximate values) always takes the rounded path so constant-truncation
+ * dust beyond the rendered precision never surfaces.
+ */
+function decimalString(r: Rational, sig: number = DECIMAL_PRECISION, allowExactTerminating = true): string {
   if (r.n === 0n) return '0';
   if (rIsInt(r)) return r.n.toString();
-  const term = terminatingDecimal(r);
-  if (term !== null) return term;
+  if (allowExactTerminating) {
+    const term = terminatingDecimal(r);
+    if (term !== null) return term;
+  }
 
-  // |n|/d rounded to DECIMAL_PRECISION significant digits.
+  // |n|/d rounded to `sig` significant digits.
   const abs = rAbs(r);
   const dn = digits10(abs.n);
   const dd = digits10(abs.d);
-  const scale = BigInt(DECIMAL_PRECISION + 10 + Math.max(0, dd - dn));
+  const scale = BigInt(sig + 10 + Math.max(0, dd - dn));
   const q = (abs.n * 10n ** scale + abs.d / 2n) / abs.d;
   const D = digits10(q);
   let digits = q.toString();
   // q has D digits and value = q * 10^-scale, so `point` digits come before
   // the decimal point.
   let point = D - Number(scale);
-  if (digits.length > DECIMAL_PRECISION) {
-    const drop = BigInt(D - DECIMAL_PRECISION);
+  if (digits.length > sig) {
+    const drop = BigInt(D - sig);
     const p = 10n ** drop;
     const rounded = (q + p / 2n) / p;
     digits = rounded.toString();
     // Rounding 999…9 up adds a digit (value carried into the next place).
-    if (digits.length > DECIMAL_PRECISION) point += 1;
+    if (digits.length > sig) point += 1;
   }
   digits = digits.replace(/0+$/, '') || '0';
   let out: string;
@@ -838,7 +895,12 @@ export function evalMaths(expression: string): MathsResult | { error: string } {
       }
     }
 
-    const decimal = decimalString(r);
+    // Approximate values render at ≤ APPROX_RENDER_SIG significant digits
+    // (the constants' honest precision) — exact expansions of their
+    // terminating decimals would show truncation dust far past that.
+    const decimal = approx
+      ? decimalString(r, APPROX_RENDER_SIG, false)
+      : decimalString(r);
     let result: string;
     if (approx) {
       result = decimal;

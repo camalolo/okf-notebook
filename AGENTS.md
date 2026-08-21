@@ -196,9 +196,13 @@ scientific notation, constants (`pi`, `e`, `tau`, `phi`), and functions
 (`sqrt`, `cbrt`, `gcd`, `lcm`, `mod`, `fact`, `comb`, `round(x, digits)`,
 trig in radians or degrees — `sind`/`cosd`/`tand` take degrees directly,
 which beats `tan(deg(...))` — plus `ln`/`log` (natural)/`log10`/`log2`,
-`exp`). Double-based results are **snapped to 15 significant digits**
-(`sin(pi/6)` → `0.5`, `sqrt(2)^2` → `2`) and flagged `approximate`; purely
-rational chains of the 50-digit constants keep their full precision.
+`exp`). Constants (`pi`, `e`, `tau`, `phi`) are **computed at load to 120
+significant digits** (Machin's formula, Taylor series, isqrt — not typed
+strings), so rational chains like `phi^2 - phi` render dust-free; approx
+values render at ≤ 50 significant digits. Double-based results are
+**snapped to 15 significant digits** (`sin(pi/6)` → `0.5`, `sqrt(2)^2` →
+`2`) and trig dust at special angles snaps to zero (`sin(pi)` → `0`,
+`sind(180)` → `0`), all flagged `approximate`.
 Non-terminating fractions render as exact `n/d` plus a 30-significant-digit
 decimal; computation is size-capped (factorial ≤ 20000, exponent ≤ 100000,
 ≤ 100000 digits) and renders past 1000 characters are truncated with a
