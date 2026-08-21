@@ -229,21 +229,23 @@ const EVAL_MATHS_TOOL: ToolDefinition = {
     name: 'eval_maths',
     description:
       'Evaluate a mathematical expression with EXACT arithmetic (BigInt rationals — no floating-point ' +
-      'errors). Use this for ANY non-trivial calculation instead of computing mentally: sums, products, ' +
-      'percentages, ratios, powers, factorials, unit-free finance/quantity maths, etc. Supports ' +
-      '+ - * / % (spaced = modulo), ^ (power), ! (factorial), attached % (percent, e.g. 15%), ' +
-      'parentheses, implicit multiplication (2(3+4), 2pi), scientific notation (1.5e3), constants ' +
-      '(pi, e, tau, phi), and functions: abs min max gcd lcm mod pow sqrt cbrt floor ceil round trunc ' +
-      'sign fact factorial comb binom deg rad exp ln log log2 log10 sin cos tan asin acos atan sinh ' +
-      'cosh tanh. Rational results are exact (1/3 stays 1/3); irrational results (sqrt(2), pi, trig) ' +
-      'are approximate and flagged as such. Returns { result, decimal, fraction?, approximate? } or { error }.',
+      'errors: 0.1+0.2=0.3, 2^100 exact, 1/3 stays 1/3). Use this for ANY non-trivial calculation ' +
+      'instead of computing mentally. Supports + - * / ^ ! , parentheses, implicit multiplication ' +
+      '(2(3+4), 2pi), scientific notation (1.5e3), constants (pi, e, tau, phi), and functions: ' +
+      'sqrt cbrt abs min max gcd lcm mod pow floor ceil round trunc sign fact comb + trig in radians ' +
+      '(sin cos tan asin acos atan) or DEGREES (sind cosd tand asind acosd atand — prefer these for ' +
+      'degree angles) + exp ln log2 log10 (log(x) is NATURAL log; use log10/log2 for other bases). ' +
+      'Percent: attached % means ÷100 (50% = 0.5; write 200*(1-10%) for "200 minus 10 percent of 200"); ' +
+      'spaced a % b is modulo (7 % 3 = 1). Double-based functions (trig, logs, non-perfect roots) give ' +
+      '~15 significant digits and are flagged approximate. Returns { result, decimal, fraction?, ' +
+      'approximate? } or { error }.',
     parameters: {
       type: 'object',
       properties: {
         expression: {
           type: 'string',
           description:
-            'The expression to evaluate, e.g. "0.1 + 0.2", "2^100", "15% * 8400", "comb(52,5)", "(1+2/3)*12".',
+            'The expression to evaluate, e.g. "0.1 + 0.2", "2^100", "15% * 8400", "comb(52,5)", "tand(45)".',
         },
       },
       required: ['expression'],

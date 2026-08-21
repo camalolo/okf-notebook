@@ -121,7 +121,7 @@ describe('evalMaths — functions', () => {
 
   it('flags approximate results', () => {
     expect(res('sqrt(2)').approximate).toBe(true);
-    expect(res('sqrt(2)').result.startsWith('1.4142135623730951')).toBe(true);
+    expect(res('sqrt(2)').result.startsWith('1.4142135623731')).toBe(true); // 15-digit snap
     expect(res('pi').approximate).toBe(true);
     expect(res('2*pi').approximate).toBe(true);
     expect(res('ln(10)').approximate).toBe(true);
@@ -135,6 +135,37 @@ describe('evalMaths — functions', () => {
     // Exactness propagates through mixed expressions.
     expect(res('1 + sqrt(4)').approximate).toBe(false);
     expect(res('1 + sqrt(4)').result).toBe('3');
+  });
+
+  it('snaps double-based results to 15 significant digits (float64 noise cleanup)', () => {
+    expect(res('sqrt(2)^2').result).toBe('2'); // was 2.000000000000000444…
+    expect(res('sin(pi/6)').result).toBe('0.5'); // was 0.49999999999999994
+    expect(res('cbrt(-8)').result).toBe('-2');
+    // Purely rational chains of approximate constants keep their ~50 honest
+    // digits — only double-based functions are snapped.
+    expect(res('pi').decimal.startsWith('3.141592653589793238462643383279')).toBe(true);
+    expect(res('2*pi*6371').decimal.length).toBeGreaterThan(20);
+  });
+
+  it('degree-based trig: sind/cosd/tand and inverses', () => {
+    expect(res('sind(30)').result).toBe('0.5');
+    expect(res('sind(90)').result).toBe('1');
+    expect(res('cosd(60)').result).toBe('0.5');
+    expect(res('tand(45)').result).toBe('1');
+    expect(res('asind(0.5)').result).toBe('30');
+    expect(res('atand(1)').result).toBe('45');
+    expect(res('sind(30)').approximate).toBe(true);
+  });
+
+  it('gives a helpful error for negative bases with fractional exponents', () => {
+    expect(err('(-8)^(1/3)')).toMatch(/cbrt|real/i);
+  });
+
+  it('truncates huge renders with a note (keeps tool output bounded)', () => {
+    const r = evalMaths('2^4000') as { result: string; approximate: boolean; fraction?: string };
+    expect(r.approximate).toBe(false);
+    expect(r.result).toContain('truncated');
+    expect(r.result.length).toBeLessThan(1100);
   });
 });
 

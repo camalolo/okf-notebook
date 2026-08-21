@@ -190,15 +190,20 @@ never advertises tools the request doesn't have.
 `server/lib/maths.ts` evaluates expressions with **exact BigInt rational
 arithmetic** — no floating-point error (`0.1 + 0.2` → `0.3`, `9.99 * 100` →
 `999`, `2^128 - 1` exact). Available to all roles (part of
-`READONLY_TOOLS` in `chat.ts`). Supports `+ - * / %` (spaced `%` = modulo),
-`^`, `!`, attached `%` (percent: `15% * 8400`), implicit multiplication
-(`2(3+4)`, `2pi`), scientific notation, constants (`pi`, `e`, `tau`, `phi`),
-and functions (`sqrt`, `gcd`, `lcm`, `mod`, `fact`, `comb`, `round(x, digits)`,
-trig/log/exp — the irrational ones fall back to doubles and are flagged
-`approximate` in the result). Non-terminating fractions render as exact
-`n/d` plus a 30-significant-digit decimal; results are size-capped (factorial
-≤ 20000, exponent ≤ 100000, ≤ 100000 digits) so the tool can't hang the loop.
-The system prompt tells the LLM to call it for any non-trivial arithmetic.
+`READONLY_TOOLS` in `chat.ts`). Supports `+ - * /` (spaced `%` = modulo,
+attached `%` = ÷100), `^`, `!`, implicit multiplication (`2(3+4)`, `2pi`),
+scientific notation, constants (`pi`, `e`, `tau`, `phi`), and functions
+(`sqrt`, `cbrt`, `gcd`, `lcm`, `mod`, `fact`, `comb`, `round(x, digits)`,
+trig in radians or degrees — `sind`/`cosd`/`tand` take degrees directly,
+which beats `tan(deg(...))` — plus `ln`/`log` (natural)/`log10`/`log2`,
+`exp`). Double-based results are **snapped to 15 significant digits**
+(`sin(pi/6)` → `0.5`, `sqrt(2)^2` → `2`) and flagged `approximate`; purely
+rational chains of the 50-digit constants keep their full precision.
+Non-terminating fractions render as exact `n/d` plus a 30-significant-digit
+decimal; computation is size-capped (factorial ≤ 20000, exponent ≤ 100000,
+≤ 100000 digits) and renders past 1000 characters are truncated with a
+note so the tool can't flood the chat context. The system prompt tells the
+LLM to call it for any non-trivial arithmetic.
 
 ### LLM backend (`server/lib/llm.ts`)
 

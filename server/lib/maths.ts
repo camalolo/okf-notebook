@@ -119,21 +119,29 @@ function parseDecimalRat(s: string): Rational {
   return makeRat(n, 10n ** BigInt(frac.length));
 }
 
-// --- Values (rational + exactness flag) ------------------------------------------
+// --- Values (rational + exactness flags) ------------------------------------------
 
 interface Value {
   r: Rational;
   /** True when the value derives from an irrational/approximate operation. */
   approx: boolean;
+  /**
+   * True when the value passed through an IEEE double at some point, so its
+   * digits beyond ~15-17 significant figures are float64 noise. Purely
+   * rational chains of approximate constants (pi, phi) keep ~50 honest
+   * digits and stay `dbl: false` until a double-based function is called.
+   */
+  dbl?: boolean;
 }
 
-const val = (r: Rational, approx = false): Value => ({ r, approx });
+const val = (r: Rational, approx = false, dbl = false): Value => ({ r, approx, dbl });
 const anyApprox = (vs: Value[]): boolean => vs.some((v) => v.approx);
-const vAdd = (a: Value, b: Value): Value => val(rAdd(a.r, b.r), a.approx || b.approx);
-const vSub = (a: Value, b: Value): Value => val(rSub(a.r, b.r), a.approx || b.approx);
-const vMul = (a: Value, b: Value): Value => val(rMul(a.r, b.r), a.approx || b.approx);
-const vDiv = (a: Value, b: Value): Value => val(rDiv(a.r, b.r), a.approx || b.approx);
-const vNeg = (a: Value): Value => val(rNeg(a.r), a.approx);
+const anyDbl = (vs: Value[]): boolean => vs.some((v) => v.dbl);
+const vAdd = (a: Value, b: Value): Value => val(rAdd(a.r, b.r), a.approx || b.approx, a.dbl || b.dbl);
+const vSub = (a: Value, b: Value): Value => val(rSub(a.r, b.r), a.approx || b.approx, a.dbl || b.dbl);
+const vMul = (a: Value, b: Value): Value => val(rMul(a.r, b.r), a.approx || b.approx, a.dbl || b.dbl);
+const vDiv = (a: Value, b: Value): Value => val(rDiv(a.r, b.r), a.approx || b.approx, a.dbl || b.dbl);
+const vNeg = (a: Value): Value => val(rNeg(a.r), a.approx, a.dbl);
 
 // --- Errors / limits --------------------------------------------------------------
 
@@ -256,7 +264,12 @@ function comb(n: bigint, k: bigint): bigint {
 
 /** pow for Values: exact for integer exponents, approximate otherwise. */
 function powValue(base: Value, exp: Value): Value {
-  if (rIsInt(exp.r)) return val(rPowInt(base.r, exp.r.n), base.approx || exp.approx);
+  if (rIsInt(exp.r)) return val(rPowInt(base.r, exp.r.n), base.approx || exp.approx, base.dbl || exp.dbl);
+  if (base.r.n < 0n) {
+    throw new MathError(
+      'Negative base with a fractional exponent has no real result — use cbrt() for cube roots',
+    );
+  }
   return approxResult([base, exp], ([x, y]) => x ** y);
 }
 
@@ -272,18 +285,18 @@ interface FuncDef {
 function approxResult(args: Value[], f: (xs: number[]) => number): Value {
   const out = f(args.map((a) => rToNumber(a.r)));
   if (!Number.isFinite(out)) throw new MathError('Result is not a finite number');
-  return val(numberToRat(out), true);
+  return val(numberToRat(out), true, true);
 }
 
 const FUNCTIONS: Record<string, FuncDef> = {
-  abs: { minArgs: 1, maxArgs: 1, fn: ([a]) => val(rAbs(a.r), a.approx) },
+  abs: { minArgs: 1, maxArgs: 1, fn: ([a]) => val(rAbs(a.r), a.approx, a.dbl) },
   min: {
     minArgs: 1,
     maxArgs: 16,
     fn: (as) => {
       let best = as[0]!;
       for (const a of as) if (rCmp(a.r, best.r) < 0) best = a;
-      return val(best.r, anyApprox(as));
+      return val(best.r, anyApprox(as), anyDbl(as));
     },
   },
   max: {
@@ -292,7 +305,7 @@ const FUNCTIONS: Record<string, FuncDef> = {
     fn: (as) => {
       let best = as[0]!;
       for (const a of as) if (rCmp(a.r, best.r) > 0) best = a;
-      return val(best.r, anyApprox(as));
+      return val(best.r, anyApprox(as), anyDbl(as));
     },
   },
   gcd: {
@@ -335,7 +348,7 @@ const FUNCTIONS: Record<string, FuncDef> = {
     maxArgs: 1,
     fn: ([a]) => {
       const exact = sqrtExact(a.r);
-      if (exact) return val(exact, a.approx);
+      if (exact) return val(exact, a.approx, a.dbl);
       return approxResult([a], ([x]) => Math.sqrt(x));
     },
   },
@@ -348,36 +361,36 @@ const FUNCTIONS: Record<string, FuncDef> = {
         const ic = icbrt(a.r.n);
         const dc = icbrt(a.r.d);
         if (ic * ic * ic === a.r.n && dc * dc * dc === a.r.d) {
-          return val(makeRat(ic, dc), a.approx);
+          return val(makeRat(ic, dc), a.approx, a.dbl);
         }
       }
       return approxResult([a], ([x]) => Math.cbrt(x));
     },
   },
-  floor: { minArgs: 1, maxArgs: 1, fn: ([a]) => val(rInt(rFloor(a.r)), a.approx) },
-  ceil: { minArgs: 1, maxArgs: 1, fn: ([a]) => val(rInt(rCeil(a.r)), a.approx) },
+  floor: { minArgs: 1, maxArgs: 1, fn: ([a]) => val(rInt(rFloor(a.r)), a.approx, a.dbl) },
+  ceil: { minArgs: 1, maxArgs: 1, fn: ([a]) => val(rInt(rCeil(a.r)), a.approx, a.dbl) },
   trunc: {
     minArgs: 1,
     maxArgs: 1,
-    fn: ([a]) => val(rInt(a.r.n / a.r.d), a.approx),
+    fn: ([a]) => val(rInt(a.r.n / a.r.d), a.approx, a.dbl),
   },
   round: {
     minArgs: 1,
     maxArgs: 2,
     fn: ([a, b]) => {
       const digits = b === undefined ? 0 : Number(requireInt(b.r, 'round() digits'));
-      return val(rRound(a.r, digits), a.approx || (b?.approx ?? false));
+      return val(rRound(a.r, digits), a.approx || (b?.approx ?? false), a.dbl || (b?.dbl ?? false));
     },
   },
   sign: {
     minArgs: 1,
     maxArgs: 1,
-    fn: ([a]) => val(rInt(a.r.n === 0n ? 0n : a.r.n < 0n ? -1n : 1n), a.approx),
+    fn: ([a]) => val(rInt(a.r.n === 0n ? 0n : a.r.n < 0n ? -1n : 1n), a.approx, a.dbl),
   },
   fact: {
     minArgs: 1,
     maxArgs: 1,
-    fn: ([a]) => val(rInt(factorial(requireInt(a.r, 'fact()'))), a.approx),
+    fn: ([a]) => val(rInt(factorial(requireInt(a.r, 'fact()'))), a.approx, a.dbl),
   },
   comb: {
     minArgs: 2,
@@ -386,9 +399,12 @@ const FUNCTIONS: Record<string, FuncDef> = {
       val(
         rInt(comb(requireInt(n.r, 'comb() n'), requireInt(k.r, 'comb() k'))),
         n.approx || k.approx,
+        n.dbl || k.dbl,
       ),
   },
-  // Degree/radian conversion — involves pi, so always approximate.
+  // Degree/radian conversion — involves pi, so approximate. NB direction:
+  // deg(x) converts RADIANS→DEGREES, rad(x) converts DEGREES→RADIANS. For
+  // "tan of 45 degrees" prefer tand(45) — tan(deg(45)) is the classic trap.
   deg: {
     minArgs: 1,
     maxArgs: 1,
@@ -398,6 +414,38 @@ const FUNCTIONS: Record<string, FuncDef> = {
     minArgs: 1,
     maxArgs: 1,
     fn: ([a]) => vDiv(vMul(a, PI_VAL), val(rInt(180n))),
+  },
+  // Degree-based trig — angles in, angles out (asind etc.), so the model
+  // never needs the deg/rad converters in the common case.
+  sind: {
+    minArgs: 1,
+    maxArgs: 1,
+    fn: (as) => approxResult(as, ([x]) => Math.sin((x * Math.PI) / 180)),
+  },
+  cosd: {
+    minArgs: 1,
+    maxArgs: 1,
+    fn: (as) => approxResult(as, ([x]) => Math.cos((x * Math.PI) / 180)),
+  },
+  tand: {
+    minArgs: 1,
+    maxArgs: 1,
+    fn: (as) => approxResult(as, ([x]) => Math.tan((x * Math.PI) / 180)),
+  },
+  asind: {
+    minArgs: 1,
+    maxArgs: 1,
+    fn: (as) => approxResult(as, ([x]) => (Math.asin(x) * 180) / Math.PI),
+  },
+  acosd: {
+    minArgs: 1,
+    maxArgs: 1,
+    fn: (as) => approxResult(as, ([x]) => (Math.acos(x) * 180) / Math.PI),
+  },
+  atand: {
+    minArgs: 1,
+    maxArgs: 1,
+    fn: (as) => approxResult(as, ([x]) => (Math.atan(x) * 180) / Math.PI),
   },
   // Approximate (double-based) functions.
   exp: { minArgs: 1, maxArgs: 1, fn: (as) => approxResult(as, ([x]) => Math.exp(x)) },
@@ -757,6 +805,16 @@ export interface MathsResult {
   approximate: boolean;
 }
 
+/** Past this length, rendered numbers are truncated (with a note) to keep
+ *  LLM tool results bounded — e.g. 2^100000 would otherwise return ~30k digits. */
+const MAX_RENDER_CHARS = 1000;
+
+function capRender(s: string): string {
+  return s.length <= MAX_RENDER_CHARS
+    ? s
+    : `${s.slice(0, MAX_RENDER_CHARS)}… [${s.length} digits total, truncated for display]`;
+}
+
 /** Evaluate a maths expression. Returns the result, or `{ error }` on failure. */
 export function evalMaths(expression: string): MathsResult | { error: string } {
   try {
@@ -764,7 +822,21 @@ export function evalMaths(expression: string): MathsResult | { error: string } {
     if (tokens.length === 1 && tokens[0]!.t === 'end') {
       return { error: 'Expression is empty' };
     }
-    const { r, approx } = new Parser(tokens).parse();
+    const { r: parsed, approx, dbl } = new Parser(tokens).parse();
+
+    // Values that passed through a double only carry ~15-17 significant
+    // digits of truth; snap them to 15 so float64 noise doesn't surface
+    // (sin(pi/6) → 0.5, sqrt(2)^2 → 2, tand(45) → 1). Purely rational
+    // chains of approximate constants (pi, 2*pi*6371) keep their full
+    // ~50-digit precision — those digits are genuinely correct.
+    let r = parsed;
+    if (dbl) {
+      try {
+        r = numberToRat(Number(rToNumber(r).toPrecision(15)));
+      } catch {
+        // Out of double range — keep the exact value as-is.
+      }
+    }
 
     const decimal = decimalString(r);
     let result: string;
@@ -778,9 +850,9 @@ export function evalMaths(expression: string): MathsResult | { error: string } {
     }
     return {
       expression,
-      result,
-      decimal,
-      ...(rIsInt(r) ? {} : { fraction: `${r.n}/${r.d}` }),
+      result: capRender(result),
+      decimal: capRender(decimal),
+      ...(rIsInt(r) ? {} : { fraction: capRender(`${r.n}/${r.d}`) }),
       approximate: approx,
     };
   } catch (err) {
