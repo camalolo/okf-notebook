@@ -356,3 +356,29 @@ describe('restoreFromEvents — openTurnLive (recovery of a running turn)', () =
     expect(b.messages).toEqual(a.messages); // identical settled view
   });
 });
+
+describe('restoreFromEvents — interrupted-turn resume flag', () => {
+  it('flags a timeline ending with the sweep-interrupted turn_end', () => {
+    const events: StoredEvent[] = [
+      { ts: '0', seq: 0, kind: 'user', content: 'hi' },
+      { ts: '1', seq: 1, kind: 'tool', toolCall: { name: 'read_file', args: {}, result: 'x' } },
+      { ts: '2', seq: 2, kind: 'turn_end', interrupted: true },
+    ];
+    const restored = restoreFromEvents(events);
+    expect(restored.lastTurnInterrupted).toBe(true);
+    // The interrupted turn still renders with the placeholder message.
+    expect(restored.messages[restored.messages.length - 1].content).toContain('interrupted');
+  });
+
+  it('does not flag a running turn (openTurnLive) even after an older interrupted one', () => {
+    const events: StoredEvent[] = [
+      { ts: '0', seq: 0, kind: 'user', content: 'a' },
+      { ts: '1', seq: 1, kind: 'turn_end', interrupted: true },
+      { ts: '2', seq: 2, kind: 'user', content: 'b' },
+      { ts: '3', seq: 3, kind: 'tool', toolCall: { name: 'web_search', args: {}, result: 'y' } },
+    ];
+    const restored = restoreFromEvents(events, { openTurnLive: true });
+    expect(restored.lastTurnInterrupted).toBe(false);
+    expect(restored.liveTurnEvents).toHaveLength(1);
+  });
+});

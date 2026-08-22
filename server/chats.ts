@@ -22,7 +22,10 @@ export interface StoredEvent {
   seq?: number; // monotonic sequence number (for resumability)
   // 'turn_end' marks the definitive end of an assistant turn (completion,
   // error, or abort). Clients polling a background turn wait for it.
+  // `interrupted: true` marks a synthetic turn_end written by the boot sweep
+  // for a turn killed by a restart/crash — clients offer a Resume button.
   kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error' | 'compaction' | 'turn_end';
+  interrupted?: boolean;
   content?: string; // for user/assistant/error
   toolCall?: { name: string; args: Record<string, unknown>; result?: unknown };
   change?: {
@@ -294,7 +297,7 @@ export async function finalizeOrphanedTurns(): Promise<number> {
         if (!Array.isArray(chat.events) || isLastTurnTerminated(chat.events)) continue;
         const lastEvent = chat.events[chat.events.length - 1];
         const seq = lastEvent ? (lastEvent.seq ?? chat.events.length - 1) + 1 : 0;
-        chat.events.push({ ts: new Date().toISOString(), seq, kind: 'turn_end' });
+        chat.events.push({ ts: new Date().toISOString(), seq, kind: 'turn_end', interrupted: true });
         chat.updatedAt = new Date().toISOString();
         await fs.writeFile(file, JSON.stringify(chat, null, 2) + '\n', 'utf8');
         repaired++;

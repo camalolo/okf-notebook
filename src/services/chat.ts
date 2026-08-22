@@ -67,15 +67,20 @@ export async function* streamChat(
   messages: ChatMessage[],
   chatId?: string | null,
   signal?: AbortSignal,
+  opts?: { resume?: boolean },
 ): AsyncGenerator<ChatSSEEvent> {
-  logChat('log', `→ POST /bundles/${bundleId}/chat (${messages.length} msgs, chatId=${chatId ?? 'none'})`);
+  logChat('log', `→ POST /bundles/${bundleId}/chat (${messages.length} msgs, chatId=${chatId ?? 'none'}${opts?.resume ? ', resume' : ''})`);
 
   const res = await fetch(
     `/api/notebook/bundles/${encodeURIComponent(bundleId)}/chat`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, chatId: chatId ?? undefined }),
+      body: JSON.stringify({
+        messages,
+        chatId: chatId ?? undefined,
+        ...(opts?.resume ? { resume: true } : {}),
+      }),
       signal,
     },
   );

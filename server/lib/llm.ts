@@ -200,12 +200,22 @@ export function discoveredContextLimit(model: string): number | undefined {
  * @param tools     Optional function-calling tool definitions.
  * @returns The assistant message's content and any tool calls.
  */
+export interface CompletionOptions {
+  /** Disable extended thinking (bundle setting). See StreamOptions.thinking. */
+  thinking?: 'off';
+  log?: ChatLogger;
+}
+
 export async function chatCompletion(
   messages: ChatMessage[],
   tools?: ToolDefinition[],
-  log?: ChatLogger,
+  opts?: CompletionOptions,
 ): Promise<ChatCompletionResult> {
-  return chatCompletionStream(messages, tools, { onDelta: () => {}, log });
+  return chatCompletionStream(messages, tools, {
+    onDelta: () => {},
+    ...(opts?.thinking ? { thinking: opts.thinking } : {}),
+    log: opts?.log,
+  });
 }
 
 // --- Retry / backoff --------------------------------------------------------

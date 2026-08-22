@@ -141,6 +141,15 @@ drops (mobile network blip, tab close, proxy timeout), ending with a
 `loadChat` until `turn_end` appears (ChatPanel's recovery poll / background
 watcher) and then rebuilds state from the timeline.
 
+**Resume of interrupted turns**: a restart/crash mid-turn leaves the turn
+dead; the boot sweep closes it with `turn_end {interrupted: true}` and the
+client offers a **↻ Resume** button. `POST …/chat` with `{chatId, resume:
+true, messages: []}` makes the server rebuild the history from the timeline
+via `buildResumeMessages` (`server/lib/resume.ts`) — the interrupted turn's
+tool calls AND results are replayed as assistant `tool_calls` + `tool`
+messages (synthesized `call_resume_*` ids), so the model continues from its
+actual working state. The old user message is not re-persisted.
+
 **Retry on transient LLM failures**: `chatCompletionStream` retries
 pre-stream HTTP failures (429/5xx) internally; the chat loop adds a
 turn-level retry (up to 3 retries, exponential backoff) that also covers
@@ -230,6 +239,12 @@ PUT validates the id against that list. An optional `LLM_MODELS_FILTER` env
 regex curates which ids the dropdown offers (useful behind a routing proxy
 with a huge catalog). Changes take effect on the next request — no restart
 needed.
+
+`thinking: {type: "disabled"}` is sent whenever a bundle has not opted
+into extended thinking (`bundle.thinking`, Settings → Chat/Digest…). This
+applies to chat AND to every background LLM task — digest, OKF cleanup,
+retitle, compaction, upload naming — all inherit the bundle's setting via
+`chatCompletion`/`runReadOnlyTask`'s `thinking: 'off'` option.
 
 Two functions are exported: `chatCompletionStream` (used by the chat route —
 streams content deltas via a callback, accumulates tool-call fragments across

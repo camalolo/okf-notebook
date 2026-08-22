@@ -117,6 +117,8 @@ export interface StoredEvent {
   ts: string;
   seq?: number; // monotonic sequence number (for resumability)
   kind: 'user' | 'assistant' | 'tool' | 'proposed' | 'error' | 'compaction' | 'turn_end';
+  /** On turn_end: written by the boot sweep for a restart-killed turn (resumable). */
+  interrupted?: boolean;
   content?: string;
   toolCall?: ToolCallInfo;
   change?: ProposedChange;

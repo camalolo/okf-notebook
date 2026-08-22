@@ -321,6 +321,8 @@ export async function runDigestForBundle(
     const google = await resolveGoogleTools(bundle, log);
     const result = await runReadOnlyTask(bundle, DIGEST_TASK_PROMPT, {
       log,
+      // Inherit the bundle's thinking setting.
+      thinking: bundle.thinking === 'on' ? undefined : 'off',
       maxIterations: 20,
       extraTools: [...GIT_TOOLS, ...DIGEST_DECISION_TOOLS],
       terminalTools: TERMINAL_TOOLS,

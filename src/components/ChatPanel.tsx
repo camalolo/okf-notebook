@@ -8,6 +8,7 @@ import type {
   ChatSession,
   ChatSummary,
   ProposedChange,
+  StoredEvent,
   ToolCallInfo,
   TurnEvent,
 } from '../types.ts';
@@ -314,6 +315,8 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   const [loading, setLoading] = useState(false);
   /** True while reconnecting after a stream drop (shows badge, keeps loading state). */
   const [reconnecting, setReconnecting] = useState(false);
+  /** The last turn was interrupted (server restart) and can be resumed. */
+  const [resumable, setResumable] = useState(false);
   /** Chronological events for the in-flight assistant turn. */
   const [turnEvents, setTurnEvents] = useState<TurnEvent[]>([]);
   /** Completed turns — preserves tool calls + proposed changes in order. */
@@ -500,6 +503,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     setCompactionIndex(restored.compactionIndex);
     compactionIndexRef.current = restored.compactionIndex;
     setTurnEvents([]);
+    setResumable(restored.lastTurnInterrupted);
   }, []);
 
   /**
@@ -516,6 +520,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     setCompactionIndex(restored.compactionIndex);
     compactionIndexRef.current = restored.compactionIndex;
     setTurnEvents(restored.liveTurnEvents);
+    setResumable(restored.lastTurnInterrupted);
   }, []);
 
   /** Fetch the current git status and update the badge. Best-effort. */
@@ -635,85 +640,29 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   // Cleanup camera on unmount
   useEffect(() => stopCamera, [stopCamera]);
 
-  const handleSend = useCallback(async () => {
-    const rawText = input.trim();
-    if ((!rawText && pendingFiles.length === 0) || loading || uploading) return;
-    stoppedRef.current = false;
-    watchGenRef.current++; // cancel any background-turn watcher
-
-    // Auto-create a chat session on first message (if none active).
-    if (chatIdRef.current === null) {
-      try {
-        const session = await createChat(bundleId);
-        setChatId(session.id);
-        chatIdRef.current = session.id;
-      } catch {
-        // Non-fatal: continue with an ephemeral chat.
-      }
-    }
-
-    // Upload pending files (all in parallel) and build the attachment note.
-    let attachmentNote = '';
-    if (pendingFiles.length > 0) {
-      setUploading(true);
-      const results = await Promise.allSettled(
-        pendingFiles.map((f) => uploadFile(bundleId, f)),
-      );
-      setUploading(false);
-
-      const ok = results
-        .filter((r): r is PromiseFulfilledResult<UploadResult> => r.status === 'fulfilled')
-        .map((r) => r.value);
-      const failures = results.filter((r) => r.status === 'rejected');
-
-      if (ok.length > 0) {
-        attachmentNote = ok
-          .map((a) =>
-            a.duplicate
-              ? `📎 Duplicate upload: "${a.sourceName}" is already in this bundle at ${a.mdPath} (unchanged, not re-imported). Inform the user and reference the existing file.`
-              : `📎 Attached: ${a.sourceName} → ${a.mdPath}`,
-          )
-          .join('\n') + '\n\n';
-      }
-      if (failures.length > 0) {
-        const failedNames = pendingFiles
-          .filter((_, i) => results[i].status === 'rejected')
-          .map((f) => f.name)
-          .join(', ');
-        attachmentNote += `[Upload failed for: ${failedNames}]\n\n`;
-      }
-      onFilesChanged?.();
-    }
-
-    // Build final message text.
-    const userText = rawText || (attachmentNote ? 'Please refer to this contents:' : '');
-    const text = attachmentNote + userText;
-
-    const userMsg: ChatMessage = { role: 'user', content: text };
-    // Capture the pre-turn state so we can compute the final snapshot for both
-    // the UI and persistence without relying on state updated mid-stream.
-    const history = [...messagesRef.current, userMsg];
-    // For the API call, only send messages from the last compaction summary
-    // onwards — earlier messages have been summarised.
-    const startIdx = compactionIndexRef.current ?? 0;
-    const apiMessages = [...messagesRef.current.slice(startIdx), userMsg];
-    // The UI may have consecutive assistant messages (split at tool-call
-    // boundaries). Merge them for the API call to keep alternating roles.
-    const apiHistory = mergeConsecutiveAssistants(apiMessages);
-    const preTurnPastTurns = pastTurnsRef.current;
-
-    setInput('');
-    setPendingFiles([]);
-    if (inputRef.current) inputRef.current.style.height = 'auto';
-    setTurnEvents([]);
-    setLoading(true);
-    setMessages(history);
-
+  /**
+   * Shared turn runner: streams one chat turn to completion and owns the
+   * event switch, drop recovery, STOP sync, and finalization. Used by both
+   * handleSend (new user message) and handleResume (continue an interrupted
+   * turn — the server rebuilds the history from the timeline in that case,
+   * so apiHistory is empty).
+   */
+  const runTurn = useCallback(async (opts: {
+    /** Messages for the API (empty in resume mode — server-side reconstruction). */
+    apiHistory: ChatMessage[];
+    /** History the turn's output is appended to (finalization base). */
+    baseMessages: ChatMessage[];
+    basePastTurns: TurnEvent[][];
+    resume?: boolean;
+    /** Recovery-poll completion predicate over the server timeline. */
+    isComplete: (events: StoredEvent[]) => boolean;
+  }) => {
     const controller = new AbortController();
     abortRef.current = controller;
     // New turn: the exact-context override from the previous turn no longer
     // applies (history grew) until the first usage event of this turn.
     setExactPromptTokens(null);
+    const { resume = false, isComplete } = opts;
 
     // Local tracking for this turn (mirrors the setTurnEvents/setProposedChanges
     // calls so we can compute the final snapshot accurately).
@@ -726,7 +675,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     let streamErr: unknown = null;
 
     try {
-      for await (const ev of streamChat(bundleId, apiHistory, chatIdRef.current, controller.signal)) {
+      for await (const ev of streamChat(bundleId, opts.apiHistory, chatIdRef.current, controller.signal, resume ? { resume: true } : undefined)) {
         const data = ev.data;
 
         if (ev.event === 'usage') {
@@ -886,7 +835,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             await new Promise((r) => setTimeout(r, i === 0 ? 1500 : 1000));
             try {
               const session = await loadChat(bundleId, id);
-              if (isTurnComplete(session.events, text)) {
+              if (isComplete(session.events)) {
                 applySession(session);
                 setLoading(false);
                 abortRef.current = null;
@@ -923,7 +872,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             }
             try {
               const session = await loadChat(bundleId, id);
-              if (isTurnComplete(session.events, text)) {
+              if (isComplete(session.events)) {
                 applySession(session);
                 setLoading(false);
                 setReconnecting(false);
@@ -953,7 +902,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             await new Promise((r) => setTimeout(r, 2000));
             try {
               const session = await loadChat(bundleId, id);
-              if (isTurnComplete(session.events, text)) {
+              if (isComplete(session.events)) {
                 applySession(session);
                 setLoading(false);
                 abortRef.current = null;
@@ -1012,8 +961,8 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     }
 
     // If there were no events at all, keep history unchanged.
-    const finalMessages = segMessages.length > 0 ? [...history, ...segMessages] : history;
-    const finalPastTurns = segMessages.length > 0 ? [...preTurnPastTurns, ...segTurns] : preTurnPastTurns;
+    const finalMessages = segMessages.length > 0 ? [...opts.baseMessages, ...segMessages] : opts.baseMessages;
+    const finalPastTurns = segMessages.length > 0 ? [...opts.basePastTurns, ...segTurns] : opts.basePastTurns;
 
     // Commit to state.
     setMessages(finalMessages);
@@ -1023,7 +972,125 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
     // Refresh chat list (server is now source of truth for persistence + title).
     void refreshChatList();
-  }, [bundleId, input, loading, uploading, pendingFiles, appendContent, applySession, onFilesChanged, refreshGitStatus, refreshChatList]);
+  }, [bundleId, appendContent, applySession, applyPartialSession, onFilesChanged, refreshGitStatus, refreshChatList]);
+
+  /**
+   * Resume the last interrupted turn (killed by a server restart, closed by
+   * the boot sweep): the server reconstructs the full working state —
+   * including the interrupted turn's tool results — and the model continues
+   * from there. No new user message is created.
+   */
+  const handleResume = useCallback(async () => {
+    const id = chatIdRef.current;
+    if (!id || loading) return;
+    try {
+      const session = await loadChat(bundleId, id);
+      if (!session) return;
+      const snapshotLen = session.events.length;
+      watchGenRef.current++; // cancel any background watcher
+      stoppedRef.current = false;
+      setResumable(false);
+      setLoading(true);
+      await runTurn({
+        apiHistory: [],
+        baseMessages: messagesRef.current,
+        basePastTurns: pastTurnsRef.current,
+        resume: true,
+        // The resumed turn adds NO user event, so completion = new events
+        // landed after our snapshot AND the last turn closed.
+        isComplete: (events) => events.length > snapshotLen && isLastTurnComplete(events),
+      });
+    } catch {
+      // Server-side resume rejected or network failed before the stream
+      // opened — restore the button.
+      setResumable(true);
+      setLoading(false);
+    }
+  }, [bundleId, loading, runTurn]);
+
+
+
+  const handleSend = useCallback(async () => {
+    const rawText = input.trim();
+    if ((!rawText && pendingFiles.length === 0) || loading || uploading) return;
+    stoppedRef.current = false;
+    watchGenRef.current++; // cancel any background-turn watcher
+
+    // Auto-create a chat session on first message (if none active).
+    if (chatIdRef.current === null) {
+      try {
+        const session = await createChat(bundleId);
+        setChatId(session.id);
+        chatIdRef.current = session.id;
+      } catch {
+        // Non-fatal: continue with an ephemeral chat.
+      }
+    }
+
+    // Upload pending files (all in parallel) and build the attachment note.
+    let attachmentNote = '';
+    if (pendingFiles.length > 0) {
+      setUploading(true);
+      const results = await Promise.allSettled(
+        pendingFiles.map((f) => uploadFile(bundleId, f)),
+      );
+      setUploading(false);
+
+      const ok = results
+        .filter((r): r is PromiseFulfilledResult<UploadResult> => r.status === 'fulfilled')
+        .map((r) => r.value);
+      const failures = results.filter((r) => r.status === 'rejected');
+
+      if (ok.length > 0) {
+        attachmentNote = ok
+          .map((a) =>
+            a.duplicate
+              ? `📎 Duplicate upload: "${a.sourceName}" is already in this bundle at ${a.mdPath} (unchanged, not re-imported). Inform the user and reference the existing file.`
+              : `📎 Attached: ${a.sourceName} → ${a.mdPath}`,
+          )
+          .join('\n') + '\n\n';
+      }
+      if (failures.length > 0) {
+        const failedNames = pendingFiles
+          .filter((_, i) => results[i].status === 'rejected')
+          .map((f) => f.name)
+          .join(', ');
+        attachmentNote += `[Upload failed for: ${failedNames}]\n\n`;
+      }
+      onFilesChanged?.();
+    }
+
+    // Build final message text.
+    const userText = rawText || (attachmentNote ? 'Please refer to this contents:' : '');
+    const text = attachmentNote + userText;
+
+    const userMsg: ChatMessage = { role: 'user', content: text };
+    // Capture the pre-turn state so we can compute the final snapshot for both
+    // the UI and persistence without relying on state updated mid-stream.
+    const history = [...messagesRef.current, userMsg];
+    // For the API call, only send messages from the last compaction summary
+    // onwards — earlier messages have been summarised.
+    const startIdx = compactionIndexRef.current ?? 0;
+    const apiMessages = [...messagesRef.current.slice(startIdx), userMsg];
+    // The UI may have consecutive assistant messages (split at tool-call
+    // boundaries). Merge them for the API call to keep alternating roles.
+    const apiHistory = mergeConsecutiveAssistants(apiMessages);
+    const preTurnPastTurns = pastTurnsRef.current;
+
+    setInput('');
+    setPendingFiles([]);
+    if (inputRef.current) inputRef.current.style.height = 'auto';
+    setTurnEvents([]);
+    setLoading(true);
+    setMessages(history);
+
+    await runTurn({
+      apiHistory,
+      baseMessages: history,
+      basePastTurns: preTurnPastTurns,
+      isComplete: (events) => isTurnComplete(events, text),
+    });
+  }, [bundleId, input, loading, uploading, pendingFiles, appendContent, onFilesChanged, refreshGitStatus, refreshChatList, runTurn]);
 
   /**
    * Stop the in-flight chat turn. Aborting the local SSE fetch alone no
@@ -1620,6 +1687,21 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             />
           );
         })}
+
+        {resumable && !loading && (
+          <div className="chat-resume-row">
+            <button
+              type="button"
+              className="btn btn-ghost chat-resume-btn"
+              onClick={() => void handleResume()}
+            >
+              ↻ Resume interrupted response
+            </button>
+            <span className="chat-resume-hint">
+              The server restarted mid-turn — continue exactly where the model left off (its tool results are kept).
+            </span>
+          </div>
+        )}
 
         {/* Proposed changes from previous turns. */}
         {pastProposed.map((change) => (

@@ -56,6 +56,12 @@ export interface RunReadOnlyTaskResult {
 export interface RunReadOnlyTaskOptions {
   /** Optional abort signal; when aborted the loop exits after the current tool. */
   signal?: AbortSignal;
+  /**
+   * Disable extended thinking for this task (pass 'off' when the bundle has
+   * not opted in — most background maintenance doesn't need chain-of-thought
+   * and it dominates runtime).
+   */
+  thinking?: 'off';
   /** Logger; if absent a fresh trace-scoped logger is created. */
   log?: ChatLogger;
   /** Max loop iterations (default 20). Guards against runaway tool loops. */
@@ -147,6 +153,7 @@ export async function runReadOnlyTask(
     let turnContent = '';
     const response = await chatCompletionStream(messages, advertisedTools, {
       onDelta: (delta) => { turnContent += delta; },
+      ...(opts.thinking ? { thinking: opts.thinking } : {}),
       signal: opts.signal,
       log: opts.log,
     });

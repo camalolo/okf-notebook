@@ -14,13 +14,14 @@ import {
   sleep,
 } from '../lib/llm.js';
 import { getSettings } from '../settings.js';
+import { buildResumeMessages } from '../lib/resume.js';
 import { chatLogger, newTraceId } from '../lib/logger.js';
 import { webSearch } from '../lib/web-search.js';
 import { evalMaths } from '../lib/maths.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
 import { ensureGitRepo, isNoCommitsError } from '../lib/git-repo.js';
-import { appendEvent, renameChat } from '../chats.js';
+import { appendEvent, renameChat, loadChat } from '../chats.js';
 import { sendMail } from '../lib/mailer.js';
 import type {
   ToolDefinition,
@@ -856,18 +857,43 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       return res.status(404).json({ error: 'Bundle not found' });
     }
 
-    const messages = req.body?.messages;
-    if (!Array.isArray(messages) || messages.length === 0) {
-      log.warn('Bad request: messages missing or empty');
-      return res.status(400).json({ error: 'messages (ChatMessage[]) is required' });
-    }
-
     const chatId: string | null =
       typeof req.body?.chatId === 'string' ? req.body.chatId : null;
 
+    // Resume mode: the last turn was interrupted (killed by a restart, closed
+    // by the boot sweep). The client sends no messages; the history is
+    // reconstructed server-side from the persisted timeline INCLUDING the
+    // interrupted turn's tool results, so the model continues from its
+    // actual working state instead of reasoning from scratch.
+    const resume = req.body?.resume === true;
+    let messages: ChatMessage[];
+    if (resume) {
+      if (!chatId) {
+        return res.status(400).json({ error: 'resume requires a chatId' });
+      }
+      const session = await loadChat(bundleId, chatId, req.user!.email);
+      if (!session) {
+        return res.status(404).json({ error: 'Chat not found' });
+      }
+      try {
+        messages = buildResumeMessages(session.events);
+      } catch (err) {
+        return res.status(400).json({
+          error: err instanceof Error ? err.message : 'Nothing to resume',
+        });
+      }
+      log.info(`Resume: reconstructed ${messages.length} msgs from timeline`);
+    } else {
+      messages = req.body?.messages;
+      if (!Array.isArray(messages) || messages.length === 0) {
+        log.warn('Bad request: messages missing or empty');
+        return res.status(400).json({ error: 'messages (ChatMessage[]) is required' });
+      }
+    }
+
     log.info(
       `Request: bundle=${bundleId}, chatId=${chatId ?? 'none'}, ` +
-      `${messages.length} msgs, role=${req.user?.role ?? 'unknown'}`,
+      `${messages.length} msgs, role=${req.user?.role ?? 'unknown'}${resume ? ', resume' : ''}`,
     );
 
     // Sequential persistence — chains promises to avoid read-modify-write
@@ -981,10 +1007,14 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       }
     }
 
-    // Persist the new user message at the start of the turn.
-    const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
-    if (lastUserMsg) {
-      persist({ kind: 'user', content: lastUserMsg.content });
+    // Persist the new user message at the start of the turn — except in
+    // resume mode, where the last user message is already in the timeline
+    // (persisting again would duplicate it).
+    if (!resume) {
+      const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
+      if (lastUserMsg) {
+        persist({ kind: 'user', content: lastUserMsg.content });
+      }
     }
 
     // Accumulate streamed content so we can persist the full assistant message.
@@ -1403,7 +1433,10 @@ router.post('/:bundleId/compact', async (req, res, next) => {
     // text after seeing the tool result — but a single completion never gets
     // that far. Run a tiny follow-up loop: acknowledge set_title, ask again,
     // until we have summary text (max 3 rounds).
-    let result = await chatCompletion(summaryRequest, [SET_TITLE_TOOL], log);
+    let result = await chatCompletion(summaryRequest, [SET_TITLE_TOOL], {
+      thinking: bundle.thinking === 'on' ? undefined : 'off',
+      log,
+    });
     let summary = result.content.trim();
     for (let round = 0; round < 3 && !summary && result.tool_calls?.length; round++) {
       log.info(`Compact round ${round + 1}: content empty after tool call — requesting summary`);
@@ -1423,7 +1456,10 @@ router.post('/:bundleId/compact', async (req, res, next) => {
           ),
         });
       }
-      result = await chatCompletion(summaryRequest, [SET_TITLE_TOOL], log);
+      result = await chatCompletion(summaryRequest, [SET_TITLE_TOOL], {
+        thinking: bundle.thinking === 'on' ? undefined : 'off',
+        log,
+      });
       summary = result.content.trim();
     }
 
@@ -1508,7 +1544,10 @@ router.post('/:bundleId/retitle', async (req, res, next) => {
     ];
 
     log.info(`Retitle: ${messages.length} msgs, chatId=${chatId ?? 'none'}`);
-    const result = await chatCompletion(titleRequest, [SET_TITLE_TOOL], log);
+    const result = await chatCompletion(titleRequest, [SET_TITLE_TOOL], {
+      thinking: bundle.thinking === 'on' ? undefined : 'off',
+      log,
+    });
     // Prefer the tool call; fall back to plain content if the model answered
     // in text instead of calling the tool.
     const title =

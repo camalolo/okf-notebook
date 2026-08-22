@@ -2188,6 +2188,24 @@ select.form-input {
   overflow-y: auto;
 }
 
+/* Resume offer after an interrupted turn (server restart mid-turn) */
+.chat-resume-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 2px 4px;
+}
+
+.chat-resume-btn {
+  flex: none;
+}
+
+.chat-resume-hint {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
 /* Typing indicator */
 .chat-typing {
   display: inline-flex;

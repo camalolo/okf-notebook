@@ -45,6 +45,9 @@ export function restoreFromEvents(
   proposedChanges: ProposedChange[];
   compactionIndex: number | null;
   liveTurnEvents: TurnEvent[];
+  /** The timeline ends with the boot sweep's `turn_end {interrupted}` —
+   *  the last turn died with a server restart and can be resumed. */
+  lastTurnInterrupted: boolean;
 } {
   const messages: ChatMessage[] = [];
   const pastTurns: TurnEvent[][] = [];
@@ -52,6 +55,11 @@ export function restoreFromEvents(
   let currentTurn: TurnEvent[] = [];
   let compactionIndex: number | null = null;
   let liveTurnEvents: TurnEvent[] = [];
+  // Resume offer: only when the interrupted turn_end is the LAST event (the
+  // turn is settled — not currently running or mid-recovery).
+  const last = events[events.length - 1];
+  const lastTurnInterrupted =
+    last?.kind === 'turn_end' && last.interrupted === true;
 
   // Attach pending turn events (tools/edits/errors without a closing
   // assistant message) as a synthetic interrupted turn, anchored to a
@@ -113,7 +121,7 @@ export function restoreFromEvents(
   }
   flushInterruptedTurn();
 
-  return { messages, pastTurns, proposedChanges, compactionIndex, liveTurnEvents };
+  return { messages, pastTurns, proposedChanges, compactionIndex, liveTurnEvents, lastTurnInterrupted };
 }
 
 /**

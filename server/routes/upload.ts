@@ -136,6 +136,7 @@ export async function llmContentSlug(
   filename: string,
   text: string,
   log?: ChatLogger,
+  thinking?: 'off',
 ): Promise<string | null> {
   const system = [
     'You name uploaded documents for a knowledge base.',
@@ -164,7 +165,10 @@ export async function llmContentSlug(
         { role: 'user', content: user },
       ],
       undefined,
-      log,
+      {
+        ...(thinking ? { thinking } : {}),
+        log,
+      },
     );
     const slug = sanitizeSlug(result.content);
     if (!slug) return null;
@@ -194,6 +198,8 @@ export async function processUpload(
   filename: string,
   uploadsDir: string,
   log?: ChatLogger,
+  /** Inherit the bundle's thinking setting for the LLM naming pass. */
+  thinking?: 'off',
 ): Promise<UploadResult> {
   const hash = sha256(buffer);
 
@@ -220,7 +226,7 @@ export async function processUpload(
   // Prefer an LLM-generated, content-descriptive English slug; fall back to
   // the slugified original filename if the LLM is unavailable.
   const fallbackSlug = slugifyFilename(filename);
-  const llmSlug = await llmContentSlug(filename, extracted.text, log);
+  const llmSlug = await llmContentSlug(filename, extracted.text, log, thinking);
   const slug = await uniqueSlug(uploadsDir, llmSlug ?? fallbackSlug);
   const outPath = path.join(uploadsDir, slug);
 
@@ -271,7 +277,14 @@ router.post('/:bundleId/upload', requireFull, upload.single('file'), async (req,
     // Multer decodes filenames as latin1; re-encode to UTF-8 so CJK/Unicode
     // filenames are preserved.
     const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
-    const result = await processUpload(req.file.buffer, originalName, uploadsDir, log);
+    const result = await processUpload(
+      req.file.buffer,
+      originalName,
+      uploadsDir,
+      log,
+      // Inherit the bundle's thinking setting for the naming pass.
+      bundle.thinking === 'on' ? undefined : 'off',
+    );
 
     res.status(result.duplicate ? 200 : 201).json(result);
   } catch (err) {

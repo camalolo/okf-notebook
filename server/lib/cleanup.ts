@@ -261,6 +261,9 @@ export async function runCleanupForBundle(
       maxIterations: 40,
       extraTools: WRITE_TOOLS,
       user: CLEANUP_AUTHOR,
+      // Inherit the bundle's thinking setting — cleanup is file maintenance;
+      // most bundles don't need chain-of-thought for it.
+      thinking: bundle.thinking === 'on' ? undefined : 'off',
     });
     record.toolCalls = result.toolCalls;
     record.iterations = result.iterations;
