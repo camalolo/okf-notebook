@@ -43,6 +43,10 @@ const API_KEY = process.env.LLM_API_KEY || process.env.INFERENCE_API_KEY || '';
  * LLM_CONTEXT_LIMIT env var (any OpenAI-compatible backend may differ).
  */
 export function contextLimitFor(model: string): number {
+  // The endpoint's own /models advertisement wins (OpenRouter-style
+  // context_length) — it knows providers our family map doesn't.
+  const discovered = discoveredContextLimit(model);
+  if (discovered) return discovered;
   const env = parseInt(process.env.LLM_CONTEXT_LIMIT ?? '');
   if (Number.isFinite(env) && env > 0) return env;
   if (/^glm-/.test(model)) return 1_000_000;
@@ -113,11 +117,20 @@ export interface ChatCompletionResult {
 
 // --- Model selection ---------------------------------------------------------
 
+interface ModelEntry {
+  id?: string;
+  /** OpenRouter-style context window (tokens) — absent on Z.ai/OpenAI. */
+  context_length?: number;
+  contextLength?: number;
+}
+
 interface ModelsResponse {
-  data?: { id?: string }[];
+  data?: ModelEntry[];
 }
 
 let modelsCache: { at: number; models: string[] } | null = null;
+/** Raw /models entries retained for opportunistic metadata lookups. */
+let modelsMeta = new Map<string, ModelEntry>();
 const MODELS_TTL_MS = 5 * 60 * 1000;
 
 /**
@@ -144,6 +157,9 @@ export async function listModels(log?: ChatLogger): Promise<string[]> {
     throw new Error(`Models request failed (${res.status}): ${text.slice(0, 200)}`);
   }
   const data = (await res.json()) as ModelsResponse;
+  modelsMeta = new Map(
+    (data.data ?? []).filter((m) => m.id).map((m) => [m.id!, m]),
+  );
   const models = (data.data ?? [])
     .map((m) => m.id ?? '')
     .filter(Boolean)
@@ -155,6 +171,17 @@ export async function listModels(log?: ChatLogger): Promise<string[]> {
   }
   modelsCache = { at: Date.now(), models };
   return models;
+}
+
+/**
+ * The model's context window as advertised by the /models endpoint, when it
+ * advertises one (OpenRouter-style `context_length`). Undefined otherwise —
+ * Z.ai's own API and most OpenAI-compatible servers omit it.
+ */
+export function discoveredContextLimit(model: string): number | undefined {
+  const entry = modelsMeta.get(model);
+  const limit = entry?.context_length ?? entry?.contextLength;
+  return typeof limit === 'number' && limit > 0 ? limit : undefined;
 }
 
 // --- Chat completion --------------------------------------------------------
