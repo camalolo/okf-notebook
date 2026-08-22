@@ -21,7 +21,7 @@ import { evalMaths } from '../lib/maths.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
 import { ensureGitRepo, isNoCommitsError } from '../lib/git-repo.js';
-import { appendEvent, renameChat, loadChat } from '../chats.js';
+import { appendEvent, renameChat, loadChat, updateChatMeta } from '../chats.js';
 import { sendMail } from '../lib/mailer.js';
 import type {
   ToolDefinition,
@@ -905,6 +905,17 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         .then(() => appendEvent(bundleId, chatId, req.user!.email, event))
         .catch(() => { /* best-effort */ });
     };
+    /** Persist session metadata (lastUsage) through the same chain. */
+    const persistUsage = (u: { promptTokens?: number; completionTokens?: number; reasoningTokens?: number }) => {
+      if (!chatId) return;
+      persistChain = persistChain
+        .then(() =>
+          updateChatMeta(bundleId, chatId, req.user!.email, {
+            lastUsage: { ...u, ts: new Date().toISOString() },
+          }),
+        )
+        .catch(() => { /* best-effort */ });
+    };
 
     // Select tools based on the user's role, and filter MCP tools to the
     // servers enabled for this bundle (`mcps` undefined → all servers).
@@ -1109,6 +1120,13 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             turnPromptTokens: usageTotals.prompt,
             turnCompletionTokens: usageTotals.completion,
             turnReasoningTokens: usageTotals.reasoning,
+          });
+          // Persist the exact numbers so a reloaded chat restores the real
+          // context size instead of the client's estimate.
+          persistUsage({
+            promptTokens: u.promptTokens,
+            completionTokens: u.completionTokens,
+            reasoningTokens: u.reasoningTokens,
           });
         }
 

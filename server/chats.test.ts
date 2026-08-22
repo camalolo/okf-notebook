@@ -102,3 +102,23 @@ describe('finalizeOrphanedTurns', () => {
     expect(await finalizeOrphanedTurns()).toBe(0);
   });
 });
+
+describe('updateChatMeta', () => {
+  it('persists lastUsage without touching events', async () => {
+    const { updateChatMeta, loadChat } = await import('./chats.js');
+    await writeChat('b1', 'healthy', [ev('user', 0, 'hi')]);
+    await updateChatMeta('b1', 'healthy', 'u@x.com', {
+      lastUsage: { promptTokens: 11345, completionTokens: 10 },
+    });
+    const chat = await loadChat('b1', 'healthy', 'u@x.com');
+    expect(chat?.lastUsage?.promptTokens).toBe(11345);
+    expect(chat?.events).toHaveLength(1);
+  });
+
+  it('is a no-op for unknown or unowned chats', async () => {
+    const { updateChatMeta } = await import('./chats.js');
+    await expect(
+      updateChatMeta('b1', 'nope', 'u@x.com', { lastUsage: { promptTokens: 1 } }),
+    ).resolves.toBeUndefined();
+  });
+});

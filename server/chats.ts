@@ -47,6 +47,17 @@ export interface ChatSession {
   createdAt: string;
   updatedAt: string;
   events: StoredEvent[];
+  /**
+   * Usage of the last completed LLM round (exact numbers from the API's
+   * final-chunk report) — survives reloads so the context indicator stays
+   * exact instead of falling back to the client's estimate.
+   */
+  lastUsage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    reasoningTokens?: number;
+    ts?: string;
+  };
 }
 
 export interface ChatSummary {
@@ -206,9 +217,31 @@ export async function appendEvent(
   await fs.writeFile(chatPath(bundleId, chatId), JSON.stringify(updated, null, 2), 'utf8');
 }
 
-/** Rename a chat session (title only). */
-export async function renameChat(
+/**
+ * Patch session metadata (currently `lastUsage`) without touching events.
+ * Caller must own the chat. Best-effort concurrent-safe when chained through
+ * the same promise chain as appendEvent calls.
+ */
+export async function updateChatMeta(
   bundleId: string,
+  chatId: string,
+  userId: string,
+  patch: { lastUsage?: ChatSession['lastUsage'] },
+): Promise<void> {
+  validateId(bundleId);
+  validateId(chatId);
+  const existing = await loadChat(bundleId, chatId, userId);
+  if (!existing) return;
+  const updated: ChatSession = {
+    ...existing,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(chatPath(bundleId, chatId), JSON.stringify(updated, null, 2) + '\n', 'utf8');
+}
+
+/** Rename a chat session (title only). */
+export async function renameChat(  bundleId: string,
   chatId: string,
   userId: string,
   title: string,

@@ -132,4 +132,11 @@ export interface ChatSession {
   createdAt: string;
   updatedAt: string;
   events: StoredEvent[];
+  /** Exact usage of the last completed LLM round (survives reloads). */
+  lastUsage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    reasoningTokens?: number;
+    ts?: string;
+  };
 }

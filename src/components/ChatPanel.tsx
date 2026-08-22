@@ -504,6 +504,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     compactionIndexRef.current = restored.compactionIndex;
     setTurnEvents([]);
     setResumable(restored.lastTurnInterrupted);
+    // Exact context of the last completed round — persisted server-side, so
+    // a reloaded chat keeps the real number instead of the estimate.
+    setExactPromptTokens(
+      typeof session.lastUsage?.promptTokens === 'number'
+        ? session.lastUsage.promptTokens
+        : null,
+    );
   }, []);
 
   /**
@@ -521,6 +528,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     compactionIndexRef.current = restored.compactionIndex;
     setTurnEvents(restored.liveTurnEvents);
     setResumable(restored.lastTurnInterrupted);
+    if (typeof session.lastUsage?.promptTokens === 'number') {
+      setExactPromptTokens(session.lastUsage.promptTokens);
+    }
   }, []);
 
   /** Fetch the current git status and update the badge. Best-effort. */
