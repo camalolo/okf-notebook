@@ -60,12 +60,25 @@ app.use('/api/notebook/mcps', requireAuth, mcpsRouter);
 // Checks for the built index.html so this is inert during development.
 const publicDir = path.join(import.meta.dirname, '..', 'public');
 if (existsSync(path.join(publicDir, 'index.html'))) {
-  app.use(express.static(publicDir));
+  // HTML must always be revalidated so deploys (newly hashed assets) are
+  // picked up on reload — a stale index.html keeps serving the old bundle
+  // after a deploy. Hashed assets under /assets can cache forever.
+  app.use(
+    express.static(publicDir, {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
+        else if (filePath.startsWith(path.join(publicDir, 'assets'))) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
+    }),
+  );
   // SPA fallback: any non-API GET → index.html (enables client-side routing)
   app.use((req, res, next) => {
     if (req.method !== 'GET' || req.path.startsWith('/api/')) {
       return next();
     }
+    res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(publicDir, 'index.html'));
   });
 }

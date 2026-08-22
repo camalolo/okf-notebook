@@ -1154,32 +1154,58 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   }, [refreshGitStatus]);
 
   /**
-   * Jump to bottom on End key (anywhere in the chat panel) and resume
-   * auto-scroll. Home jumps to the top.
+   * Home/End/PageUp/PageDown scroll the chat transcript — from anywhere,
+   * including when focus is on <body> (a disabled textarea or a plain
+   * message div is not focusable, so a panel-level onKeyDown never sees
+   * those events — they bubble UP from body, not through the panel).
+   *
+   * Guards: ignored when the target is outside the chat panel (file tree,
+   * other pages) or is an editable field other than the chat input (history
+   * search box, modals) so normal text editing keeps working.
    */
-  const handlePanelKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    if (e.key === 'End') {
-      e.preventDefault();
-      el.scrollTop = el.scrollHeight;
-      setStickToBottom(true);
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      el.scrollTop = 0;
-      setStickToBottom(false);
-    } else if (e.key === 'PageUp') {
-      e.preventDefault();
-      el.scrollTop -= el.clientHeight * 0.85;
-      setStickToBottom(false);
-    } else if (e.key === 'PageDown') {
-      e.preventDefault();
-      el.scrollTop += el.clientHeight * 0.85;
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-      setStickToBottom(atBottom);
-    }
-  };
+  const panelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = scrollRef.current;
+      const target = e.target as HTMLElement | null;
+      if (!el || !target) return;
+
+      const panel = panelRef.current;
+      const inPanel = panel?.contains(target) ?? false;
+      const onBody = target === document.body || target === document.documentElement;
+      if (!inPanel && !onBody) return;
+
+      const isEditable =
+        target instanceof HTMLElement &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+      if (isEditable && target !== inputRef.current) return;
+
+      if (e.key === 'End') {
+        e.preventDefault();
+        el.scrollTop = el.scrollHeight;
+        setStickToBottom(true);
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        el.scrollTop = 0;
+        setStickToBottom(false);
+      } else if (e.key === 'PageUp') {
+        e.preventDefault();
+        el.scrollTop -= el.clientHeight * 0.85;
+        setStickToBottom(false);
+      } else if (e.key === 'PageDown') {
+        e.preventDefault();
+        el.scrollTop += el.clientHeight * 0.85;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+        setStickToBottom(atBottom);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1212,10 +1238,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
   return (
     <div
+      ref={panelRef}
       className="chat-panel"
       role="log"
       aria-label={`Chat about ${bundleName ?? 'this bundle'}`}
-      onKeyDown={handlePanelKeyDown}
     >
       <header className="chat-header">
         <div className="chat-header-left">
