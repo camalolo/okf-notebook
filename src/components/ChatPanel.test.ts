@@ -299,3 +299,60 @@ describe('mergeConsecutiveAssistants', () => {
     expect(merged.map((m) => m.content)).toEqual(['a', 'x', 'b', 'y']);
   });
 });
+
+describe('restoreFromEvents — openTurnLive (recovery of a running turn)', () => {
+  it('returns trailing events of an unterminated turn as liveTurnEvents without a placeholder', () => {
+    // Timeline mid-turn: round 1 closed with content, round 2 in flight.
+    const events: StoredEvent[] = [
+      { ts: '0', seq: 0, kind: 'user', content: 'do it' },
+      { ts: '1', seq: 1, kind: 'assistant', content: 'Checking…' },
+      { ts: '2', seq: 2, kind: 'tool', toolCall: { name: 'read_file', args: {}, result: 'x' } },
+      { ts: '3', seq: 3, kind: 'tool', toolCall: { name: 'web_search', args: {}, result: 'y' } },
+    ];
+
+    const restored = restoreFromEvents(events, { openTurnLive: true });
+
+    // Settled history: user message + round-1 content, no placeholder message.
+    expect(restored.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(restored.messages.some((m) => m.content.includes('interrupted'))).toBe(false);
+    expect(restored.pastTurns).toHaveLength(1); // round 1's events only
+    // The in-flight round's tool events come back live.
+    expect(restored.liveTurnEvents).toEqual([
+      { kind: 'tool', toolCall: { name: 'read_file', args: {}, result: 'x' } },
+      { kind: 'tool', toolCall: { name: 'web_search', args: {}, result: 'y' } },
+    ]);
+  });
+
+  it('keeps older interrupted turns as placeholders (only the trailing turn goes live)', () => {
+    const events: StoredEvent[] = [
+      { ts: '0', seq: 0, kind: 'user', content: 'first' },
+      { ts: '1', seq: 1, kind: 'tool', toolCall: { name: 'read_file', args: {}, result: 'x' } },
+      { ts: '2', seq: 2, kind: 'user', content: 'second' },
+      { ts: '3', seq: 3, kind: 'tool', toolCall: { name: 'web_search', args: {}, result: 'y' } },
+    ];
+
+    const restored = restoreFromEvents(events, { openTurnLive: true });
+
+    // Turn 1 (settled, interrupted) keeps its placeholder; turn 2 is live.
+    expect(restored.messages).toHaveLength(3);
+    expect(restored.messages[1].content).toContain('interrupted');
+    expect(restored.liveTurnEvents).toEqual([
+      { kind: 'tool', toolCall: { name: 'web_search', args: {}, result: 'y' } },
+    ]);
+  });
+
+  it('returns empty liveTurnEvents for a completed timeline regardless of the option', () => {
+    const events: StoredEvent[] = [
+      { ts: '0', seq: 0, kind: 'user', content: 'hi' },
+      { ts: '1', seq: 1, kind: 'assistant', content: 'done' },
+      { ts: '2', seq: 2, kind: 'turn_end' },
+    ];
+
+    const a = restoreFromEvents(events);
+    const b = restoreFromEvents(events, { openTurnLive: true });
+
+    expect(a.liveTurnEvents).toEqual([]);
+    expect(b.liveTurnEvents).toEqual([]);
+    expect(b.messages).toEqual(a.messages); // identical settled view
+  });
+});

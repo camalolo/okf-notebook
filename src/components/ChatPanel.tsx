@@ -467,6 +467,22 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     setTurnEvents([]);
   }, []);
 
+  /**
+   * Apply an in-progress timeline during recovery (stream drop / page reload
+   * while the server keeps running the turn). Renders the open turn's events
+   * as the live turn timeline — tool calls surface as they are persisted
+   * instead of the UI freezing until the turn completes.
+   */
+  const applyPartialSession = useCallback((session: ChatSession) => {
+    const restored = restoreFromEvents(session.events, { openTurnLive: true });
+    setMessages(restored.messages);
+    setPastTurns(restored.pastTurns);
+    setProposedChanges(restored.proposedChanges);
+    setCompactionIndex(restored.compactionIndex);
+    compactionIndexRef.current = restored.compactionIndex;
+    setTurnEvents(restored.liveTurnEvents);
+  }, []);
+
   /** Fetch the current git status and update the badge. Best-effort. */
   const refreshGitStatus = useCallback(async (): Promise<void> => {
     try {
@@ -491,10 +507,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       setLoading(true);
       setReconnecting(true);
       void (async () => {
-        // 5s × 60 = up to 5 minutes — long LLM turns with tool loops can
-        // run for minutes, and the server keeps going after disconnects.
-        for (let attempt = 0; attempt < 60; attempt++) {
-          await new Promise((r) => setTimeout(r, 5000));
+        // Fast (2.5s) polling with incremental application — the open turn's
+        // events render live as the server persists them. 2.5s × 120 = up to
+        // 5 minutes; long LLM turns with tool loops can run for minutes, and
+        // the server keeps going after disconnects.
+        for (let attempt = 0; attempt < 120; attempt++) {
+          if (attempt > 0) await new Promise((r) => setTimeout(r, 2500));
           if (watchGenRef.current !== gen) return;
           try {
             const session = await loadChat(bundleId, id);
@@ -507,6 +525,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               void refreshGitStatus();
               return;
             }
+            applyPartialSession(session);
           } catch {
             // network hiccup — keep polling
           }
@@ -518,7 +537,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         }
       })();
     },
-    [bundleId, applySession, refreshChatList, refreshGitStatus],
+    [bundleId, applySession, applyPartialSession, refreshChatList, refreshGitStatus],
   );
 
   /** Queue selected files for upload on next Send (no upload yet). */
@@ -846,8 +865,8 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         if (id) {
           setReconnecting(true);
           let recovered = false;
-          for (let attempt = 0; attempt < 60; attempt++) {
-            await new Promise((r) => setTimeout(r, 5000));
+          for (let attempt = 0; attempt < 120; attempt++) {
+            await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 2500));
             if (stoppedRef.current) {
               // User pressed STOP while reconnecting — cancel the
               // server-side turn and do a final sync below.
@@ -864,6 +883,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                 void refreshGitStatus();
                 recovered = true;
                 break;
+              }
+              // Turn still running server-side — surface its progress so far
+              // (tool calls etc. render live instead of a frozen banner).
+              if (!isLastTurnComplete(session.events)) {
+                applyPartialSession(session);
               }
             } catch (pollErr) {
               // Session expired — stop polling, redirect is already triggered.
@@ -1567,7 +1591,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         {reconnecting && (
           <div className="chat-reconnecting">
             <span className="spinner spinner-sm" />
-            <span>Connection lost — waiting for the server to finish your response…</span>
+            <span>Connection lost — your response is still running; following its progress…</span>
           </div>
         )}
       </div>

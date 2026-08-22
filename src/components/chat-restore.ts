@@ -28,18 +28,30 @@ export function mergeConsecutiveAssistants(messages: ChatMessage[]): ChatMessage
 /**
  * Reconstruct in-memory chat state (messages, past turns, proposed changes)
  * from a persisted `StoredEvent[]` timeline.
+ *
+ * With `openTurnLive`, a trailing *unterminated* turn (page reloaded / stream
+ * dropped mid-turn; the server keeps running it) is returned separately as
+ * `liveTurnEvents` instead of being folded into history behind a
+ * "⚠️ interrupted" placeholder — the caller renders it as the current
+ * streaming turn (tool chips etc.) and keeps updating it as polls observe
+ * progress. Settled history behaves identically either way.
  */
-export function restoreFromEvents(events: StoredEvent[]): {
+export function restoreFromEvents(
+  events: StoredEvent[],
+  opts?: { openTurnLive?: boolean },
+): {
   messages: ChatMessage[];
   pastTurns: TurnEvent[][];
   proposedChanges: ProposedChange[];
   compactionIndex: number | null;
+  liveTurnEvents: TurnEvent[];
 } {
   const messages: ChatMessage[] = [];
   const pastTurns: TurnEvent[][] = [];
   const proposedChanges: ProposedChange[] = [];
   let currentTurn: TurnEvent[] = [];
   let compactionIndex: number | null = null;
+  let liveTurnEvents: TurnEvent[] = [];
 
   // Attach pending turn events (tools/edits/errors without a closing
   // assistant message) as a synthetic interrupted turn, anchored to a
@@ -92,12 +104,16 @@ export function restoreFromEvents(events: StoredEvent[]): {
     // 'turn_end' is a completion marker only — nothing to render.
   }
 
-  // If there are orphaned events at the end of the timeline (incomplete
-  // turn — e.g. interrupted by error), attach them as a synthetic turn
-  // with a placeholder assistant message so they're visible.
+  // Trailing events with no closing assistant message: either an older
+  // interrupted turn (render as a placeholder) or — with openTurnLive — the
+  // currently-running turn (hand back live, without a placeholder).
+  if (opts?.openTurnLive && currentTurn.length > 0) {
+    liveTurnEvents = currentTurn;
+    currentTurn = [];
+  }
   flushInterruptedTurn();
 
-  return { messages, pastTurns, proposedChanges, compactionIndex };
+  return { messages, pastTurns, proposedChanges, compactionIndex, liveTurnEvents };
 }
 
 /**
