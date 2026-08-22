@@ -1444,16 +1444,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                       </div>
                     );
                   }
-          if (ev.kind === 'thinking') {
-            return (
-              <ThinkingBlock
-                key={`th${i}`}
-                text={ev.text}
-                live={loading && i === turnEvents.length - 1}
-              />
-            );
-          }
-          if (ev.kind === 'error') {
+                  if (ev.kind === 'error') {
                     return (
                       <div className="chat-error-event" key={`pe${i}-${j}`}>
                         ⚠️ {ev.text}
@@ -1539,6 +1530,15 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               <div className="chat-error-event" key={`e${i}`}>
                 ⚠️ {ev.text}
               </div>
+            );
+          }
+          if (ev.kind === 'thinking') {
+            return (
+              <ThinkingBlock
+                key={`th${i}`}
+                text={ev.text}
+                live={loading && i === turnEvents.length - 1}
+              />
             );
           }
           if (ev.kind === 'notice') {
