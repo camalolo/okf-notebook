@@ -8,7 +8,7 @@
 import { Router } from 'express';
 import { requireFull } from '../auth.js';
 import { getSettings, saveSettings, DEFAULT_MODEL } from '../settings.js';
-import { listModels } from '../lib/llm.js';
+import { listModels, contextLimitFor } from '../lib/llm.js';
 
 export const settingsRouter: Router = Router();
 
@@ -18,7 +18,12 @@ settingsRouter.get('/', async (_req, res, next) => {
       getSettings(),
       listModels().catch(() => null),
     ]);
-    res.json({ model: settings.model, defaultModel: DEFAULT_MODEL, models });
+    res.json({
+      model: settings.model,
+      defaultModel: DEFAULT_MODEL,
+      models,
+      contextLimit: contextLimitFor(settings.model),
+    });
   } catch (err) {
     next(err);
   }

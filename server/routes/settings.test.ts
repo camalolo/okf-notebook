@@ -13,6 +13,9 @@ process.env.NOTEBOOK_SETTINGS_FILE = path.join(tmpDir, 'settings.json');
 const listModelsMock = vi.fn();
 vi.mock('../lib/llm.js', () => ({
   listModels: (...args: unknown[]) => listModelsMock(...args),
+  // Real implementation is env-dependent and trivial; mirror it.
+  contextLimitFor: (model: string) =>
+    /^glm-/.test(model) ? 1_000_000 : 128_000,
 }));
 
 const { getSettings, saveSettings, resetSettingsCache, DEFAULT_MODEL } = await import('../settings.js');
@@ -81,6 +84,8 @@ describe('GET / settings route', () => {
     expect(body.model).toBe('glm-5-turbo');
     expect(body.defaultModel).toBe(DEFAULT_MODEL);
     expect(body.models).toEqual(['glm-5.2', 'glm-5.3', 'glm-5-turbo']);
+    // Derived from the model family (mock mirrors the real derivation).
+    expect(body.contextLimit).toBe(1_000_000);
   });
 
   it('reports models: null when the proxy list is unavailable', async () => {

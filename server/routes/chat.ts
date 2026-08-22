@@ -10,8 +10,10 @@ import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
   chatCompletion,
   chatCompletionStream,
+  contextLimitFor,
   sleep,
 } from '../lib/llm.js';
+import { getSettings } from '../settings.js';
 import { chatLogger, newTraceId } from '../lib/logger.js';
 import { webSearch } from '../lib/web-search.js';
 import { evalMaths } from '../lib/maths.js';
@@ -986,6 +988,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     }
 
     // Accumulate streamed content so we can persist the full assistant message.
+    const { model } = await getSettings();
     let turnContent = '';
     let loopIteration = 0;
     // Exact usage accumulated across the turn's LLM rounds (from the API's
@@ -1069,6 +1072,8 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             promptTokens: u.promptTokens,
             completionTokens: u.completionTokens,
             reasoningTokens: u.reasoningTokens,
+            // … the active model's context window (indicator colouring) …
+            contextLimit: contextLimitFor(model),
             // … and cost totals across this turn's rounds so far (each round
             // re-prefills, so the turn's prompt cost is a sum).
             turnPromptTokens: usageTotals.prompt,

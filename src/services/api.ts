@@ -226,6 +226,8 @@ export interface AppSettingsInfo {
   defaultModel: string;
   /** Official model ids from the API, or null when the list is unavailable. */
   models: string[] | null;
+  /** The active model's context window (tokens) — indicator colouring. */
+  contextLimit: number;
 }
 
 export function getSettings(): Promise<AppSettingsInfo> {

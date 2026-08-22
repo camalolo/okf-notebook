@@ -37,6 +37,19 @@ const MODELS_URL = `${BASE_URL}/models`;
 /** Bearer API key for the LLM endpoint (LLM_API_KEY; legacy: INFERENCE_API_KEY). */
 const API_KEY = process.env.LLM_API_KEY || process.env.INFERENCE_API_KEY || '';
 
+/**
+ * The active model's context window (tokens) — used for the UI's context
+ * indicator colouring. Best-effort per model family, overridable with the
+ * LLM_CONTEXT_LIMIT env var (any OpenAI-compatible backend may differ).
+ */
+export function contextLimitFor(model: string): number {
+  const env = parseInt(process.env.LLM_CONTEXT_LIMIT ?? '');
+  if (Number.isFinite(env) && env > 0) return env;
+  if (/^glm-/.test(model)) return 1_000_000;
+  if (/^deepseek-/.test(model)) return 128_000;
+  return 128_000; // conservative default — override via LLM_CONTEXT_LIMIT
+}
+
 /** Optional regex filtering which model ids the Settings dropdown offers. */
 const MODELS_FILTER = process.env.LLM_MODELS_FILTER
   ? new RegExp(process.env.LLM_MODELS_FILTER)

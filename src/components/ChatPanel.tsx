@@ -18,6 +18,7 @@ import {
   createChat,
   deleteChat,
   getGitStatus,
+  getSettings,
   listChats,
   loadChat,
   retitleChat,
@@ -291,17 +292,18 @@ function estimateContextTokens(
   return Math.ceil(chars / 4);
 }
 
-/** GLM-5.2 context window for the indicator colour thresholds. */
-const CTX_LIMIT = 128_000;
+/** Fallback context window for colouring until the server reports the
+ *  active model's limit (glm → 1M; conservative default otherwise). */
+const CTX_LIMIT_DEFAULT = 128_000;
 
-function formatCtxTokens(tokens: number): { label: string; level: string } {
+function formatCtxTokens(tokens: number, limit: number): { label: string; level: string } {
   const label =
     tokens >= 10_000
       ? `${Math.round(tokens / 1000)}K`
       : tokens >= 1000
         ? `${(tokens / 1000).toFixed(1)}K`
         : String(tokens);
-  const pct = tokens / CTX_LIMIT;
+  const pct = limit > 0 ? tokens / limit : 0;
   const level = pct > 0.8 ? 'high' : pct > 0.5 ? 'mid' : 'low';
   return { label, level };
 }
@@ -379,6 +381,19 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
    */
   const [exactPromptTokens, setExactPromptTokens] = useState<number | null>(null);
   const ctxTokens = exactPromptTokens ?? estimatedCtxTokens;
+
+  /** The active model's context window — colours the indicator. Sourced
+   *  from Settings on mount and from each usage event afterwards. */
+  const [ctxLimit, setCtxLimit] = useState(CTX_LIMIT_DEFAULT);
+  useEffect(() => {
+    getSettings()
+      .then((info) => {
+        if (typeof info.contextLimit === 'number' && info.contextLimit > 0) {
+          setCtxLimit(info.contextLimit);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Mirror the latest message history so the async send handler can build the
   // request payload without reading stale state.
@@ -717,9 +732,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         if (ev.event === 'usage') {
           // Exact per-call token usage from the API's final chunk. The
           // prompt size is the true context of the last LLM call.
-          const obj = data as { promptTokens?: unknown };
+          const obj = data as { promptTokens?: unknown; contextLimit?: unknown };
           if (typeof obj.promptTokens === 'number') {
             setExactPromptTokens(obj.promptTokens);
+          }
+          if (typeof obj.contextLimit === 'number' && obj.contextLimit > 0) {
+            setCtxLimit(obj.contextLimit);
           }
         } else if (ev.event === 'thinking') {
           // Chain-of-thought from a thinking model, streamed before the
@@ -1333,7 +1351,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           {messages.length > 0 && !loading ? (
             <button
               type="button"
-              className={`chat-compact-btn ctx-${formatCtxTokens(ctxTokens).level}`}
+              className={`chat-compact-btn ctx-${formatCtxTokens(ctxTokens, ctxLimit).level}`}
               onClick={() => void handleCompact()}
               title={
                 exactPromptTokens !== null
@@ -1342,12 +1360,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               }
             >
               Compact{ctxTokens > 0 && (() => {
-                const { label } = formatCtxTokens(ctxTokens);
+                const { label } = formatCtxTokens(ctxTokens, ctxLimit);
                 return <span className="chat-compact-ctx">{label}</span>;
               })()}
             </button>
           ) : ctxTokens > 0 && (() => {
-            const { label, level } = formatCtxTokens(ctxTokens);
+            const { label, level } = formatCtxTokens(ctxTokens, ctxLimit);
             return (
               <span
                 className={`chat-ctx-badge ctx-${level}`}
