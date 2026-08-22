@@ -16,7 +16,7 @@ const V1_URL = 'http://127.0.0.1:3003/api/v1/chat/completions';
  * Each raw string in `chunks` is written to the stream with `delayMs` between
  * writes. When the AbortSignal fires, the stream is errored immediately.
  */
-function createMockFetch(chunks: string[], delayMs: number, ac?: AbortController) {
+function createMockFetch(chunks: string[], delayMs: number) {
   return async (url: string | URL | Request, opts?: RequestInit) => {
     // Routed streaming endpoint
     const signal = opts?.signal as AbortSignal | undefined;
@@ -79,7 +79,6 @@ describe('chatCompletionStream — retry with backoff', () => {
     let zaiCalls = 0;
     const success = createMockFetch([contentDelta('Hello'), 'data: [DONE]\n\n'], 0);
     const fetchMock = vi.fn(async (url: string | URL | Request, opts?: RequestInit) => {
-      const urlStr = typeof url === 'string' ? url : url.toString();
       return ++zaiCalls === 1 ? rateLimitResponse() : success(url, opts);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -104,8 +103,7 @@ describe('chatCompletionStream — retry with backoff', () => {
     vi.useFakeTimers();
     vi.spyOn(Math, 'random').mockReturnValue(0);
 
-    const fetchMock = vi.fn(async (url: string | URL | Request) => {
-      const urlStr = typeof url === 'string' ? url : url.toString();
+    const fetchMock = vi.fn(async () => {
       return rateLimitResponse();
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -126,8 +124,7 @@ describe('chatCompletionStream — retry with backoff', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0);
     const ac = new AbortController();
 
-    const fetchMock = vi.fn(async (url: string | URL | Request) => {
-      const urlStr = typeof url === 'string' ? url : url.toString();
+    const fetchMock = vi.fn(async () => {
       return rateLimitResponse();
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -219,10 +216,9 @@ describe('chatCompletionStream — abort behavior', () => {
       'data: [DONE]\n\n',
     ];
 
-    vi.stubGlobal('fetch', vi.fn(createMockFetch(chunks, 100, ac)));
+    vi.stubGlobal('fetch', vi.fn(createMockFetch(chunks, 100)));
 
     let threw = false;
-    let errorMsg = '';
     try {
       await chatCompletionStream(
         [{ role: 'user', content: 'test' }],
@@ -237,9 +233,8 @@ describe('chatCompletionStream — abort behavior', () => {
         },
         ac.signal,
       );
-    } catch (err) {
+    } catch {
       threw = true;
-      errorMsg = err instanceof Error ? err.message : String(err);
     }
 
     expect(threw).toBe(true);

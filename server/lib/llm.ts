@@ -1,16 +1,23 @@
 /**
- * LLM client for the inference server's OpenRouter-style routed endpoint.
+ * LLM client for any OpenAI-compatible chat-completions API.
  *
- * All requests go to POST /api/v1/chat/completions with a logical model name
- * (e.g. glm-5.2); the inference server picks the provider (zai first, deepseek
- * as paid fallback) with automatic failover on 429/5xx and a circuit breaker.
- * Model lists come from /api/v1/models (everything routable).
+ * All requests go to POST {LLM_BASE_URL}/chat/completions with a model name;
+ * the default endpoint is an OpenRouter-style routing proxy. Model lists come
+ * from {LLM_BASE_URL}/models.
  *
- * Authentication: client API key (`Authorization: Bearer ik-...`) from the
- * INFERENCE_API_KEY env var. The inference server is on the same host and LAN
- * requests bypass auth, but we send the key anyway so this also works the day
- * the LAN bypass is disabled, and so requests are attributed per-key in the
- * proxy's stats.
+ * Configuration (env vars):
+ *   LLM_BASE_URL   Base URL up to (and including) the version segment, without
+ *                  a trailing slash. Default: http://127.0.0.1:3003/api/v1
+ *                  (a local inference proxy). Works with any OpenAI-compatible
+ *                  server: Z.ai (…/api/paas/v4), OpenAI (https://api.openai.com/v1),
+ *                  OpenRouter (https://openrouter.ai/api/v1), Ollama
+ *                  (http://localhost:11434/v1), LM Studio, vLLM, etc.
+ *   LLM_API_KEY    Bearer token (`Authorization: Bearer …`). Legacy alias:
+ *                  INFERENCE_API_KEY (still honored).
+ *   LLM_MODEL      Default model id until changed in Settings (default: glm-5.2).
+ *   LLM_MODELS_FILTER  Optional regex; when set, the Settings model dropdown
+ *                  only offers matching ids (e.g. `^(glm-|deepseek-(chat|reasoner)$)`
+ *                  to stay on curated providers behind a routing proxy).
  *
  * Uses Node 22 native fetch (globalThis.fetch).
  */
@@ -21,11 +28,19 @@ import { getSettings } from '../settings.js';
 
 // --- Endpoints ---------------------------------------------------------------
 
-const V1_URL = 'http://127.0.0.1:3003/api/v1/chat/completions';
-const MODELS_URL = 'http://127.0.0.1:3003/api/v1/models';
+/** Base URL of the OpenAI-compatible API (no trailing slash). */
+const BASE_URL = (process.env.LLM_BASE_URL || 'http://127.0.0.1:3003/api/v1').replace(/\/+$/, '');
 
-/** Client API key for the inference server (see Admin → API Keys). */
-const API_KEY = process.env.INFERENCE_API_KEY ?? '';
+const V1_URL = `${BASE_URL}/chat/completions`;
+const MODELS_URL = `${BASE_URL}/models`;
+
+/** Bearer API key for the LLM endpoint (LLM_API_KEY; legacy: INFERENCE_API_KEY). */
+const API_KEY = process.env.LLM_API_KEY || process.env.INFERENCE_API_KEY || '';
+
+/** Optional regex filtering which model ids the Settings dropdown offers. */
+const MODELS_FILTER = process.env.LLM_MODELS_FILTER
+  ? new RegExp(process.env.LLM_MODELS_FILTER)
+  : null;
 
 function authHeaders(): Record<string, string> {
   return API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {};
@@ -73,7 +88,7 @@ export interface ChatCompletionResult {
 
 // --- Model selection ---------------------------------------------------------
 
-interface ZaiModelsResponse {
+interface ModelsResponse {
   data?: { id?: string }[];
 }
 
@@ -81,14 +96,14 @@ let modelsCache: { at: number; models: string[] } | null = null;
 const MODELS_TTL_MS = 5 * 60 * 1000;
 
 /**
- * List the models officially available on the Z.ai API (via the inference
- * proxy's `/models` passthrough — free, consumes no tokens). Cached for 5
- * minutes; on a refresh failure the stale list is returned if one exists.
+ * List the models offered by the configured endpoint (`/models` — free,
+ * consumes no tokens). Cached for 5 minutes; on a refresh failure the stale
+ * list is returned if one exists.
  *
- * The proxy's model list includes its whole routable catalog (e.g. OpenRouter
- * imports). This picker is curated to the GLM/DeepSeek families so the UI
- * stays usable and spend stays on the intended providers; any other routable
- * model can still be entered manually in Settings.
+ * Behind a routing proxy the model list can include the proxy's whole
+ * routable catalog. Set LLM_MODELS_FILTER (regex) to restrict the Settings
+ * dropdown to the families you actually want to spend on; any other model id
+ * can still be entered manually in Settings.
  */
 export async function listModels(log?: ChatLogger): Promise<string[]> {
   if (modelsCache && Date.now() - modelsCache.at < MODELS_TTL_MS) {
@@ -103,14 +118,11 @@ export async function listModels(log?: ChatLogger): Promise<string[]> {
     }
     throw new Error(`Models request failed (${res.status}): ${text.slice(0, 200)}`);
   }
-  const data = (await res.json()) as ZaiModelsResponse;
+  const data = (await res.json()) as ModelsResponse;
   const models = (data.data ?? [])
     .map((m) => m.id ?? '')
     .filter(Boolean)
-    // Curated: GLM family + the cheap DeepSeek tiers. Auto-imported entries
-    // (e.g. deepseek-v4-*) are deliberately excluded until vetted/priced —
-    // they stay routable by explicit request but aren't offered in the UI.
-    .filter((id) => /^(glm-|deepseek-(chat|reasoner)$)/.test(id))
+    .filter((id) => !MODELS_FILTER || MODELS_FILTER.test(id))
     .sort();
   if (models.length === 0) {
     if (modelsCache) return modelsCache.models;
@@ -122,22 +134,8 @@ export async function listModels(log?: ChatLogger): Promise<string[]> {
 
 // --- Chat completion --------------------------------------------------------
 
-interface ZaiChoice {
-  message: {
-    role: string;
-    content?: string;
-    tool_calls?: ToolCall[];
-  };
-  finish_reason: string;
-}
-
-interface ZaiResponse {
-  choices?: ZaiChoice[];
-  error?: { message?: string } | string;
-}
-
 /**
- * Send a chat completion request to the Z.ai proxy and return the complete
+ * Send a chat completion request to the LLM API and return the complete
  * result.
  *
  * NOTE: implemented on top of the streaming endpoint. The upstream rejects
@@ -201,7 +199,7 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 // --- Streaming chat completion -----------------------------------------------
 
-interface ZaiStreamDelta {
+interface StreamDelta {
   content?: string;
   tool_calls?: {
     index: number;
@@ -211,15 +209,15 @@ interface ZaiStreamDelta {
   }[];
 }
 
-interface ZaiStreamChunk {
-  choices?: { delta?: ZaiStreamDelta; finish_reason?: string }[];
+interface StreamChunk {
+  choices?: { delta?: StreamDelta; finish_reason?: string }[];
   error?: { message?: string } | string;
 }
 
 /**
  * Streaming variant of {@link chatCompletion}.
  *
- * Calls the Z.ai proxy with `stream: true` and invokes `onDelta` for each
+ * Calls the LLM API with `stream: true` and invokes `onDelta` for each
  * content token as it arrives. Tool-call fragments are accumulated across
  * chunks and returned in the final result. The caller decides what to do with
  * tool calls (execute them, feed results back, and call again).
@@ -288,7 +286,7 @@ export async function chatCompletionStream(
 
   if (!res.body) {
     log?.error('Streaming: response has no body');
-    throw new Error('Z.ai streaming response has no body');
+    throw new Error('LLM streaming response has no body');
   }
 
   log?.debug(`Streaming: connection open (${Date.now() - t0}ms), reading SSE stream`);
@@ -327,9 +325,9 @@ export async function chatCompletionStream(
         if (payload === '[DONE]') continue;
         dataLineCount++;
 
-        let chunk: ZaiStreamChunk;
+        let chunk: StreamChunk;
         try {
-          chunk = JSON.parse(payload) as ZaiStreamChunk;
+          chunk = JSON.parse(payload) as StreamChunk;
         } catch {
           parseFailCount++;
           continue; // skip malformed
@@ -341,7 +339,7 @@ export async function chatCompletionStream(
               ? chunk.error
               : chunk.error.message ?? 'Unknown error';
           log?.error(`Streaming: API error in chunk: ${msg}`);
-          throw new Error(`Z.ai API error: ${msg}`);
+          throw new Error(`LLM API error: ${msg}`);
         }
 
         const delta = chunk.choices?.[0]?.delta;
@@ -375,7 +373,7 @@ export async function chatCompletionStream(
       if (payload !== '[DONE]') {
         dataLineCount++;
         try {
-          const chunk = JSON.parse(payload) as ZaiStreamChunk;
+          const chunk = JSON.parse(payload) as StreamChunk;
           const delta = chunk.choices?.[0]?.delta;
           if (delta?.content) {
             content += delta.content;

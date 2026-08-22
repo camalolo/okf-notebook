@@ -11,11 +11,11 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-/** Fallback model when nothing has been configured yet. */
-export const DEFAULT_MODEL = 'glm-5.2';
+/** Fallback model when nothing has been configured yet (env: LLM_MODEL). */
+export const DEFAULT_MODEL = process.env.LLM_MODEL || 'glm-5.2';
 
 export interface AppSettings {
-  /** Model id passed to the Z.ai API for every LLM call (chat, digest, uploads). */
+  /** Model id sent to the LLM API for every call (chat, digest, uploads). */
   model: string;
 }
 
