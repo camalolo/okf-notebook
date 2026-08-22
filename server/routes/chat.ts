@@ -26,6 +26,7 @@ import type {
   ChatCompletionResult,
   ToolCall,
 } from '../lib/llm.js';
+import { TIMEZONE } from '../config.js';
 import type { BundleConfig } from '../config.js';
 
 const router = Router();
@@ -687,7 +688,7 @@ export async function buildSystemPrompt(
     `You are an AI assistant helping manage an OKF knowledge bundle called "${bundle.name}".`,
     '',
     `Current date/time: ${new Date().toLocaleString('en-US', {
-      timeZone: 'Asia/Taipei',
+      timeZone: TIMEZONE,
       weekday: 'short',
       year: 'numeric',
       month: 'short',
@@ -958,8 +959,8 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     // sessions — e.g. for market-hours reasoning. Only the copy sent to the
     // LLM is stamped; the persisted message and older history stay untouched.
     const now = new Date();
-    const taipei = now.toLocaleString('en-US', {
-      timeZone: 'Asia/Taipei',
+    const local = now.toLocaleString('en-US', {
+      timeZone: TIMEZONE,
       weekday: 'short',
       year: 'numeric',
       month: 'short',
@@ -969,7 +970,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       timeZoneName: 'short',
     });
     const utc = now.toISOString().slice(11, 16);
-    const stamp = `[Current date/time: ${taipei} (UTC ${utc})]`;
+    const stamp = `[Current date/time: ${local} (UTC ${utc})]`;
     for (let i = callMessages.length - 1; i >= 0; i--) {
       const m = callMessages[i];
       if (m?.role === 'user') {

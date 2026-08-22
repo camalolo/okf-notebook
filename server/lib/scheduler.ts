@@ -2,7 +2,7 @@
  * Daily digest scheduler.
  *
  * Starts a node-cron job that fires DIGEST_CRON (default 8am) in DIGEST_TZ
- * (default Asia/Taipei). Each tick:
+ * (default TIMEZONE). Each tick:
  *   1. Loads bundles fresh from disk (so newly-added bundles are picked up).
  *   2. For each bundle, checks the per-bundle lastrun date; skips if it
  *      already ran today (idempotency against restarts / dev hot-reloads).

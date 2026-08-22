@@ -24,6 +24,7 @@ vi.mock('./bundle-agent.js', () => ({
 
 import { snapshotWorkingTree, runCleanupForBundle, isOkfPassCommit } from './cleanup.js';
 import { runReadOnlyTask } from './bundle-agent.js';
+import { fromAddress } from './mailer.js';
 import type { BundleConfig } from '../config.js';
 
 const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'notebook-cleanup-test-'));
@@ -78,7 +79,7 @@ describe('snapshotWorkingTree', () => {
     const log = await git.log({ maxCount: 1 });
     expect(log.latest?.message.trim()).toBe('chore(okf): snapshot working tree before cleanup');
     expect(log.latest?.author_name).toBe('Notebook Maintenance');
-    expect(log.latest?.author_email).toBe('notebook-digest@mail.example.com');
+    expect(log.latest?.author_email).toBe(fromAddress());
 
     // WIP content survives in the committed tree.
     await expect(fs.readFile(path.join(dir, 'b.md'), 'utf8')).resolves.toContain('untracked WIP');

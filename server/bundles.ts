@@ -7,23 +7,6 @@ import type { User } from './config.js';
 
 const BUNDLES_PATH = fileURLToPath(BUNDLES_FILE);
 
-const SEED_BUNDLES: BundleConfig[] = [
-  {
-    id: 'demo',
-    name: 'Demo — Graduation',
-    path: '/home/user/Sources/Demo',
-    icon: '🎓',
-    description: 'Credit recovery, university transition, monitoring',
-  },
-  {
-    id: 'sample',
-    name: 'Sample — Vehicle',
-    path: '/home/user/Sources/Sample',
-    icon: '🚗',
-    description: 'Hyundai Sample TLG-E maintenance, issues, service history',
-  },
-];
-
 /** Generate a URL-safe slug from a display name. */
 function slugify(name: string): string {
   return name
@@ -41,15 +24,22 @@ function uniqueId(name: string, existing: BundleConfig[]): string {
   return `${base}-${n}`;
 }
 
-/** Read bundles from disk, seeding the file on first run. */
+/** Read bundles from disk, seeding an empty registry on first run. */
 export async function loadBundles(): Promise<BundleConfig[]> {
   try {
     const raw = await fs.readFile(BUNDLES_PATH, 'utf8');
     return JSON.parse(raw) as BundleConfig[];
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      await saveBundles(SEED_BUNDLES);
-      return SEED_BUNDLES;
+      // First run: start empty. Bundles are added from the Settings UI
+      // ("Add bundle" — any directory of .md files on this machine).
+
+      console.log(
+        `[bundles] No ${BUNDLES_PATH} — starting with no bundles. ` +
+          'Add one from Settings → Bundles.',
+      );
+      await saveBundles([]);
+      return [];
     }
     throw err;
   }

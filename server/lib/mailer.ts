@@ -10,22 +10,27 @@
  * call can override `to` for flexibility.
  */
 
+import os from 'node:os';
 import nodemailer, { type Transporter } from 'nodemailer';
-import { DIGEST_TO } from '../config.js';
+import { DIGEST_SMTP_HOST, DIGEST_SMTP_PORT, DIGEST_TO } from '../config.js';
 
 let transport: Transporter | null = null;
 
-/** From address — uses the local hostname; Postfix will rewrite as needed. */
-function fromAddress(): string {
-  return 'notebook-digest@mail.example.com';
+/**
+ * From address for server-sent email (digests, maintenance commits) —
+ * `DIGEST_FROM` when set, else `notebook-digest@<hostname>`. The local MTA
+ * typically rewrites it to something deliverable anyway.
+ */
+export function fromAddress(): string {
+  return process.env.DIGEST_FROM || `notebook-digest@${os.hostname()}`;
 }
 
 /** Get (or lazily create) the shared SMTP transport. */
 function getTransport(): Transporter {
   if (transport) return transport;
   transport = nodemailer.createTransport({
-    host: '127.0.0.1',
-    port: 25,
+    host: DIGEST_SMTP_HOST,
+    port: DIGEST_SMTP_PORT,
     secure: false,
     // Postfix presents a self-signed / hostname-mismatched cert on the
     // loopback interface; we trust the local MTA unconditionally.

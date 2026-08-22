@@ -71,9 +71,9 @@ describe('sanitizeDigest', () => {
   });
 
   it('normalizes a google user email and keeps flags', () => {
-    expect(sanitizeDigest({ enabled: false, googleUser: ' User@Example.com ' })).toEqual({
+    expect(sanitizeDigest({ enabled: false, googleUser: ' Alice@Example.com ' })).toEqual({
       enabled: false,
-      googleUser: 'user@example.com',
+      googleUser: 'alice@example.com',
     });
   });
 

@@ -34,12 +34,13 @@ import { ensureGitRepo, openGit } from './git-repo.js';
 import { runReadOnlyTask, type ToolCallRecord } from './bundle-agent.js';
 import { lintBundle, formatOkfReport } from './okf-lint.js';
 import { WRITE_TOOLS } from '../routes/chat.js';
+import { fromAddress } from './mailer.js';
 import type { BundleConfig } from '../config.js';
 
 /** Identity used for commits made by background maintenance runs. */
 const CLEANUP_AUTHOR = {
   name: 'Notebook Maintenance',
-  email: 'notebook-digest@mail.example.com',
+  email: fromAddress(),
   // Role is required by the User type but unused here — this identity only
   // feeds git_commit authorship inside the already-authorized cleanup run.
   role: 'full',
