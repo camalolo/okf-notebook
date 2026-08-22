@@ -14,7 +14,7 @@ vi.mock('tesseract.js', () => ({
 // Mock word-extractor — binary .doc parsing needs real fixtures.
 vi.mock('word-extractor', () => ({
   default: class MockExtractor {
-    extract(_buf: Buffer) {
+    extract() {
       return Promise.resolve({
         getBody: () => 'Mock DOC body text',
       });

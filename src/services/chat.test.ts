@@ -107,9 +107,10 @@ describe('streamChat — abort behavior', () => {
     const controller = new AbortController();
 
     try {
-      for await (const _ of streamChat('b', [{ role: 'user', content: 'x' }], null, controller.signal)) {
-        break;
-      }
+      // Consume just enough of the stream to trigger the fetch, then stop.
+      const stream = streamChat('b', [{ role: 'user', content: 'x' }], null, controller.signal);
+      await stream.next();
+      await stream.return?.(undefined);
     } catch {
       // ignore
     }

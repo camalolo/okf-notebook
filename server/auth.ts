@@ -72,7 +72,7 @@ export function setupPassport(app: express.Express): void {
       ),
     );
   } else {
-    // eslint-disable-next-line no-console
+
     console.warn(
       '[auth] GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — Google OAuth disabled. ' +
         'Set them to enable login.',

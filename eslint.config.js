@@ -18,6 +18,12 @@ export default defineConfig([
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      // Advisory performance rule: our data-loading effects legitimately
+      // call setState synchronously (debounced search, chat-list bootstrap).
+      // Tracked as warnings, not CI failures.
+      'react-hooks/set-state-in-effect': 'warn',
+    },
   },
   {
     files: ['server/**/*.ts'],

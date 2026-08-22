@@ -57,7 +57,7 @@ router.get('/google/callback', (req, res, next) => {
   passport.authenticate(
     'google',
     { callbackURL: callbackURL(req) } as GoogleAuthOptions,
-    (err: unknown, user: Express.User | false | null, _info?: unknown) => {
+    (err: unknown, user: Express.User | false | null) => {
       if (err) return next(err);
       if (!user) {
         req.logout(() => {

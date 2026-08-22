@@ -46,7 +46,8 @@ export function slugifyFilename(filename: string): string {
   const base = path.basename(filename, ext);
   return base
     .replace(/[/\\:*?"<>|]+/g, '-')   // path-unsafe chars → dash
-    .replace(/[\x00-\x1f]+/g, '')     // strip control chars
+    // eslint-disable-next-line no-control-regex -- stripping control chars is the point
+    .replace(/[\x00-\x1f]+/g, '')
     .replace(/\s+/g, '-')             // whitespace → dash
     .replace(/-+/g, '-')              // collapse runs of dashes
     .replace(/^-+|-+$/g, '')          // trim leading/trailing dashes

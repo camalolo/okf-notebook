@@ -27,6 +27,23 @@ interface Provider {
   search: (query: string, numResults: number, key: string) => Promise<SearchResult[]>;
 }
 
+/** Minimal shape of a provider search response (union of their fields). */
+interface RawSearchResponse {
+  results?: RawSearchItem[];
+  organic?: RawSearchItem[];
+}
+
+interface RawSearchItem {
+  title?: string;
+  url?: string;
+  /** Serper names the destination field `link`. */
+  link?: string;
+  content?: string;
+  /** Exa names the text field `text`. */
+  text?: string;
+  snippet?: string;
+}
+
 // --- Exa ---------------------------------------------------------------------
 
 async function searchExa(query: string, numResults: number, key: string): Promise<SearchResult[]> {
@@ -40,8 +57,8 @@ async function searchExa(query: string, numResults: number, key: string): Promis
     }),
   });
   if (!res.ok) throw new Error(`exa HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json() as any;
-  return (data.results ?? []).map((r: { title?: string; url?: string; text?: string }) => ({
+  const data = (await res.json()) as RawSearchResponse;
+  return (data.results ?? []).map((r) => ({
     title: r.title ?? '',
     url: r.url ?? '',
     snippet: (r.text ?? '').slice(0, 300),
@@ -63,8 +80,8 @@ async function searchTavily(query: string, numResults: number, key: string): Pro
     }),
   });
   if (!res.ok) throw new Error(`tavily HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json() as any;
-  return (data.results ?? []).map((r: { title?: string; url?: string; content?: string }) => ({
+  const data = (await res.json()) as RawSearchResponse;
+  return (data.results ?? []).map((r) => ({
     title: r.title ?? '',
     url: r.url ?? '',
     snippet: (r.content ?? '').slice(0, 300),
@@ -80,8 +97,8 @@ async function searchTinyfish(query: string, numResults: number, key: string): P
     headers: { 'X-API-Key': key },
   });
   if (!res.ok) throw new Error(`tinyfish HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json() as any;
-  return (data.results ?? []).slice(0, numResults).map((r: { title?: string; url?: string; snippet?: string }) => ({
+  const data = (await res.json()) as RawSearchResponse;
+  return (data.results ?? []).slice(0, numResults).map((r) => ({
     title: r.title ?? '',
     url: r.url ?? '',
     snippet: r.snippet ?? '',
@@ -97,8 +114,8 @@ async function searchSerper(query: string, numResults: number, key: string): Pro
     body: JSON.stringify({ q: query, num: numResults }),
   });
   if (!res.ok) throw new Error(`serper HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json() as any;
-  return (data.organic ?? []).slice(0, numResults).map((r: { title?: string; link?: string; snippet?: string }) => ({
+  const data = (await res.json()) as RawSearchResponse;
+  return (data.organic ?? []).slice(0, numResults).map((r) => ({
     title: r.title ?? '',
     url: r.link ?? '',
     snippet: r.snippet ?? '',

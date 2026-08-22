@@ -14,7 +14,7 @@ import crypto from 'node:crypto';
 const DATA_DIR = path.resolve(import.meta.dirname, '..', 'data', 'chats');
 
 /** A single stored event in the chat timeline. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+
 export interface StoredEvent {
   ts: string; // ISO timestamp
   seq?: number; // monotonic sequence number (for resumability)

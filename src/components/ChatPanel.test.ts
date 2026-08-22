@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { restoreFromEvents, mergeConsecutiveAssistants } from '../components/ChatPanel.tsx';
+import { restoreFromEvents, mergeConsecutiveAssistants } from '../components/chat-restore.ts';
 import type { StoredEvent, ChatMessage } from '../types.ts';
 
 describe('restoreFromEvents — ordering after interruption', () => {
