@@ -988,6 +988,9 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     // Accumulate streamed content so we can persist the full assistant message.
     let turnContent = '';
     let loopIteration = 0;
+    // Exact usage accumulated across the turn's LLM rounds (from the API's
+    // final-chunk usage reports) — surfaced to the client after each round.
+    let usageTotals = { prompt: 0, completion: 0, reasoning: 0 };
 
     try {
       for (;;) {
@@ -1048,6 +1051,27 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             emit('retry', { attempt, maxAttempts: MAX_ATTEMPTS, reason, waitMs });
             await sleep(waitMs, abortController.signal); // abort during wait throws
           }
+        }
+
+        if (response.usage) {
+          const u = response.usage;
+          usageTotals = {
+            prompt: usageTotals.prompt + (u.promptTokens ?? 0),
+            completion: usageTotals.completion + (u.completionTokens ?? 0),
+            reasoning: usageTotals.reasoning + (u.reasoningTokens ?? 0),
+          };
+          emit('usage', {
+            // The exact context size of the most recent LLM call (the live
+            // context indicator) …
+            promptTokens: u.promptTokens,
+            completionTokens: u.completionTokens,
+            reasoningTokens: u.reasoningTokens,
+            // … and cost totals across this turn's rounds so far (each round
+            // re-prefills, so the turn's prompt cost is a sum).
+            turnPromptTokens: usageTotals.prompt,
+            turnCompletionTokens: usageTotals.completion,
+            turnReasoningTokens: usageTotals.reasoning,
+          });
         }
 
         if (response.tool_calls && response.tool_calls.length > 0) {
@@ -1217,7 +1241,13 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         }
         persist({ kind: 'assistant', content: turnContent });
         persist({ kind: 'turn_end' });
-        emit('done', {});
+        emit('done', {
+          usage: {
+            promptTokens: usageTotals.prompt,
+            completionTokens: usageTotals.completion,
+            reasoningTokens: usageTotals.reasoning,
+          },
+        });
         if (clientConnected) res.end();
         return;
       }

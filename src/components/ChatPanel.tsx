@@ -347,7 +347,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   }, [compactionIndex]);
 
   /** Estimated conversation context tokens (only active context after last compaction). */
-  const ctxTokens = useMemo(() => {
+  const estimatedCtxTokens = useMemo(() => {
     const start = compactionIndex ?? 0;
     const activeMessages = messages.slice(start);
     // Count how many assistant messages are before the compaction point so
@@ -359,6 +359,15 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     const activePastTurns = pastTurns.slice(assistantOffset);
     return estimateContextTokens(activeMessages, activePastTurns, turnEvents);
   }, [messages, pastTurns, turnEvents, compactionIndex]);
+
+  /**
+   * Exact context size reported by the API (final-chunk usage of the last
+   * LLM call) — replaces the estimate while streaming, since the estimate
+   * over-counts tool results that are not resent to the model. Falls back
+   * to the estimate before the first usage event of a turn.
+   */
+  const [exactPromptTokens, setExactPromptTokens] = useState<number | null>(null);
+  const ctxTokens = exactPromptTokens ?? estimatedCtxTokens;
 
   // Mirror the latest message history so the async send handler can build the
   // request payload without reading stale state.
@@ -676,6 +685,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
     const controller = new AbortController();
     abortRef.current = controller;
+    // New turn: the exact-context override from the previous turn no longer
+    // applies (history grew) until the first usage event of this turn.
+    setExactPromptTokens(null);
 
     // Local tracking for this turn (mirrors the setTurnEvents/setProposedChanges
     // calls so we can compute the final snapshot accurately).
@@ -691,7 +703,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       for await (const ev of streamChat(bundleId, apiHistory, chatIdRef.current, controller.signal)) {
         const data = ev.data;
 
-        if (ev.event === 'thinking') {
+        if (ev.event === 'usage') {
+          // Exact per-call token usage from the API's final chunk. The
+          // prompt size is the true context of the last LLM call.
+          const obj = data as { promptTokens?: unknown };
+          if (typeof obj.promptTokens === 'number') {
+            setExactPromptTokens(obj.promptTokens);
+          }
+        } else if (ev.event === 'thinking') {
           // Chain-of-thought from a thinking model, streamed before the
           // visible answer. Transient display only — coalesced into the
           // trailing thinking event, never resent to the LLM, not persisted.
@@ -1305,7 +1324,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               type="button"
               className={`chat-compact-btn ctx-${formatCtxTokens(ctxTokens).level}`}
               onClick={() => void handleCompact()}
-              title={`Summarise conversation to free up context (≈${ctxTokens.toLocaleString()} tokens active)`}
+              title={
+                exactPromptTokens !== null
+                  ? `Summarise conversation to free up context (${ctxTokens.toLocaleString()} tokens active — exact, last LLM call)`
+                  : `Summarise conversation to free up context (≈${ctxTokens.toLocaleString()} tokens active)`
+              }
             >
               Compact{ctxTokens > 0 && (() => {
                 const { label } = formatCtxTokens(ctxTokens);

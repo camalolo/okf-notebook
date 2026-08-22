@@ -267,6 +267,34 @@ describe('chatCompletionStream — abort behavior', () => {
   // -------------------------------------------------------------------------
   // Test 8: reasoning_content deltas stream via onThinking, stay out of content.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Test 9: final-chunk usage (stream_options.include_usage) is returned.
+  // -------------------------------------------------------------------------
+  it('returns usage stats from the final chunk', async () => {
+    const usageChunk = `data: ${JSON.stringify({
+      choices: [{ delta: {} }],
+      usage: {
+        prompt_tokens: 1234,
+        completion_tokens: 56,
+        prompt_tokens_details: { cached_tokens: 100 },
+        completion_tokens_details: { reasoning_tokens: 40 },
+      },
+    })}\n\n`;
+    const chunks = [contentDelta('OK'), usageChunk, 'data: [DONE]\n\n'];
+    vi.stubGlobal('fetch', vi.fn(createMockFetch(chunks, 0)));
+
+    const result = await chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, {
+      onDelta: () => {},
+    });
+
+    expect(result.usage).toEqual({
+      promptTokens: 1234,
+      completionTokens: 56,
+      reasoningTokens: 40,
+      cachedTokens: 100,
+    });
+  });
+
   it('forwards reasoning deltas via onThinking and excludes them from content', async () => {
     const chunks = [
       reasoningDelta('Let me think '),

@@ -81,9 +81,21 @@ export interface ChatMessage {
   tool_call_id?: string;
 }
 
+/** Exact token usage from the API (final SSE chunk, include_usage). */
+export interface UsageStats {
+  promptTokens?: number;
+  completionTokens?: number;
+  /** Thinking-model reasoning tokens (subset of completion). */
+  reasoningTokens?: number;
+  /** Prompt tokens served from the provider's cache, when reported. */
+  cachedTokens?: number;
+}
+
 export interface ChatCompletionResult {
   content: string;
   tool_calls?: ToolCall[];
+  /** Usage of this call, when the endpoint reported it (include_usage). */
+  usage?: UsageStats;
 }
 
 // --- Model selection ---------------------------------------------------------
@@ -214,6 +226,13 @@ interface StreamDelta {
 interface StreamChunk {
   choices?: { delta?: StreamDelta; finish_reason?: string }[];
   error?: { message?: string } | string;
+  /** Present on the final chunk when stream_options.include_usage is set. */
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
 }
 
 /**
@@ -253,6 +272,8 @@ export async function chatCompletionStream(
     model,
     messages,
     stream: true,
+    // Exact per-call usage in the final chunk (prompt/completion/reasoning).
+    stream_options: { include_usage: true },
   };
   if (tools && tools.length > 0) {
     body.tools = tools;
@@ -313,6 +334,7 @@ export async function chatCompletionStream(
   let parseFailCount = 0;
   let firstContentMs = 0;
   let reasoningChars = 0;
+  let usage: UsageStats | undefined;
   const toolCallMap = new Map<
     number,
     { id: string; name: string; arguments: string }
@@ -354,6 +376,15 @@ export async function chatCompletionStream(
               : chunk.error.message ?? 'Unknown error';
           log?.error(`Streaming: API error in chunk: ${msg}`);
           throw new Error(`LLM API error: ${msg}`);
+        }
+
+        if (chunk.usage) {
+          usage = {
+            promptTokens: chunk.usage.prompt_tokens,
+            completionTokens: chunk.usage.completion_tokens,
+            reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens,
+            cachedTokens: chunk.usage.prompt_tokens_details?.cached_tokens,
+          };
         }
 
         const delta = chunk.choices?.[0]?.delta;
@@ -437,17 +468,20 @@ export async function chatCompletionStream(
   const elapsed = Date.now() - t0;
   // Reasoning summary for the log line (empty for non-thinking models).
   const rs = reasoningChars > 0 ? `, ${reasoningChars} reasoning chars` : '';
+  const us = usage
+    ? `, usage p${usage.promptTokens ?? '?'}/c${usage.completionTokens ?? '?'}${usage.reasoningTokens ? ` (r${usage.reasoningTokens})` : ''}`
+    : '';
 
   if (content.trim() && !tool_calls) {
     log?.info(
       `Stream complete (${elapsed}ms): ${content.length} chars content` +
       ` | ${chunkCount} chunks, ${dataLineCount} data lines, ${parseFailCount} parse failures` +
-      (firstContentMs ? `, first token ${firstContentMs}ms` : '') + rs,
+      (firstContentMs ? `, first token ${firstContentMs}ms` : '') + rs + us,
     );
   } else if (tool_calls) {
     log?.info(
       `Stream complete (${elapsed}ms): ${tool_calls.length} tool call(s): ${tool_calls.map(t => t.function.name).join(', ')}` +
-      ` | ${chunkCount} chunks, ${dataLineCount} data lines, ${parseFailCount} parse failures` + rs,
+      ` | ${chunkCount} chunks, ${dataLineCount} data lines, ${parseFailCount} parse failures` + rs + us,
     );
   } else {
     // ⚠️ Empty response — no content, no tool calls. This is the most likely
@@ -459,5 +493,5 @@ export async function chatCompletionStream(
     );
   }
 
-  return { content, tool_calls };
+  return { content, tool_calls, usage };
 }
