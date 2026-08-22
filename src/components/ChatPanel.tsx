@@ -249,12 +249,26 @@ function formatDate(iso: string): string {
  * Rough token estimate (~4 chars/token) for the conversation context.
  * Excludes the server-side system prompt (AGENTS.md, OKF.md, file list).
  */
+/**
+ * Rough context-size estimate used until the first exact usage report of a
+ * turn arrives (the API's final-chunk prompt_tokens replaces it).
+ *
+ * What is actually sent per turn: the system prompt + tool definitions
+ * (server-side; approximated by a constant), the user/assistant messages
+ * since the last compaction, and — only while the turn is running — its
+ * own tool results (each round re-sends them). PAST turns' tool results
+ * are dropped by the next request and must NOT be counted (they once
+ * inflated the estimate to ~10× reality, nagging "compact" at 254K for a
+ * ~10K context). Their visible text is already in `messages`.
+ */
+const CTX_SERVER_OVERHEAD = 4_000; // system prompt (AGENTS/OKF/file list) + tool defs
+
 function estimateContextTokens(
   messages: ChatMessage[],
-  pastTurns: TurnEvent[][],
+  _pastTurns: TurnEvent[][], // deliberately ignored — see above
   turnEvents: TurnEvent[],
 ): number {
-  let chars = 0;
+  let chars = CTX_SERVER_OVERHEAD * 4;
   for (const m of messages) {
     chars += m.content.length + 8; // role + formatting overhead
   }
@@ -273,9 +287,6 @@ function estimateContextTokens(
       chars += ev.text.length;
     }
   };
-  for (const turn of pastTurns) {
-    for (const ev of turn) addTurnEvent(ev);
-  }
   for (const ev of turnEvents) addTurnEvent(ev);
   return Math.ceil(chars / 4);
 }
