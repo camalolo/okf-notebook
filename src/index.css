@@ -2117,13 +2117,16 @@ select.form-input {
   text-decoration: underline;
 }
 
-/* Thinking-model chain-of-thought block (live while streaming, collapsible) */
+/* Thinking-model chain-of-thought block (live while streaming, collapsible).
+ * Hugs its content like the tool chips — without align-self the collapsed
+ * state stretches full-width and reads as a horizontal separator line. */
 .chat-thinking {
+  align-self: flex-start;
+  max-width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   overflow: hidden;
-  max-width: 100%;
 }
 
 .chat-thinking-header {
