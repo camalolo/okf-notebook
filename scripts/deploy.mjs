@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Deploy script: copies the dist/ build tree to production.
+ * Deploy script: copies the dist/ build tree to a production directory.
  *
  * Build output layout (local):
  *   dist/
@@ -16,9 +16,14 @@
  *
  * Runtime data (server/bundles.json, server/data/, data/chats/) is preserved.
  *
- * Runs AFTER `tsc -p tsconfig.server.json` and `vite build`.
+ * DEPLOY_DIR comes from the environment, falling back to a `DEPLOY_DIR=` line
+ * in the repo's .env (so the deploy command stays one-liner on machines that
+ * keep it there). Exits with an error when neither is set.
+ *
+ * Runs AFTER `tsc -p tsconfig.server.json` and `vite build`
+ * (`npm run deploy` / `npm run deploy:server` do both).
  */
-import { cp, mkdir, rm, access } from 'node:fs/promises';
+import { cp, mkdir, rm, access, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
@@ -27,7 +32,17 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
-const DEPLOY_DIR = '/srv/notebook';
+/** Read `DEPLOY_DIR=…` from the repo's .env (deploy runs outside the server,
+ *  which is what normally loads that file). Returns '' when absent. */
+async function deployDirFromEnvFile() {
+  try {
+    const raw = await readFile(path.join(ROOT, '.env'), 'utf8');
+    const m = raw.match(/^\s*DEPLOY_DIR\s*=\s*(\S+)\s*$/m);
+    return m ? m[1] : '';
+  } catch {
+    return '';
+  }
+}
 
 async function exists(p) {
   try {
@@ -39,6 +54,15 @@ async function exists(p) {
 }
 
 async function main() {
+  const DEPLOY_DIR = process.env.DEPLOY_DIR || (await deployDirFromEnvFile());
+  if (!DEPLOY_DIR) {
+    console.error(
+      '[deploy] DEPLOY_DIR is not set. Export it (DEPLOY_DIR=/srv/notebook npm run deploy)\n' +
+        '         or add a DEPLOY_DIR=… line to .env.',
+    );
+    process.exit(1);
+  }
+  console.log('[deploy] Target:', DEPLOY_DIR);
   const distServer = path.join(ROOT, 'dist', 'server');
   const distPublic = path.join(ROOT, 'dist', 'public');
 
@@ -104,7 +128,7 @@ async function main() {
     await cp(envSrc, path.join(DEPLOY_DIR, '.env'), { force: true });
   }
 
-  console.log('[deploy] Done.  Restart the service:');
+  console.log('[deploy] Done.  Restart the service, e.g.:');
   console.log('  systemctl --user restart notebook.service');
 }
 

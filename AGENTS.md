@@ -11,8 +11,10 @@ npm install
 npm run dev:all    # Vite (5173) + Express (3002) concurrently, both hot-reloading
 npm run dev        # frontend only
 npm run dev:server # backend only (tsx watch)
-npm run build      # Full production deploy: typecheck → UI → compile server → deploy
-npm run build:server # Deploy just the server (skip UI rebuild)
+npm run build      # typecheck → build UI → compile server (→ dist/, no deploy)
+npm run build:server # compile just the server to dist/server/
+npm run deploy     # build everything, then deploy to $DEPLOY_DIR
+npm run deploy:server # deploy just the server (skip UI rebuild, faster)
 npm run lint       # eslint
 npm test           # vitest run (one-shot)
 npm run test:watch # vitest watch mode
@@ -24,18 +26,18 @@ directories referenced in `server/bundles.json` to exist on the local filesystem
 
 **Build output**: `vite.config.ts` builds the UI to `dist/public/`, and
 `tsc -p tsconfig.server.json` compiles the server to `dist/server/`.
-`scripts/deploy.mjs` deploys the `dist/` tree to
-`/srv/notebook/`. Building on another machine requires
-editing `DEPLOY_DIR` in `scripts/deploy.mjs`.
+`scripts/deploy.mjs` deploys the `dist/` tree to the directory named by
+`DEPLOY_DIR` (env var, or a `DEPLOY_DIR=` line in `.env`); it exits with an
+error when neither is set.
 
 ## Deployment & Service Management
 
-Both the UI and the compiled server are deployed to the same directory:
-`/srv/notebook/`. Express serves both the API and the
+Both the UI and the compiled server are deployed to the same directory
+(`DEPLOY_DIR`, e.g. `/srv/notebook`). Express serves both the API and the
 static UI from a single process. The production layout is:
 
 ```
-/srv/notebook/
+{DEPLOY_DIR}/
   public/            ← Vite build output (served by Express)
     index.html
     assets/          ← Vite hashed bundles
@@ -59,8 +61,8 @@ The backend runs as a **user systemd service** — not a system-level service.
 # ~/.config/systemd/user/notebook.service
 
 # Deploy everything (UI + server)
-npm run build          # builds UI, compiles server TS→JS, deploys both, installs deps
-npm run build:server   # deploy just the server (skip UI rebuild, faster)
+npm run deploy         # build + deploy both
+npm run deploy:server  # deploy just the server (skip UI rebuild, faster)
 
 # Then restart the service to pick up new server code
 systemctl --user restart notebook.service
@@ -71,7 +73,7 @@ journalctl --user -u notebook.service -f
 journalctl --user -u notebook.service --since "5 min ago"
 ```
 
-**How `npm run build` works** (in order):
+**How `npm run deploy` works** (in order):
 1. `tsc -b` — typecheck frontend
 2. `vite build` — build UI to `dist/public/` (`emptyOutDir: true`)
 3. `tsc -p tsconfig.server.json` — compile server TS → `dist/server/`
@@ -80,7 +82,7 @@ journalctl --user -u notebook.service --since "5 min ago"
    copy `.env`
 
 **The systemd service runs compiled JS** (`node server/index.js`), not `tsx` on
-source files. The service `WorkingDirectory` is `/srv/notebook`.
+source files. The service `WorkingDirectory` is `{DEPLOY_DIR}`.
 
 **Runtime data is preserved across deploys**: `server/bundles.json`, `server/data/`,
 and `data/chats/` are not wiped. The deploy script cleans `public/` (stale assets)
@@ -95,7 +97,7 @@ systemd service, with stdout going nowhere useful. Always use `systemctl --user`
 ```
 src/     ← React 19 SPA (Vite, React Router)
 server/  ← Express 5 API (Passport Google OAuth, simple-git, MCP client)
-deploy/  ← nginx config for notebook.example.com
+deploy/  ← example nginx reverse-proxy config
 ```
 
 ### Request flow
@@ -110,7 +112,8 @@ deploy/  ← nginx config for notebook.example.com
   - `/bundles/*` — bundle CRUD + composed sub-routers (`files`, `git`, `chat`)
   - `/chats/*` — chat session persistence (separate from the chat *agent* route)
   - `/settings/*` — global settings (AI model)
-  - `/mcps` — MCP server status list (for the per-bundle toggles in Settings)
+  - `/mcps` — MCP server registry CRUD + status (Settings → "MCP servers" and
+    the per-bundle toggles)
   - (full-text search is also mounted under `/bundles` — see `server/routes/search.ts`)
 
 ### Agentic chat loop (`server/routes/chat.ts`)
@@ -119,7 +122,7 @@ deploy/  ← nginx config for notebook.example.com
 `for(;;)` server-side loop streamed as SSE:
 
 1. Build a system prompt from the bundle's `AGENTS.md`, `OKF.md`, file list, and
-   current date (Asia/Taipei timezone).
+   current date (in `TIMEZONE`, default the server's own timezone).
 2. Call the LLM via `chatCompletionStream()` with tool definitions, forwarding
    content deltas to the client as they arrive.
 3. If the LLM returns `tool_calls`, execute each (built-in bundle tool or MCP),
@@ -211,19 +214,22 @@ LLM to call it for any non-trivial arithmetic.
 
 ### LLM backend (`server/lib/llm.ts`)
 
-Calls the **Z.ai GLM API through the local inference proxy** (llm-proxy,
-`~/Sources/llm-proxy`, deployed at `/srv/inference`, port 3003) at
-`http://127.0.0.1:3003/api/zai`, authenticated with `X-API-Token`. Tokens are
-fetched from `http://127.0.0.1:3003/api/token` (IP-bound, 5-min expiry) and
-cached until 30s before expiry.
+Calls **any OpenAI-compatible chat-completions API**. The base URL comes from
+`LLM_BASE_URL` (default `http://127.0.0.1:3003/api/v1` — a local inference
+proxy; the author's setup routes the Z.ai GLM API through it), the key from
+`LLM_API_KEY` (legacy alias `INFERENCE_API_KEY`), sent as
+`Authorization: Bearer …`. Works with OpenAI, OpenRouter, Z.ai, Ollama, vLLM,
+LM Studio, etc. — see `llm.ts`'s header comment for URL shapes.
 
 **Model selection is a global setting** (Settings page → "AI model"):
 persisted in `server/data/settings.json` (`server/settings.ts`), defaults to
-`glm-5.2`, applied to every LLM call (chat, digest, uploads, retitles).
-The dropdown is populated from the API's official model list via the proxy's
-`GET /api/zai/models` passthrough (`listModels()` in `llm.ts`, 5-min cache);
-PUT validates the id against that list. Changes take effect on the next
-request — no restart needed.
+`LLM_MODEL` (itself defaulting to `glm-5.2`), applied to every LLM call
+(chat, digest, uploads, retitles). The dropdown is populated from the
+endpoint's `GET …/models` list (`listModels()` in `llm.ts`, 5-min cache);
+PUT validates the id against that list. An optional `LLM_MODELS_FILTER` env
+regex curates which ids the dropdown offers (useful behind a routing proxy
+with a huge catalog). Changes take effect on the next request — no restart
+needed.
 
 Two functions are exported: `chatCompletionStream` (used by the chat route —
 streams content deltas via a callback, accumulates tool-call fragments across
@@ -240,7 +246,7 @@ bundle in the scheduler. `cleanup: true` runs the OKF maintenance pass
 first (see below). `googleUser` (an email with Workspace tokens on disk)
 gives the digest read-only `gw_` tools (calendar + mail subset) routed to that
 user's MCP instance via `runReadOnlyTask({ mcpTools, mcpUserEmail })` — one
-notebook can digest the author's calendar, another Demo's. Global knobs remain
+notebook can digest one person's calendar, another's. Global knobs remain
 env-based: `DIGEST_CRON`, `DIGEST_TZ`, `DIGEST_TO`, `DIGEST_DISABLED`.
 
 **OKF cleanup pass** (`server/lib/cleanup.ts`, `server/lib/okf-lint.ts`):
@@ -265,18 +271,25 @@ digest record (`cleanup` field) and do NOT abort the digest. Preview a run
 manually with `node server/index.ts --run-cleanup [bundleId]` (runs
 regardless of the per-bundle setting).
 
-### MCP servers (`server/lib/mcp-manager.ts`)
+### MCP servers (`server/lib/mcp-manager.ts`, `server/mcps.ts`)
 
 MCP (Model Context Protocol) servers are spawned as child processes (stdio
-transport) at startup and their tools are discovered and exposed to the LLM.
-Configured **hardcoded** in `MCP_SERVERS` at the top of `server/index.ts` (not
-in a config file). Tools are namespaced with a `toolPrefix` to avoid collisions
+transport) and their tools are discovered and exposed to the LLM. The server
+set is **runtime data**, not code: persisted in `server/data/mcps.json`
+(`server/mcps.ts` — load/save/sanitize, seeded empty on first run) and managed
+from **Settings → "MCP servers"** (add/edit/remove/restart; nothing is shipped
+by default). Tools are namespaced with a `toolPrefix` to avoid collisions
 (`gw_` for Google Workspace). `allowTools` filters which tools each server
-exposes. Add or modify MCP servers by editing that array. `mcpManager.restartServer(name)`
-hot-restarts a single server.
+exposes. The management routes (`server/routes/mcps.ts`, `full`-role only —
+an MCP config is an arbitrary command line on the host) start/restart the
+server immediately; a failed start is recorded per-server and surfaced in the
+UI (`running: false` + error) rather than rejected.
 
 **Per-user MCP instances (`perUser: true`)**: the `google-workspace` server runs
-one child process per workspace-connected user. The MCP package resolves its
+one child process per workspace-connected user. (The name `google-workspace`
+is the convention — `auth.ts`, `workspace-auth.ts`, and `digest.ts`
+special-case it; per-user token isolation only applies to a server with that
+exact name.) The MCP package resolves its
 tokens from `$HOME/.google-workspace-mcp`, so each user's instance is spawned
 with `HOME=server/data/workspace-auth/<email>/` (and a shared `npm_config_cache`
 so npx doesn't re-download the package per user). Chat `gw_*` calls route to the
@@ -297,11 +310,14 @@ advertises the exposed tools.
 
 **ibkr-flex** (`bin/ibkr-flex-mcp`, static-musl Rust binary): read-only IBKR
 account reporting via the Flex Web Service (`flex_positions`, `flex_trades`,
-`flex_cash`, `flex_run_query`). Started only when both `IBKR_FLEX_TOKEN` and
-`IBKR_FLEX_QUERY_ID` are set in `.env`; the Flex Query must be configured in
-Client Portal (Reports → Flex Queries) to emit the desired sections. The
-binary lives in `bin/` (committed) and is resolved as `../bin` relative to the
-server directory — deploy.mjs ships it to `{DEPLOY_DIR}/bin/`.
+`flex_cash`, `flex_run_query`). Third-party (MIT):
+https://github.com/0xmichalis/ibkr-flex-mcp — the binary is **not committed**
+(gitignored, platform-specific); it must be downloaded from upstream releases
+into `bin/`. Started only when both `IBKR_FLEX_TOKEN` and `IBKR_FLEX_QUERY_ID`
+are set in `.env` **and** the binary exists (clear warning otherwise); the Flex
+Query must be configured in Client Portal (Reports → Flex Queries) to emit the
+desired sections. Resolved as `../bin` relative to the server directory —
+deploy.mjs ships `bin/` to `{DEPLOY_DIR}/bin/` when present.
 
 **Google Workspace auth short-circuit**: before any `gw_*` tool call, the chat
 loop calls `validateWorkspaceAuth(email)` (`server/lib/workspace-auth.ts`) for
@@ -323,7 +339,9 @@ in `server/lib/web-search.ts`.
 
 ### Auth model (`server/auth.ts`, `server/config.ts`, `server/lib/workspace-auth.ts`)
 
-- Google OAuth 2.0 with an **email allowlist** (`USERS` map in `config.ts`) →
+- Google OAuth 2.0 with an **email allowlist** (the `NOTEBOOK_USERS` env var —
+  `email:full`/`email:readonly` pairs; parsed into the `USERS` map in
+  `config.ts`) →
   roles `readonly` or `full`. No self-service registration.
 - `requireAuth` middleware guards all API routes; `requireFull` guards writes.
 - **Unified OAuth**: *every* login requests Google profile/email **plus** the
@@ -428,17 +446,27 @@ in the persistence layer.
 `server/config.ts` reads from `process.env` directly — **no dotenv import**.
 Production loads env via systemd `EnvironmentFile=.env` (per service file in
 `~/.config/systemd/user/notebook.service`); for local dev, export them in your
-shell or run with `--env-file=.env`. Variables:
+shell or run with `--env-file=.env`. Variables (see `.env.example` for the full
+annotated list):
 
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — OAuth (omit to disable login).
+- `NOTEBOOK_USERS` — login allowlist, `email:role` pairs (`role` = `full` |
+  `readonly`). Empty = nobody can log in.
 - `SESSION_SECRET` — defaults to `dev-secret-change-me`.
 - `PORT` — defaults to 3002.
+- `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_MODELS_FILTER` — LLM
+  endpoint config (defaults: local proxy at `127.0.0.1:3003/api/v1`,
+  `glm-5.2`).
+- `TIMEZONE` — IANA tz for the chat date stamp; defaults to the server's own.
 - `EXA_API_KEY` / `TAVILY_API_KEY` / `TINYFISH_API_KEY` / `SERPER_API_KEY` —
   optional, for the `web_search` tool (any one enables it).
+- `DIGEST_TO` / `DIGEST_FROM` / `DIGEST_SMTP_HOST` / `DIGEST_SMTP_PORT` /
+  `DIGEST_CRON` / `DIGEST_TZ` / `DIGEST_DISABLED` — daily digest email.
+- `DEPLOY_DIR` — target directory for `scripts/deploy.mjs`.
 
-`server/bundles.json` (gitignored) holds bundle registrations. On first run it's
-seeded with two hardcoded local paths (`/home/user/Sources/Demo`, `Sample`) —
-these won't exist elsewhere. Manage bundles through the Settings UI instead.
+`server/bundles.json` (gitignored) holds bundle registrations. It starts
+empty; bundles are added through the Settings UI (any existing directory of
+`.md` files).
 
 ## OKF Format
 

@@ -20,10 +20,19 @@ data/
 # Playwright MCP test artifacts
 .playwright-mcp/
 
+# Optional third-party MCP binaries — not committed (downloaded from upstream
+# releases; see the MCP servers section of .env.example)
+bin/
+
 # Tesseract OCR language data (downloaded at runtime)
 *.traineddata
 
 # Build output (staging for deploy)
+
+# Local development notes / agent state — not part of the published project
+plan.md
+research/
+.krush/
 
 # Editor directories and files
 .vscode/*
