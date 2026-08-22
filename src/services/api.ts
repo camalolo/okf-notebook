@@ -90,6 +90,7 @@ export function updateBundle(
     description?: string;
     allowedUsers?: string[];
     mcps?: string[];
+    thinking?: 'off' | 'on';
     digest?: DigestConfig;
   },
 ): Promise<BundleConfig> {

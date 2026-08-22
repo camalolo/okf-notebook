@@ -1023,6 +1023,9 @@ router.post('/:bundleId/chat', async (req, res, next) => {
               // Thinking-model chain-of-thought — transient UI hint, never
               // persisted and never mixed into content.
               onThinking: (text) => emit('thinking', { text }),
+              // Bundle setting: most bundles don't need extended thinking —
+              // disabling it removes ~90% of the latency for notes work.
+              ...(bundle.thinking !== 'on' ? { thinking: 'off' as const } : {}),
               signal: abortController.signal,
               log,
             });

@@ -99,6 +99,7 @@ export function Settings({ user }: SettingsProps) {
   const [mcpsSaving, setMcpsSaving] = useState(false);
   const [mcpsError, setMcpsError] = useState<string | null>(null);
   const [digestEditId, setDigestEditId] = useState<string | null>(null);
+  const [thinkingDraft, setThinkingDraft] = useState<'off' | 'on'>('off');
   const [digestDraft, setDigestDraft] = useState<DigestConfig>({});
   const [digestSaving, setDigestSaving] = useState(false);
   const [digestError, setDigestError] = useState<string | null>(null);
@@ -473,6 +474,7 @@ export function Settings({ user }: SettingsProps) {
     setMcpsEditId(null);
     setConfirmId(null);
     setDigestEditId(b.id);
+    setThinkingDraft(b.thinking === 'on' ? 'on' : 'off');
     setDigestDraft({
       enabled: b.digest?.enabled !== false,
       cleanup: b.digest?.cleanup === true,
@@ -486,6 +488,7 @@ export function Settings({ user }: SettingsProps) {
     setDigestError(null);
     try {
       await updateBundle(id, {
+        thinking: thinkingDraft,
         digest: {
           enabled: digestDraft.enabled !== false,
           cleanup: digestDraft.cleanup === true,
@@ -829,6 +832,7 @@ export function Settings({ user }: SettingsProps) {
                       Digest: {b.digest?.enabled === false ? 'off' : 'on'}
                       {b.digest?.cleanup ? ' · OKF cleanup: on' : ''}
                       {b.digest?.googleUser ? ` · Google: ${b.digest.googleUser}` : ''}
+                      {` · Thinking: ${b.thinking === 'on' ? 'on' : 'off'}`}
                     </span>
                   </div>
                   {confirmId === b.id ? (
@@ -945,7 +949,7 @@ export function Settings({ user }: SettingsProps) {
                         className="btn btn-ghost btn-sm"
                         onClick={() => openDigestEditor(b)}
                       >
-                        Digest…
+                        Chat/Digest…
                       </button>
                       <button
                         className="btn btn-danger-ghost btn-sm"
@@ -1070,6 +1074,24 @@ export function Settings({ user }: SettingsProps) {
                 )}
                 {digestEditId === b.id && (
                   <div className="bundle-access-editor">
+                    <span className="form-label">Chat &amp; daily digest</span>
+                    <label className="mcp-check">
+                      <input
+                        type="checkbox"
+                        checked={thinkingDraft === 'on'}
+                        onChange={(e) =>
+                          setThinkingDraft(e.target.checked ? 'on' : 'off')
+                        }
+                      />
+                      <span>
+                        Extended thinking (chain-of-thought)
+                        <em className="mcp-check-meta">
+                          {' '}
+                          — off by default; enable for bundles needing deep
+                          multistep reasoning (≈10× faster and far cheaper off)
+                        </em>
+                      </span>
+                    </label>
                     <span className="form-label">Daily digest</span>
                     <label className="mcp-check">
                       <input

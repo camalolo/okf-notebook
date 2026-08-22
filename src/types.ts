@@ -34,6 +34,8 @@ export interface BundleConfig {
   allowedUsers?: string[];
   /** MCP server names enabled for this bundle. `undefined` = all servers. */
   mcps?: string[];
+  /** Extended thinking for this bundle's chats. `undefined`/`'off'` = off (default). */
+  thinking?: 'off' | 'on';
   /** Daily digest settings for this bundle. */
   digest?: DigestConfig;
 }

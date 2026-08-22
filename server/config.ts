@@ -30,6 +30,13 @@ export interface BundleConfig {
    * in `MCP_SERVERS` at save time.
    */
   mcps?: string[];
+  /**
+   * Extended thinking for this bundle's chats. `undefined`/`'off'` = the
+   * model answers without chain-of-thought (default — notes management and
+   * plain-English discussion don't need it, and it's ~90% of the latency);
+   * `'on'` = thinking enabled (multistep reasoning over the notes).
+   */
+  thinking?: 'off' | 'on';
   /** Daily digest settings for this bundle. `undefined` = defaults (enabled, no Google). */
   digest?: DigestConfig;
 }

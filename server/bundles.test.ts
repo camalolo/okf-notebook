@@ -115,3 +115,25 @@ describe('bundle mcps persistence', () => {
     expect(updated.mcps).toEqual(['browser']);
   });
 });
+
+describe('sanitizeThinking', () => {
+  it('passes the literals through', async () => {
+    const { sanitizeThinking } = await import('./bundles.js');
+    expect(sanitizeThinking('on')).toBe('on');
+    expect(sanitizeThinking('off')).toBe('off');
+  });
+
+  it('treats absent/null/empty as undefined (the off default)', async () => {
+    const { sanitizeThinking } = await import('./bundles.js');
+    expect(sanitizeThinking(undefined)).toBeUndefined();
+    expect(sanitizeThinking(null)).toBeUndefined();
+    expect(sanitizeThinking('')).toBeUndefined();
+  });
+
+  it('rejects anything else', async () => {
+    const { sanitizeThinking } = await import('./bundles.js');
+    expect(() => sanitizeThinking(true)).toThrow(BundleError);
+    expect(() => sanitizeThinking('enabled')).toThrow(BundleError);
+    expect(() => sanitizeThinking(1)).toThrow(BundleError);
+  });
+});

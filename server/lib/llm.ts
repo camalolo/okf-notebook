@@ -250,6 +250,13 @@ export interface StreamOptions {
   /** Called for each streamed content chunk. */
   onDelta: (text: string) => void;
   /**
+   * Extended thinking for thinking-capable models. `undefined` lets the
+   * endpoint default apply (usually: enabled); `'off'` sends
+   * `thinking: {type: "disabled"}` so the model answers without
+   * chain-of-thought — dramatically faster and cheaper for simple tasks.
+   */
+  thinking?: 'off';
+  /**
    * Called for each reasoning/chain-of-thought chunk (`reasoning_content`
    * deltas, emitted by thinking models before the visible answer). Optional.
    */
@@ -275,6 +282,7 @@ export async function chatCompletionStream(
     // Exact per-call usage in the final chunk (prompt/completion/reasoning).
     stream_options: { include_usage: true },
   };
+  if (opts.thinking === 'off') body.thinking = { type: 'disabled' };
   if (tools && tools.length > 0) {
     body.tools = tools;
     body.tool_choice = 'auto';

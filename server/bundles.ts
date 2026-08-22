@@ -133,6 +133,17 @@ export function sanitizeDigest(raw: unknown): DigestConfig | undefined {
   };
 }
 
+/**
+ * Normalize a `thinking` value ('off' | 'on') from untrusted input.
+ * `undefined`/null/'' = off (the default — most bundles don't need extended
+ * thinking); anything else must be one of the two literals.
+ */
+export function sanitizeThinking(raw: unknown): 'off' | 'on' | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (raw === 'off' || raw === 'on') return raw;
+  throw new BundleError('thinking must be "off" or "on"', 'INVALID_THINKING');
+}
+
 export interface NewBundleInput {
   name: string;
   path: string;
@@ -140,6 +151,7 @@ export interface NewBundleInput {
   description?: string;
   allowedUsers?: string[];
   mcps?: string[];
+  thinking?: 'off' | 'on';
   digest?: DigestConfig;
 }
 
@@ -165,6 +177,7 @@ export async function addBundle(data: NewBundleInput): Promise<BundleConfig> {
     description: data.description ?? '',
     ...(data.allowedUsers ? { allowedUsers: data.allowedUsers } : {}),
     ...(data.mcps !== undefined ? { mcps: data.mcps } : {}),
+    ...(data.thinking !== undefined ? { thinking: data.thinking } : {}),
     ...(data.digest !== undefined ? { digest: data.digest } : {}),
   };
   bundles.push(bundle);
@@ -185,7 +198,7 @@ export async function removeBundle(id: string): Promise<void> {
 /** Update a bundle's metadata (never the path). */
 export async function updateBundle(
   id: string,
-  data: Partial<Pick<BundleConfig, 'name' | 'icon' | 'description' | 'allowedUsers' | 'mcps' | 'digest'>>,
+  data: Partial<Pick<BundleConfig, 'name' | 'icon' | 'description' | 'allowedUsers' | 'mcps' | 'thinking' | 'digest'>>,
 ): Promise<BundleConfig> {
   const bundles = await loadBundles();
   const idx = bundles.findIndex((b) => b.id === id);
@@ -199,6 +212,7 @@ export async function updateBundle(
     ...(data.description !== undefined ? { description: data.description } : {}),
     ...(data.allowedUsers !== undefined ? { allowedUsers: data.allowedUsers } : {}),
     ...(data.mcps !== undefined ? { mcps: data.mcps } : {}),
+    ...(data.thinking !== undefined ? { thinking: data.thinking } : {}),
     ...(data.digest !== undefined ? { digest: data.digest } : {}),
   };
   await saveBundles(bundles);
@@ -211,7 +225,8 @@ export type BundleErrorCode =
   | 'NOT_FOUND'
   | 'INVALID_ALLOWED_USERS'
   | 'INVALID_MCPS'
-  | 'INVALID_DIGEST';
+  | 'INVALID_DIGEST'
+  | 'INVALID_THINKING';
 
 export class BundleError extends Error {
   code: BundleErrorCode;
