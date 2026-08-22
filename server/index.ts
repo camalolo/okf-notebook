@@ -12,6 +12,7 @@ import authRouter from './routes/auth.js';
 import { settingsRouter } from './routes/settings.js';
 import { mcpsRouter } from './routes/mcps.js';
 import { mcpManager } from './lib/mcp-manager.js';
+import { listModels } from './lib/llm.js';
 import { loadMcpServers } from './mcps.js';
 import { finalizeOrphanedTurns } from './chats.js';
 import { startDigestScheduler, runDigestTick } from './lib/scheduler.js';
@@ -143,6 +144,11 @@ async function main() {
   // Close turns orphaned by a previous restart/crash (their loop died before
   // persisting turn_end; reconnecting clients would poll forever otherwise).
   await finalizeOrphanedTurns();
+
+  // Warm the /models cache in the background — it also captures per-model
+  // metadata (context_length), so the context indicator is exact from the
+  // first chat turn instead of falling back to the family-map guess.
+  listModels().catch(() => { /* best-effort — retried on next Settings load */ });
 
   app.listen(PORT, HOST, () => {
 
