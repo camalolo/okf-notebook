@@ -11,7 +11,9 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-const DATA_DIR = path.resolve(import.meta.dirname, '..', 'data', 'chats');
+const DATA_DIR = process.env.NOTEBOOK_CHATS_DIR
+  ? path.resolve(process.env.NOTEBOOK_CHATS_DIR)
+  : path.resolve(import.meta.dirname, '..', 'data', 'chats');
 
 /** A single stored event in the chat timeline. */
 
@@ -235,4 +237,78 @@ export async function deleteChat(
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+}
+
+/**
+ * Whether the last turn of a timeline is terminated — mirrors the client's
+ * `isLastTurnComplete`: new-format timelines need a `turn_end` after the
+ * last user message; legacy ones accept a closing assistant message.
+ */
+export function isLastTurnTerminated(events: StoredEvent[]): boolean {
+  let lastUserIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'user') {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx === -1) return true; // no turn open
+  const after = events.slice(lastUserIdx + 1);
+  if (events.some((e) => e.kind === 'turn_end')) {
+    return after.some((e) => e.kind === 'turn_end');
+  }
+  return after.some((e) => e.kind === 'assistant'); // legacy timeline
+}
+
+/**
+ * Boot-time sweep: append a `turn_end` to every chat whose last turn never
+ * terminated. A restart/crash mid-turn kills the chat loop before it can
+ * persist the terminal event, leaving reconnecting clients polling forever
+ * ("stuck after server disconnect"). At startup there are, by definition, no
+ * active loops — any unterminated last turn is dead, so closing it is always
+ * correct. The orphaned tool calls before it restore client-side as an
+ * interrupted turn ("⚠️ This response was interrupted."), same as an abort.
+ *
+ * @returns number of chats repaired.
+ */
+export async function finalizeOrphanedTurns(): Promise<number> {
+  let repaired = 0;
+  let bundleDirs: string[];
+  try {
+    bundleDirs = await fs.readdir(DATA_DIR);
+  } catch {
+    return 0; // no chats yet
+  }
+  for (const bundleId of bundleDirs) {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(path.join(DATA_DIR, bundleId));
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue;
+      const file = path.join(DATA_DIR, bundleId, entry);
+      try {
+        const chat = JSON.parse(await fs.readFile(file, 'utf8')) as ChatSession;
+        if (!Array.isArray(chat.events) || isLastTurnTerminated(chat.events)) continue;
+        const lastEvent = chat.events[chat.events.length - 1];
+        const seq = lastEvent ? (lastEvent.seq ?? chat.events.length - 1) + 1 : 0;
+        chat.events.push({ ts: new Date().toISOString(), seq, kind: 'turn_end' });
+        chat.updatedAt = new Date().toISOString();
+        await fs.writeFile(file, JSON.stringify(chat, null, 2) + '\n', 'utf8');
+        repaired++;
+        console.warn(
+          `[chats] Finalized orphaned turn in ${bundleId}/${chat.id} ` +
+            '(server restarted mid-turn)',
+        );
+      } catch (err) {
+        console.error(
+          `[chats] Sweep failed for ${file}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+  return repaired;
 }

@@ -13,6 +13,7 @@ import { settingsRouter } from './routes/settings.js';
 import { mcpsRouter } from './routes/mcps.js';
 import { mcpManager } from './lib/mcp-manager.js';
 import { loadMcpServers } from './mcps.js';
+import { finalizeOrphanedTurns } from './chats.js';
 import { startDigestScheduler, runDigestTick } from './lib/scheduler.js';
 import { runCleanupTick } from './lib/cleanup.js';
 
@@ -125,6 +126,10 @@ async function main() {
 
   // MCP servers come from server/data/mcps.json (Settings → MCP servers).
   await mcpManager.start(await loadMcpServers());
+
+  // Close turns orphaned by a previous restart/crash (their loop died before
+  // persisting turn_end; reconnecting clients would poll forever otherwise).
+  await finalizeOrphanedTurns();
 
   app.listen(PORT, HOST, () => {
 
