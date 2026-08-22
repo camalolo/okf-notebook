@@ -57,6 +57,8 @@ class McpManager {
   private toolDefs: ToolDefinition[] = [];
   private configs: McpServerConfig[] = [];
   private started = false;
+  /** Last startup/connect error per server name (surfaced in the Settings UI). */
+  private lastErrors = new Map<string, string>();
 
   /** Start all configured MCP servers and discover their tools. */
   async start(configs: McpServerConfig[]): Promise<void> {
@@ -66,43 +68,40 @@ class McpManager {
 
     const jobs: Promise<unknown>[] = [];
     for (const cfg of configs) {
-      if (cfg.perUser) {
-        // One instance per workspace-connected user; tokenless fallback for
-        // discovery so the tools are still advertised to the LLM.
-        jobs.push(
-          (async () => {
-            const users = await listWorkspaceUsers();
-            if (users.length > 0) {
-              await Promise.allSettled(users.map((u) => this.startUserServer(cfg.name, u)));
-            } else {
-              await this.startServer(cfg);
-            }
-          })().catch((err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            // eslint-disable-next-line no-console
-            console.error(`[mcp] Failed to start "${cfg.name}": ${msg}`);
-          }),
-        );
-      } else {
-        jobs.push(
-          this.startServer(cfg).catch((err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            // eslint-disable-next-line no-console
-            console.error(`[mcp] Failed to start "${cfg.name}": ${msg}`);
-          }),
-        );
-      }
+      jobs.push(
+        this.startConfigured(cfg).catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.lastErrors.set(cfg.name, msg);
+
+          console.error(`[mcp] Failed to start "${cfg.name}": ${msg}`);
+        }),
+      );
     }
     await Promise.allSettled(jobs);
 
     const total = this.toolDefs.length;
-    // eslint-disable-next-line no-console
+
     console.log(`[mcp] Ready — ${total} tools discovered`);
+  }
+
+  /** Start one config (perUser-aware: an instance per workspace user, or a
+   *  tokenless shared instance for discovery when nobody has tokens). */
+  private async startConfigured(cfg: McpServerConfig): Promise<void> {
+    if (cfg.perUser) {
+      const users = await listWorkspaceUsers();
+      if (users.length > 0) {
+        const results = await Promise.allSettled(users.map((u) => this.startUserServer(cfg.name, u)));
+        const failure = results.find((r) => r.status === 'rejected');
+        if (failure) throw (failure as PromiseRejectedResult).reason;
+        return;
+      }
+    }
+    await this.startServer(cfg);
   }
 
   private async startServer(config: McpServerConfig, userEmail?: string): Promise<void> {
     const who = userEmail ? ` (user ${userEmail})` : '';
-    // eslint-disable-next-line no-console
+
     console.log(`[mcp] Starting "${config.name}"${who}...`);
 
     let env: Record<string, string> | undefined;
@@ -172,6 +171,7 @@ class McpManager {
       count++;
     }
 
+    this.lastErrors.delete(config.name);
     console.log(`[mcp] "${config.name}"${who} ready — ${count} new tools exposed`);
   }
 
@@ -181,17 +181,27 @@ class McpManager {
   }
 
   /** Status of every configured server, for the Settings UI. */
-  listServers(): Array<{ name: string; running: boolean; toolCount: number }> {
+  listServers(): Array<{
+    name: string;
+    running: boolean;
+    toolCount: number;
+    /** Full config (incl. env secrets) — management UI, full role only. */
+    config: McpServerConfig;
+    /** Last startup/connect error, if any (cleared on a successful start). */
+    error?: string;
+  }> {
     return this.configs.map((c) => {
       const hasUserInstance = Array.from(this.userClients.keys()).some(
         (k) => k.startsWith(`${c.name}|`),
       );
       return {
         name: c.name,
+        config: c,
         running: this.clients.has(c.name) || hasUserInstance,
         toolCount: this.toolDefs.filter(
           (td) => this.toolMap.get(td.function.name)?.serverName === c.name,
         ).length,
+        ...(this.lastErrors.has(c.name) ? { error: this.lastErrors.get(c.name) } : {}),
       };
     });
   }
@@ -277,20 +287,53 @@ class McpManager {
       .join('\n');
   }
 
-  /** Restart a single MCP server by name (e.g. after updating its auth tokens). */
-  async restartServer(name: string): Promise<void> {
-    const config = this.configs.find((c) => c.name === name);
-    if (!config) throw new Error(`Unknown MCP server: ${name}`);
-
-    // Close old client
+  /** Close the shared instance and every per-user instance of a server,
+   *  forgetting its tool registrations. Used by restart/update/remove. */
+  private async closeServer(name: string): Promise<void> {
     const oldClient = this.clients.get(name);
     if (oldClient) {
       await oldClient.close().catch(() => {});
       this.clients.delete(name);
     }
-
+    for (const key of Array.from(this.userClients.keys())) {
+      if (key.startsWith(`${name}|`)) {
+        await this.userClients.get(key)!.close().catch(() => {});
+        this.userClients.delete(key);
+      }
+    }
     this.forgetServerTools(name);
-    await this.startServer(config);
+  }
+
+  /**
+   * Restart (or start with a new config) a single MCP server — used by the
+   * Settings management UI and after workspace tokens are rewritten. For
+   * `perUser` servers, every per-user instance is restarted too.
+   *
+   * @param config When given, replaces the stored config first (update flow).
+   */
+  async restartServer(name: string, config?: McpServerConfig): Promise<void> {
+    const idx = this.configs.findIndex((c) => c.name === name);
+    if (idx === -1 && !config) throw new Error(`Unknown MCP server: ${name}`);
+    if (config) {
+      if (idx === -1) this.configs.push(config);
+      else this.configs[idx] = config;
+    }
+    const cfg = this.configs.find((c) => c.name === name)!;
+    await this.closeServer(name);
+    try {
+      await this.startConfigured(cfg);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastErrors.set(name, msg);
+      throw err;
+    }
+  }
+
+  /** Stop a server, forget its config and tools (Settings remove flow). */
+  async stopServer(name: string): Promise<void> {
+    await this.closeServer(name);
+    this.lastErrors.delete(name);
+    this.configs = this.configs.filter((c) => c.name !== name);
   }
 
   /**
@@ -347,6 +390,7 @@ class McpManager {
     this.userClients.clear();
     this.toolMap.clear();
     this.toolDefs = [];
+    this.lastErrors.clear();
     this.started = false;
   }
 }

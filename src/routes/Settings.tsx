@@ -1,8 +1,20 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Navigate } from 'react-router-dom';
 import type { BundleConfig, DigestConfig, User } from '../types.ts';
-import { addBundle, getBundles, getMcps, getSettings, removeBundle, updateBundle, updateModel } from '../services/api.ts';
-import type { AppSettingsInfo, McpServerInfo } from '../services/api.ts';
+import {
+  addBundle,
+  addMcpServer,
+  getBundles,
+  getMcps,
+  getSettings,
+  removeBundle,
+  removeMcpServer,
+  restartMcpServer,
+  updateBundle,
+  updateModel,
+  updateMcpServer,
+} from '../services/api.ts';
+import type { AppSettingsInfo, McpServerConfig, McpServerInfo } from '../services/api.ts';
 
 interface SettingsProps {
   user: User;
@@ -16,6 +28,49 @@ interface AddFormState {
 }
 
 const EMPTY_FORM: AddFormState = { path: '', name: '', icon: '📚', description: '' };
+
+interface McpFormState {
+  name: string;
+  command: string;
+  argsText: string;
+  envText: string;
+  toolPrefix: string;
+  allowToolsText: string;
+  perUser: boolean;
+}
+
+const EMPTY_MCP_FORM: McpFormState = {
+  name: '',
+  command: '',
+  argsText: '',
+  envText: '',
+  toolPrefix: '',
+  allowToolsText: '',
+  perUser: false,
+};
+
+/** One KEY=VALUE per line → Record. */
+function parseEnvText(text: string): Record<string, string> | undefined {
+  const entries = text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const eq = l.indexOf('=');
+      return eq === -1 ? [l, ''] : [l.slice(0, eq).trim(), l.slice(eq + 1)];
+    })
+    .filter(([k]) => k);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/** Comma- or newline-separated names → string[]. */
+function parseListText(text: string): string[] | undefined {
+  const list = text
+    .split(/[,\n]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  return list.length > 0 ? list : undefined;
+}
 
 function toMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
@@ -51,6 +106,13 @@ export function Settings({ user }: SettingsProps) {
   const [modelDraft, setModelDraft] = useState('');
   const [modelSaving, setModelSaving] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+  /** 'new' → add form open; a server name → edit form for it; null → closed. */
+  const [mcpEditing, setMcpEditing] = useState<string | null>(null);
+  const [mcpForm, setMcpForm] = useState<McpFormState>(EMPTY_MCP_FORM);
+  const [mcpSaving, setMcpSaving] = useState(false);
+  const [mcpFormError, setMcpFormError] = useState<string | null>(null);
+  const [mcpRestarting, setMcpRestarting] = useState<string | null>(null);
+  const [mcpConfirmName, setMcpConfirmName] = useState<string | null>(null);
 
   const handleSaveModel = async () => {
     if (!modelDraft) return;
@@ -125,6 +187,218 @@ export function Settings({ user }: SettingsProps) {
   const update = (key: keyof AddFormState, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
   };
+
+  const openMcpForm = (target: 'new' | McpServerInfo) => {
+    setMcpConfirmName(null);
+    setMcpFormError(null);
+    setMcpEditing(target === 'new' ? 'new' : target.name);
+    setMcpForm(
+      target === 'new'
+        ? EMPTY_MCP_FORM
+        : {
+            name: target.config.name,
+            command: target.config.command,
+            argsText: target.config.args.join('\n'),
+            envText: Object.entries(target.config.env ?? {})
+              .map(([k, v]) => `${k}=${v}`)
+              .join('\n'),
+            toolPrefix: target.config.toolPrefix ?? '',
+            allowToolsText: (target.config.allowTools ?? []).join(', '),
+            perUser: target.config.perUser === true,
+          },
+    );
+  };
+
+  const buildMcpConfig = (): McpServerConfig => {
+    const cfg: McpServerConfig = {
+      name: mcpForm.name.trim(),
+      command: mcpForm.command.trim(),
+      args: mcpForm.argsText
+        .split('\n')
+        .map((a) => a.trim())
+        .filter(Boolean),
+    };
+    const env = parseEnvText(mcpForm.envText);
+    if (env) cfg.env = env;
+    const allowTools = parseListText(mcpForm.allowToolsText);
+    if (allowTools) cfg.allowTools = allowTools;
+    if (mcpForm.toolPrefix.trim()) cfg.toolPrefix = mcpForm.toolPrefix.trim();
+    if (mcpForm.perUser) cfg.perUser = true;
+    return cfg;
+  };
+
+  const handleSaveMcpServer = async () => {
+    if (!mcpForm.name.trim() || !mcpForm.command.trim()) {
+      setMcpFormError('Name and command are required.');
+      return;
+    }
+    setMcpSaving(true);
+    setMcpFormError(null);
+    try {
+      const config = buildMcpConfig();
+      const info =
+        mcpEditing !== null && mcpEditing !== 'new'
+          ? await updateMcpServer(mcpEditing, config)
+          : await addMcpServer(config);
+      setMcpServers(info.servers);
+      setMcpEditing(null);
+      setMcpForm(EMPTY_MCP_FORM);
+    } catch (err: unknown) {
+      setMcpFormError(toMessage(err, 'Failed to save the MCP server'));
+    } finally {
+      setMcpSaving(false);
+    }
+  };
+
+  const handleRemoveMcpServer = async (name: string) => {
+    try {
+      const info = await removeMcpServer(name);
+      setMcpServers(info.servers);
+      setMcpConfirmName(null);
+      if (mcpEditing === name) {
+        setMcpEditing(null);
+        setMcpForm(EMPTY_MCP_FORM);
+      }
+    } catch (err: unknown) {
+      setMcpFormError(toMessage(err, 'Failed to remove the MCP server'));
+      setMcpConfirmName(null);
+    }
+  };
+
+  const handleRestartMcpServer = async (name: string) => {
+    setMcpRestarting(name);
+    try {
+      const info = await restartMcpServer(name);
+      setMcpServers(info.servers);
+    } catch (err: unknown) {
+      setMcpFormError(toMessage(err, 'Failed to restart the MCP server'));
+    } finally {
+      setMcpRestarting(null);
+    }
+  };
+
+  const updateMcpField = (key: keyof McpFormState, value: string | boolean) => {
+    setMcpForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  /** Add/Edit form body (rendered inline for a new server or under its entry). */
+  const mcpServerForm = (
+    <>
+      <div className="form-row">
+        <label className="form-field">
+          <span className="form-label">Name</span>
+          <input
+            className="form-input"
+            type="text"
+            value={mcpForm.name}
+            onChange={(e) => updateMcpField('name', e.target.value)}
+            placeholder="my-server"
+            spellCheck={false}
+            autoComplete="off"
+            disabled={mcpEditing !== 'new'}
+          />
+        </label>
+        <label className="form-field">
+          <span className="form-label">Command</span>
+          <input
+            className="form-input"
+            type="text"
+            value={mcpForm.command}
+            onChange={(e) => updateMcpField('command', e.target.value)}
+            placeholder="npx"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </label>
+      </div>
+      <label className="form-field">
+        <span className="form-label">Arguments (one per line)</span>
+        <textarea
+          className="form-textarea"
+          value={mcpForm.argsText}
+          onChange={(e) => updateMcpField('argsText', e.target.value)}
+          placeholder={'-y\n@alanxchen/google-workspace-mcp'}
+          rows={2}
+          spellCheck={false}
+        />
+      </label>
+      <div className="form-row">
+        <label className="form-field">
+          <span className="form-label">Tool prefix (optional)</span>
+          <input
+            className="form-input"
+            type="text"
+            value={mcpForm.toolPrefix}
+            onChange={(e) => updateMcpField('toolPrefix', e.target.value)}
+            placeholder="gw"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </label>
+        <label className="form-field">
+          <span className="form-label">Allowed tools (optional, comma-separated)</span>
+          <input
+            className="form-input"
+            type="text"
+            value={mcpForm.allowToolsText}
+            onChange={(e) => updateMcpField('allowToolsText', e.target.value)}
+            placeholder="leave empty to expose every discovered tool"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </label>
+      </div>
+      <label className="form-field">
+        <span className="form-label">Environment variables (KEY=VALUE, one per line)</span>
+        <textarea
+          className="form-textarea"
+          value={mcpForm.envText}
+          onChange={(e) => updateMcpField('envText', e.target.value)}
+          placeholder={'API_TOKEN=secret'}
+          rows={2}
+          spellCheck={false}
+        />
+      </label>
+      <label className="mcp-check">
+        <input
+          type="checkbox"
+          checked={mcpForm.perUser}
+          onChange={(e) => updateMcpField('perUser', e.target.checked)}
+        />
+        <span>
+          One instance per logged-in user (token isolation via $HOME)
+          {mcpForm.name.trim() !== 'google-workspace' ? (
+            <em className="mcp-check-meta">
+              {' '}
+              — only works for a server named "google-workspace"
+            </em>
+          ) : null}
+        </span>
+      </label>
+      <span className="settings-section-hint">
+        The server is started as a child process (stdio). If it fails to start it is
+        still saved — the error shows next to it and you can fix the config and
+        save again.
+      </span>
+      {mcpFormError && mcpEditing !== null && (
+        <div className="error-banner error-banner-sm">{mcpFormError}</div>
+      )}
+      {mcpEditing === 'new' && (
+        <div className="form-actions">
+          <button className="btn btn-ghost" onClick={() => setMcpEditing(null)} disabled={mcpSaving}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={handleSaveMcpServer}
+            disabled={mcpSaving}
+          >
+            {mcpSaving ? 'Adding…' : 'Add server'}
+          </button>
+        </div>
+      )}
+    </>
+  );
 
   const handleAdd = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -339,6 +613,125 @@ export function Settings({ user }: SettingsProps) {
       </section>
 
       <section className="settings-section">
+        <h2 className="settings-section-title">MCP servers</h2>
+        <p className="settings-section-hint">
+          MCP (Model Context Protocol) servers extend the chat assistant with external
+          tools. Each server is a command run on the Notebook host — only add servers
+          you trust. Enabled per bundle under its "Tools…" button.
+        </p>
+
+        {mcpServers.length > 0 && (
+          <ul className="bundle-list">
+            {mcpServers.map((s) => (
+              <li key={s.name} className="bundle-list-item-wrap">
+                <div className="bundle-list-item">
+                  <span className="bundle-list-icon" aria-hidden="true">
+                    🔌
+                  </span>
+                  <div className="bundle-list-info">
+                    <span className="bundle-list-name">
+                      {s.name}
+                      {s.config.perUser ? ' · per-user' : ''}
+                    </span>
+                    <span className="bundle-list-path">
+                      {s.config.command}
+                      {s.config.args.length > 0 ? ` ${s.config.args.join(' ')}` : ''}
+                    </span>
+                    <span className="bundle-list-access">
+                      {s.running
+                        ? `Running · ${s.toolCount} tool${s.toolCount === 1 ? '' : 's'} exposed`
+                        : 'Not running'}
+                      {s.config.toolPrefix ? ` · tools prefixed ${s.config.toolPrefix}_` : ''}
+                      {s.config.allowTools
+                        ? ` · ${s.config.allowTools.length} tool${s.config.allowTools.length === 1 ? '' : 's'} allow-listed`
+                        : ' · all discovered tools'}
+                    </span>
+                    {s.error && (
+                      <span className="bundle-list-access error-banner error-banner-sm">
+                        {s.error}
+                      </span>
+                    )}
+                  </div>
+                  {mcpConfirmName === s.name ? (
+                    <div className="bundle-list-actions">
+                      <span className="confirm-text">Remove server?</span>
+                      <button
+                        className="btn btn-danger btn-sm"
+                        onClick={() => handleRemoveMcpServer(s.name)}
+                      >
+                        Confirm
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setMcpConfirmName(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : mcpEditing === s.name ? (
+                    <div className="bundle-list-actions">
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setMcpEditing(null)}
+                        disabled={mcpSaving}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={handleSaveMcpServer}
+                        disabled={mcpSaving}
+                      >
+                        {mcpSaving ? 'Saving…' : 'Save server'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="bundle-list-actions">
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => openMcpForm(s)}
+                      >
+                        Edit…
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => handleRestartMcpServer(s.name)}
+                        disabled={mcpRestarting === s.name}
+                      >
+                        {mcpRestarting === s.name ? 'Restarting…' : 'Restart'}
+                      </button>
+                      <button
+                        className="btn btn-danger-ghost btn-sm"
+                        onClick={() => setMcpConfirmName(s.name)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+                {mcpEditing === s.name && (
+                  <div className="bundle-access-editor">{mcpServerForm}</div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {mcpEditing === 'new' ? (
+          <div className="bundle-access-editor">{mcpServerForm}</div>
+        ) : (
+          <div className="form-actions">
+            <button className="btn btn-primary" onClick={() => openMcpForm('new')}>
+              Add MCP server…
+            </button>
+          </div>
+        )}
+        {mcpFormError && mcpEditing === null && (
+          <div className="error-banner error-banner-sm">{mcpFormError}</div>
+        )}
+      </section>
+
+      <section className="settings-section">
         <h2 className="settings-section-title">Add bundle</h2>
         <p className="settings-section-hint">
           Register an existing directory of markdown files. Files on disk are never deleted when
@@ -354,7 +747,7 @@ export function Settings({ user }: SettingsProps) {
                 type="text"
                 value={form.path}
                 onChange={(e) => update('path', e.target.value)}
-                placeholder="/home/user/Sources/MyProject"
+                placeholder="/home/me/notes/my-project"
                 spellCheck={false}
                 autoComplete="off"
               />
@@ -540,7 +933,11 @@ export function Settings({ user }: SettingsProps) {
                         className="btn btn-ghost btn-sm"
                         onClick={() => openMcpsEditor(b)}
                         disabled={mcpServers.length === 0}
-                        title={mcpServers.length === 0 ? 'No MCP servers configured' : undefined}
+                        title={
+                          mcpServers.length === 0
+                            ? 'No MCP servers configured — add one in "MCP servers" above'
+                            : undefined
+                        }
                       >
                         Tools…
                       </button>
@@ -633,7 +1030,7 @@ export function Settings({ user }: SettingsProps) {
                     <span className="form-label">MCP tool servers enabled for this bundle</span>
                     {mcpServers.length === 0 ? (
                       <span className="settings-section-hint">
-                        No MCP servers are configured on this Notebook instance.
+                        No MCP servers are configured — add one in "MCP servers" above.
                       </span>
                     ) : (
                       <div className="mcp-check-list">

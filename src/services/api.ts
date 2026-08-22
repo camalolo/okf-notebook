@@ -240,10 +240,23 @@ export function updateModel(model: string): Promise<AppSettingsInfo> {
 
 /* --- MCP servers --- */
 
+export interface McpServerConfig {
+  name: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  toolPrefix?: string;
+  allowTools?: string[];
+  perUser?: boolean;
+}
+
 export interface McpServerInfo {
   name: string;
   running: boolean;
   toolCount: number;
+  config: McpServerConfig;
+  /** Last startup/connect error, if any (cleared on a successful start). */
+  error?: string;
 }
 
 export interface McpsInfo {
@@ -255,6 +268,37 @@ export interface McpsInfo {
 /** MCP server status + workspace-connected users (Settings UI). */
 export function getMcps(): Promise<McpsInfo> {
   return request<McpsInfo>(`${API_BASE}/mcps`);
+}
+
+/** Add an MCP server (saved and started; a start failure still returns 201
+ *  with the server listed as not running + its error). */
+export function addMcpServer(config: McpServerConfig): Promise<McpsInfo> {
+  return request<McpsInfo>(`${API_BASE}/mcps`, {
+    ...jsonOptions(config),
+    method: 'POST',
+  });
+}
+
+/** Update an MCP server's config (name immutable) and restart it. */
+export function updateMcpServer(name: string, config: McpServerConfig): Promise<McpsInfo> {
+  return request<McpsInfo>(`${API_BASE}/mcps/${encodeURIComponent(name)}`, {
+    ...jsonOptions(config),
+    method: 'PUT',
+  });
+}
+
+/** Stop and remove an MCP server. */
+export function removeMcpServer(name: string): Promise<McpsInfo> {
+  return request<McpsInfo>(`${API_BASE}/mcps/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
+}
+
+/** Restart a server (e.g. after an external change). */
+export function restartMcpServer(name: string): Promise<McpsInfo> {
+  return request<McpsInfo>(`${API_BASE}/mcps/${encodeURIComponent(name)}/restart`, {
+    method: 'POST',
+  });
 }
 
 /* --- Document upload --- */

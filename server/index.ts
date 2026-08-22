@@ -12,64 +12,9 @@ import authRouter from './routes/auth.js';
 import { settingsRouter } from './routes/settings.js';
 import { mcpsRouter } from './routes/mcps.js';
 import { mcpManager } from './lib/mcp-manager.js';
-import type { McpServerConfig } from './lib/mcp-manager.js';
+import { loadMcpServers } from './mcps.js';
 import { startDigestScheduler, runDigestTick } from './lib/scheduler.js';
 import { runCleanupTick } from './lib/cleanup.js';
-
-// --- MCP server configuration ------------------------------------------------
-
-const MCP_SERVERS: McpServerConfig[] = [
-  {
-    name: 'google-workspace',
-    command: 'npx',
-    args: ['-y', '@alanxchen/google-workspace-mcp'],
-    toolPrefix: 'gw',
-    // One child process per workspace-connected user (token isolation via
-    // $HOME); tool calls route to the logged-in user's Google account.
-    perUser: true,
-    allowTools: [
-      // Gmail (read-only)
-      'search_emails',
-      'read_email',
-      // Calendar (full management)
-      'list_calendars',
-      'list_events',
-      'get_event',
-      'create_event',
-      'update_event',
-      'delete_event',
-      'find_free_time',
-      'quick_add_event',
-    ],
-  },
-  {
-    name: 'browser',
-    command: 'npx',
-    args: ['@playwright/mcp', '--browser', 'chromium', '--headless', '--no-sandbox', '--isolated'],
-    allowTools: ['browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_press_key'],
-  },
-];
-
-// IBKR Flex Web Service (read-only account reporting: positions, trades, cash).
-// Static-musl binary in bin/ (ibkr-flex-mcp) — started only when both env
-// vars are present. The Flex Query must be configured in Client Portal
-// (Reports → Flex Queries) to emit the sections you want.
-const IBKR_FLEX_TOKEN = process.env.IBKR_FLEX_TOKEN ?? '';
-const IBKR_FLEX_QUERY_ID = process.env.IBKR_FLEX_QUERY_ID ?? '';
-if (IBKR_FLEX_TOKEN && IBKR_FLEX_QUERY_ID) {
-  MCP_SERVERS.push({
-    name: 'ibkr-flex',
-    // Resolved from server/ so it works in dev and in the deployed layout.
-    command: path.join(import.meta.dirname, '..', 'bin', 'ibkr-flex-mcp'),
-    args: [],
-    env: { IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID },
-  });
-} else {
-  // eslint-disable-next-line no-console
-  console.warn(
-    '[mcp] ibkr-flex disabled — set IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID in .env',
-  );
-}
 
 const app = express();
 
@@ -135,12 +80,12 @@ async function main() {
     const onlyBundleId = process.argv[cleanupArgIdx + 1];
     const records = await runCleanupTick({ onlyBundleId });
     if (onlyBundleId && records.length === 0) {
-      // eslint-disable-next-line no-console
+
       console.error(`Bundle not found: ${onlyBundleId}`);
       process.exit(1);
     }
     for (const r of records) {
-      // eslint-disable-next-line no-console
+
       console.log(
         `[cleanup] ${r.status}${r.skipped ? ' (skipped — last commit is an OKF cleanup commit, tree clean)' : ''}: ` +
           `lint=${r.lintViolations} violations / ${r.lintDuplicates} dup-groups, ` +
@@ -160,13 +105,13 @@ async function main() {
     const onlyBundleId = process.argv[digestArgIdx + 1];
     const records = await runDigestTick({ onlyBundleId, force: true });
     if (onlyBundleId && records.length === 0) {
-      // eslint-disable-next-line no-console
+
       console.error(`Bundle not found: ${onlyBundleId}`);
       process.exit(1);
     }
     for (const r of records) {
       const detail = r.subject ? ` subject="${r.subject}"` : '';
-      // eslint-disable-next-line no-console
+
       console.log(
         `[digest] ${r.bundleId}: ${r.status} (${r.iterations} iter, ${r.durationMs}ms${detail})` +
         (r.error ? ` ERROR: ${r.error}` : ''),
@@ -178,10 +123,11 @@ async function main() {
     process.exit(anyError ? 1 : 0);
   }
 
-  await mcpManager.start(MCP_SERVERS);
+  // MCP servers come from server/data/mcps.json (Settings → MCP servers).
+  await mcpManager.start(await loadMcpServers());
 
   app.listen(PORT, HOST, () => {
-    // eslint-disable-next-line no-console
+
     console.log(`Notebook API listening on ${HOST}:${PORT}`);
   });
 
@@ -190,7 +136,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  // eslint-disable-next-line no-console
+
   console.error('Fatal startup error:', err);
   process.exit(1);
 });
