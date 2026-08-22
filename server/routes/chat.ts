@@ -1012,16 +1012,17 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         let response: ChatCompletionResult;
         for (let attempt = 1; ; attempt++) {
           try {
-            response = await chatCompletionStream(
-              callMessages,
-              allTools,
-              (delta) => {
+            response = await chatCompletionStream(callMessages, allTools, {
+              onDelta: (delta) => {
                 turnContent += delta;
                 emit('content', { text: delta });
               },
-              abortController.signal,
+              // Thinking-model chain-of-thought — transient UI hint, never
+              // persisted and never mixed into content.
+              onThinking: (text) => emit('thinking', { text }),
+              signal: abortController.signal,
               log,
-            );
+            });
             if (response.content.trim() === '' && !response.tool_calls?.length) {
               throw new Error('empty response (no content, no tool calls)');
             }

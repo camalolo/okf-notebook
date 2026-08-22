@@ -153,7 +153,7 @@ export async function chatCompletion(
   tools?: ToolDefinition[],
   log?: ChatLogger,
 ): Promise<ChatCompletionResult> {
-  return chatCompletionStream(messages, tools, () => {}, undefined, log);
+  return chatCompletionStream(messages, tools, { onDelta: () => {}, log });
 }
 
 // --- Retry / backoff --------------------------------------------------------
@@ -201,6 +201,8 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 interface StreamDelta {
   content?: string;
+  /** Chain-of-thought from thinking models (GLM) — distinct from content. */
+  reasoning_content?: string;
   tool_calls?: {
     index: number;
     id?: string;
@@ -218,22 +220,33 @@ interface StreamChunk {
  * Streaming variant of {@link chatCompletion}.
  *
  * Calls the LLM API with `stream: true` and invokes `onDelta` for each
- * content token as it arrives. Tool-call fragments are accumulated across
- * chunks and returned in the final result. The caller decides what to do with
- * tool calls (execute them, feed results back, and call again).
- *
- * @param messages  Conversation history.
- * @param tools     Optional tool definitions.
- * @param onDelta   Called for each streamed content chunk.
- * @returns The full accumulated content and any tool calls.
+ * content token as it arrives. Thinking models additionally stream their
+ * chain-of-thought as `reasoning_content` deltas — forwarded via
+ * `onThinking` (never mixed into `content`, never resent to the API).
+ * Tool-call fragments are accumulated across chunks and returned in the
+ * final result. The caller decides what to do with tool calls (execute
+ * them, feed results back, and call again).
  */
+export interface StreamOptions {
+  /** Called for each streamed content chunk. */
+  onDelta: (text: string) => void;
+  /**
+   * Called for each reasoning/chain-of-thought chunk (`reasoning_content`
+   * deltas, emitted by thinking models before the visible answer). Optional.
+   */
+  onThinking?: (text: string) => void;
+  /** Abort signal (STOP button, upstream shutdown). */
+  signal?: AbortSignal;
+  /** Logger. */
+  log?: ChatLogger;
+}
+
 export async function chatCompletionStream(
   messages: ChatMessage[],
   tools: ToolDefinition[] | undefined,
-  onDelta: (text: string) => void,
-  signal?: AbortSignal,
-  log?: ChatLogger,
+  opts: StreamOptions,
 ): Promise<ChatCompletionResult> {
+  const { onDelta, onThinking, signal, log } = opts;
   const { model } = await getSettings();
 
   const body: Record<string, unknown> = {
@@ -299,6 +312,7 @@ export async function chatCompletionStream(
   let dataLineCount = 0;
   let parseFailCount = 0;
   let firstContentMs = 0;
+  let reasoningChars = 0;
   const toolCallMap = new Map<
     number,
     { id: string; name: string; arguments: string }
@@ -345,6 +359,11 @@ export async function chatCompletionStream(
         const delta = chunk.choices?.[0]?.delta;
         if (!delta) continue;
 
+        if (delta.reasoning_content) {
+          reasoningChars += delta.reasoning_content.length;
+          onThinking?.(delta.reasoning_content);
+        }
+
         if (delta.content) {
           if (!firstContentMs) firstContentMs = Date.now() - t0;
           content += delta.content;
@@ -375,6 +394,10 @@ export async function chatCompletionStream(
         try {
           const chunk = JSON.parse(payload) as StreamChunk;
           const delta = chunk.choices?.[0]?.delta;
+          if (delta?.reasoning_content) {
+            reasoningChars += delta.reasoning_content.length;
+            onThinking?.(delta.reasoning_content);
+          }
           if (delta?.content) {
             content += delta.content;
             onDelta(delta.content);
@@ -412,17 +435,19 @@ export async function chatCompletionStream(
   }
 
   const elapsed = Date.now() - t0;
+  // Reasoning summary for the log line (empty for non-thinking models).
+  const rs = reasoningChars > 0 ? `, ${reasoningChars} reasoning chars` : '';
 
   if (content.trim() && !tool_calls) {
     log?.info(
       `Stream complete (${elapsed}ms): ${content.length} chars content` +
       ` | ${chunkCount} chunks, ${dataLineCount} data lines, ${parseFailCount} parse failures` +
-      (firstContentMs ? `, first token ${firstContentMs}ms` : ''),
+      (firstContentMs ? `, first token ${firstContentMs}ms` : '') + rs,
     );
   } else if (tool_calls) {
     log?.info(
       `Stream complete (${elapsed}ms): ${tool_calls.length} tool call(s): ${tool_calls.map(t => t.function.name).join(', ')}` +
-      ` | ${chunkCount} chunks, ${dataLineCount} data lines, ${parseFailCount} parse failures`,
+      ` | ${chunkCount} chunks, ${dataLineCount} data lines, ${parseFailCount} parse failures` + rs,
     );
   } else {
     // ⚠️ Empty response — no content, no tool calls. This is the most likely

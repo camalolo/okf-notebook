@@ -52,6 +52,46 @@ interface ToolCallLabel {
 
 type ProposedEvent = Extract<TurnEvent, { kind: 'proposed' }>;
 
+/**
+ * Live/collapsed display of a thinking model's chain-of-thought.
+ * Auto-expanded while it is the streaming frontier ("live"); collapses to a
+ * compact chip once content or tool calls take over. The user's click
+ * overrides the automatic behavior for the component's lifetime.
+ */
+const ThinkingBlock = memo(function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? live;
+  const bodyRef = useRef<HTMLPreElement>(null);
+
+  // Keep the newest reasoning in view while streaming.
+  useEffect(() => {
+    if (open && live && bodyRef.current) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    }
+  }, [text, open, live]);
+
+  const chars = text.length;
+  const label = live ? 'Thinking…' : `Reasoning · ${chars.toLocaleString()} chars`;
+
+  return (
+    <div className={`chat-thinking${live ? ' chat-thinking-live' : ''}`}>
+      <button
+        type="button"
+        className="chat-thinking-header"
+        onClick={() => setUserOpen(!open)}
+        aria-expanded={open}
+      >
+        <span className="chat-thinking-dot" aria-hidden="true" />
+        <span className="chat-thinking-label">{label}</span>
+        <span className="chat-thinking-caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <pre className="chat-thinking-body" ref={bodyRef}>{text}</pre>
+      )}
+    </div>
+  );
+});
+
 /** Renders markdown content inside chat bubbles (GFM tables, code, etc.).
  *  Memoized: the composer's `input` state re-renders the whole history on
  *  every keystroke — without memo, remark re-parses every settled message
@@ -219,6 +259,8 @@ function estimateContextTokens(
     chars += m.content.length + 8; // role + formatting overhead
   }
   const addTurnEvent = (ev: TurnEvent) => {
+    // 'thinking' is display-only — reasoning is never resent to the LLM, so
+    // it contributes nothing to the context estimate (nor do 'notice's).
     if (ev.kind === 'content') {
       chars += ev.text.length;
     } else if (ev.kind === 'tool') {
@@ -630,7 +672,27 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       for await (const ev of streamChat(bundleId, apiHistory, chatIdRef.current, controller.signal)) {
         const data = ev.data;
 
-        if (ev.event === 'content') {
+        if (ev.event === 'thinking') {
+          // Chain-of-thought from a thinking model, streamed before the
+          // visible answer. Transient display only — coalesced into the
+          // trailing thinking event, never resent to the LLM, not persisted.
+          const obj = data as { text?: unknown };
+          if (typeof obj.text === 'string') {
+            setTurnEvents((prev) => {
+              const last = prev[prev.length - 1];
+              if (last && last.kind === 'thinking') {
+                return [...prev.slice(0, -1), { kind: 'thinking', text: last.text + obj.text }];
+              }
+              return [...prev, { kind: 'thinking', text: obj.text as string }];
+            });
+            const last = turnEventsLocal[turnEventsLocal.length - 1];
+            if (last && last.kind === 'thinking') {
+              turnEventsLocal[turnEventsLocal.length - 1] = { kind: 'thinking', text: last.text + obj.text };
+            } else {
+              turnEventsLocal.push({ kind: 'thinking', text: obj.text });
+            }
+          }
+        } else if (ev.event === 'content') {
           const obj = data as { text?: unknown };
           if (typeof obj.text === 'string') {
             appendContent(obj.text);
@@ -699,13 +761,17 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           const reason = typeof obj.reason === 'string' ? `: ${trunc(obj.reason, 80)}` : '';
           while (
             turnEventsLocal.length > 0 &&
-            turnEventsLocal[turnEventsLocal.length - 1].kind === 'content'
+            (turnEventsLocal[turnEventsLocal.length - 1].kind === 'content' ||
+              turnEventsLocal[turnEventsLocal.length - 1].kind === 'thinking')
           ) {
             turnEventsLocal.pop();
           }
           setTurnEvents((prev) => {
             const p = [...prev];
-            while (p.length > 0 && p[p.length - 1].kind === 'content') p.pop();
+            while (
+              p.length > 0 &&
+              (p[p.length - 1].kind === 'content' || p[p.length - 1].kind === 'thinking')
+            ) p.pop();
             return p;
           });
           const te: TurnEvent = {
@@ -1122,7 +1188,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     }
   };
 
-  const hasContent = turnEvents.some((e) => e.kind === 'content');
+  const hasContent = turnEvents.some((e) => e.kind === 'content' || e.kind === 'thinking');
   const showTyping = loading && !hasContent;
 
   // Proposed changes already rendered inline within a turn timeline —
@@ -1328,7 +1394,16 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                       </div>
                     );
                   }
-                  if (ev.kind === 'error') {
+          if (ev.kind === 'thinking') {
+            return (
+              <ThinkingBlock
+                key={`th${i}`}
+                text={ev.text}
+                live={loading && i === turnEvents.length - 1}
+              />
+            );
+          }
+          if (ev.kind === 'error') {
                     return (
                       <div className="chat-error-event" key={`pe${i}-${j}`}>
                         ⚠️ {ev.text}
@@ -1431,6 +1506,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               </div>
             );
           }
+          if (ev.kind !== 'proposed') return null; // unreachable — all kinds handled
           // Look up the latest status from persistent state so accept/reject
           // is reflected even while the card lives in the turn timeline.
           const latest =

@@ -145,13 +145,11 @@ export async function runReadOnlyTask(
     // Stream-accumulate; we don't forward deltas anywhere (no SSE consumer),
     // but onDelta is required so the content builds up turn-by-turn.
     let turnContent = '';
-    const response = await chatCompletionStream(
-      messages,
-      advertisedTools,
-      (delta) => { turnContent += delta; },
-      opts.signal,
-      opts.log,
-    );
+    const response = await chatCompletionStream(messages, advertisedTools, {
+      onDelta: (delta) => { turnContent += delta; },
+      signal: opts.signal,
+      log: opts.log,
+    });
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
       // Terminal turn: final answer (no tool calls).

@@ -49,9 +49,14 @@ function createMockFetch(chunks: string[], delayMs: number) {
   };
 }
 
-/** Build a Z.ai SSE data line carrying a content delta. */
+/** Build an SSE data line carrying a content delta. */
 function contentDelta(text: string): string {
   return `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
+}
+
+/** Build an SSE data line carrying a reasoning_content (thinking) delta. */
+function reasoningDelta(text: string): string {
+  return `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: text } }] })}\n\n`;
 }
 
 describe('chatCompletionStream — retry with backoff', () => {
@@ -83,7 +88,7 @@ describe('chatCompletionStream — retry with backoff', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const promise = chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, () => {});
+    const promise = chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, { onDelta: () => {} });
     // Yield until the first 429 lands and the backoff sleep is scheduled…
     await vi.advanceTimersByTimeAsync(0);
     // …then fire the 700ms backoff (Math.random()=0 → 0.7 × 1s) and drain the
@@ -108,7 +113,7 @@ describe('chatCompletionStream — retry with backoff', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const promise = chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, () => {});
+    const promise = chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, { onDelta: () => {} });
     promise.catch(() => {}); // mark handled — rejection may fire before the await below
     await vi.runAllTimersAsync();
     await expect(promise).rejects.toThrow('Inference request failed (429)');
@@ -129,12 +134,10 @@ describe('chatCompletionStream — retry with backoff', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const promise = chatCompletionStream(
-      [{ role: 'user', content: 'hi' }],
-      undefined,
-      () => {},
-      ac.signal,
-    );
+    const promise = chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, {
+      onDelta: () => {},
+      signal: ac.signal,
+    });
     promise.catch(() => {}); // mark handled — rejection may fire before the await below
     // Let the first 429 land and the backoff sleep get scheduled.
     await vi.advanceTimersByTimeAsync(0);
@@ -163,7 +166,7 @@ describe('chatCompletionStream — retry with backoff', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(
-      chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, () => {}),
+      chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, { onDelta: () => {} }),
     ).rejects.toThrow('Inference request failed (400)');
 
     expect(fetchMock.mock.calls.filter((c) => c[0] === V1_URL)).toHaveLength(1);
@@ -184,12 +187,10 @@ describe('chatCompletionStream — abort behavior', () => {
 
     vi.stubGlobal('fetch', fetchMock);
 
-    await chatCompletionStream(
-      [{ role: 'user', content: 'test' }],
-      undefined,
-      () => {},
-      ac.signal,
-    );
+    await chatCompletionStream([{ role: 'user', content: 'test' }], undefined, {
+      onDelta: () => {},
+      signal: ac.signal,
+    });
 
     const v1Call = fetchMock.mock.calls.find((c) => c[0] === V1_URL);
     expect(v1Call).toBeDefined();
@@ -220,10 +221,8 @@ describe('chatCompletionStream — abort behavior', () => {
 
     let threw = false;
     try {
-      await chatCompletionStream(
-        [{ role: 'user', content: 'test' }],
-        undefined,
-        (delta) => {
+      await chatCompletionStream([{ role: 'user', content: 'test' }], undefined, {
+        onDelta: (delta) => {
           receivedDeltas.push(delta);
           // After 2nd delta, abort. The 3rd chunk arrives 100ms later — long
           // after the abort has errored the stream.
@@ -231,8 +230,8 @@ describe('chatCompletionStream — abort behavior', () => {
             setTimeout(() => ac.abort(), 0);
           }
         },
-        ac.signal,
-      );
+        signal: ac.signal,
+      });
     } catch {
       threw = true;
     }
@@ -257,13 +256,35 @@ describe('chatCompletionStream — abort behavior', () => {
 
     vi.stubGlobal('fetch', vi.fn(createMockFetch(chunks, 10)));
 
-    const result = await chatCompletionStream(
-      [{ role: 'user', content: 'hi' }],
-      undefined,
-      () => {},
-    );
+    const result = await chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, {
+      onDelta: () => {},
+    });
 
     expect(result.content).toBe('Hello world!');
     expect(result.tool_calls).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 8: reasoning_content deltas stream via onThinking, stay out of content.
+  // -------------------------------------------------------------------------
+  it('forwards reasoning deltas via onThinking and excludes them from content', async () => {
+    const chunks = [
+      reasoningDelta('Let me think '),
+      reasoningDelta('about this.'),
+      contentDelta('Answer'),
+      'data: [DONE]\n\n',
+    ];
+    vi.stubGlobal('fetch', vi.fn(createMockFetch(chunks, 0)));
+
+    const thinking: string[] = [];
+    const deltas: string[] = [];
+    const result = await chatCompletionStream([{ role: 'user', content: 'hi' }], undefined, {
+      onDelta: (d) => deltas.push(d),
+      onThinking: (t) => thinking.push(t),
+    });
+
+    expect(thinking).toEqual(['Let me think ', 'about this.']);
+    expect(deltas).toEqual(['Answer']);
+    expect(result.content).toBe('Answer'); // reasoning never leaks into content
   });
 });

@@ -91,6 +91,7 @@ export interface ToolCallInfo {
 export type TurnEvent =
   | { kind: 'tool'; toolCall: ToolCallInfo }
   | { kind: 'content'; text: string }
+  | { kind: 'thinking'; text: string }
   | { kind: 'proposed'; change: ProposedChange }
   | { kind: 'error'; text: string }
   /** Transient informational notice (e.g. server is retrying an upstream failure). */
