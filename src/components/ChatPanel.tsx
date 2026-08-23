@@ -315,6 +315,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   const [loading, setLoading] = useState(false);
   /** True while reconnecting after a stream drop (shows badge, keeps loading state). */
   const [reconnecting, setReconnecting] = useState(false);
+  /** True while following a still-running turn after a page reload (not an
+   *  error state — the banner dismisses once progress renders). */
+  const [following, setFollowing] = useState(false);
   /** The last turn was interrupted (server restart) and can be resumed. */
   const [resumable, setResumable] = useState(false);
   /** Chronological events for the in-flight assistant turn. */
@@ -555,7 +558,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     (id: string) => {
       const gen = ++watchGenRef.current;
       setLoading(true);
-      setReconnecting(true);
+      setFollowing(true);
       void (async () => {
         // Fast (2.5s) polling with incremental application — the open turn's
         // events render live as the server persists them. 2.5s × 120 = up to
@@ -570,12 +573,15 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             if (isLastTurnComplete(session.events)) {
               applySession(session);
               setLoading(false);
-              setReconnecting(false);
+              setFollowing(false);
               void refreshChatList();
               void refreshGitStatus();
               return;
             }
             applyPartialSession(session);
+            // Progress is rendering in the chat itself — the "still
+            // running" banner has done its job; dismiss it.
+            setFollowing(false);
           } catch {
             // network hiccup — keep polling
           }
@@ -583,7 +589,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         // Gave up (e.g. server restarted mid-turn) — stop the indicators.
         if (watchGenRef.current === gen) {
           setLoading(false);
-          setReconnecting(false);
+          setFollowing(false);
         }
       })();
     },
@@ -895,6 +901,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               // (tool calls etc. render live instead of a frozen banner).
               if (!isLastTurnComplete(session.events)) {
                 applyPartialSession(session);
+                // Progress is rendering — drop the alarming banner while
+                // polling continues.
+                setReconnecting(false);
               }
             } catch (pollErr) {
               // Session expired — stop polling, redirect is already triggered.
@@ -1732,10 +1741,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           </div>
         )}
 
-        {reconnecting && (
+        {(reconnecting || following) && (
           <div className="chat-reconnecting">
             <span className="spinner spinner-sm" />
-            <span>Connection lost — your response is still running; following its progress…</span>
+            <span>
+              {reconnecting
+                ? 'Connection lost — your response is still running; following its progress…'
+                : 'Your previous response is still running — following its progress…'}
+            </span>
           </div>
         )}
       </div>
