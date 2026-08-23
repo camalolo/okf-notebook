@@ -1252,10 +1252,23 @@ img {
   line-height: 1.6;
 }
 
+/* Model-authored section breaks (markdown ---): render as a typographic
+ * ornament, not a full-width rule — a wide 1px line inside the bubble was
+ * consistently mistaken for a UI separator artifact. */
 .markdown-body hr {
-  margin: 2em 0;
   border: none;
-  border-top: 1px solid var(--border);
+  margin: 1.4em 0;
+}
+
+.markdown-body hr::after {
+  content: "···";
+  display: block;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 1.1em;
+  letter-spacing: 0.6em;
+  text-indent: 0.6em; /* balance the trailing letter-spacing */
+  user-select: none;
 }
 
 .markdown-body img {
@@ -2116,10 +2129,22 @@ select.form-input {
   padding: 0;
   font-size: 0.85em;
 }
+/* Model-authored section breaks (markdown ---) inside chat bubbles: a
+ * typographic ornament instead of a full-width rule — the 1px line was
+ * consistently mistaken for a UI separator artifact. */
 .chat-bubble hr {
   border: none;
-  border-top: 1px solid var(--border);
-  margin: 0.6em 0;
+  margin: 1.2em 0;
+}
+.chat-bubble hr::after {
+  content: "···";
+  display: block;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 1.05em;
+  letter-spacing: 0.6em;
+  text-indent: 0.6em; /* balance the trailing letter-spacing */
+  user-select: none;
 }
 .chat-table-wrap {
   overflow-x: auto;
