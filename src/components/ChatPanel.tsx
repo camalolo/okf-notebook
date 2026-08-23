@@ -122,17 +122,21 @@ const ThinkingBlock = memo(function ThinkingBlock({ text, live }: { text: string
   }, [text, open, live]);
 
   const chars = text.length;
-  const label = live ? 'Thinking…' : `Reasoning · ${chars.toLocaleString()} chars`;
+  // Collapsed = a chip sibling of the tool chips (💭 · same pill styling);
+  // expanded = the streaming box. `live` only while it's the frontier.
+  const label = live ? 'Thinking…' : `${chars.toLocaleString()} chars reasoning`;
 
   return (
-    <div className={`chat-thinking${live ? ' chat-thinking-live' : ''}`}>
+    <div
+      className={`chat-thinking${live ? ' chat-thinking-live' : ''}${open ? ' chat-thinking-open' : ''}`}
+    >
       <button
         type="button"
         className="chat-thinking-header"
         onClick={() => setUserOpen(!open)}
         aria-expanded={open}
       >
-        <span className="chat-thinking-dot" aria-hidden="true" />
+        <span className="chat-thinking-icon" aria-hidden="true">💭</span>
         <span className="chat-thinking-label">{label}</span>
         <span className="chat-thinking-caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
       </button>
@@ -1716,6 +1720,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                       </div>
                     );
                   }
+                  // In-session reasoning from a finished turn — collapsed
+                  // chip, clickable. (Not persisted; gone after a reload.)
+                  if (ev.kind === 'thinking') {
+                    return <ThinkingBlock key={`pth${i}-${j}`} text={ev.text} live={false} />;
+                  }
                   if (ev.kind === 'notice') {
                     return (
                       <div className="chat-notice-event" key={`pn${i}-${j}`}>
@@ -1798,12 +1807,16 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             );
           }
           if (ev.kind === 'thinking') {
-            // Transient by design: only the streaming frontier renders. Once
-            // content or tool calls take over, the reasoning box steps aside
-            // entirely — a collapsed leftover between chips reads as a
-            // stray separator line (and duplicates what the dots convey).
-            if (!loading || i !== turnEvents.length - 1) return null;
-            return <ThinkingBlock key={`th${i}`} text={ev.text} live />;
+            // Frontier: expanded streaming box. Settled: collapsed 💭 chip
+            // styled like the tool chips (click to re-expand). Never a
+            // wide muted bar — that read as a stray separator line.
+            return (
+              <ThinkingBlock
+                key={`th${i}`}
+                text={ev.text}
+                live={loading && i === turnEvents.length - 1}
+              />
+            );
           }
           if (ev.kind === 'notice') {
             return (

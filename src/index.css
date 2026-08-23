@@ -2117,58 +2117,77 @@ select.form-input {
   text-decoration: underline;
 }
 
-/* Thinking-model chain-of-thought block (live while streaming, collapsible).
- * Hugs its content like the tool chips — without align-self the collapsed
- * state stretches full-width and reads as a horizontal separator line. */
+/* Thinking-model chain-of-thought chip/box.
+ * Collapsed: a twin of the tool chips (same pill metrics) so reasoning sits
+ * IN the timeline instead of reading as a separator line. Expanded (live
+ * frontier or user click): the streaming box with the dashed divider. */
 .chat-thinking {
   align-self: flex-start;
   max-width: 100%;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  display: inline-flex;
+  flex-direction: column;
   background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
   overflow: hidden;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.chat-thinking-open {
+  border-radius: var(--radius);
 }
 
 .chat-thinking-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   width: 100%;
-  padding: 6px 12px;
+  padding: 5px 11px;
   background: none;
   border: none;
-  color: var(--text-muted);
-  font-size: 0.85rem;
+  color: inherit;
+  font-size: inherit;
   cursor: pointer;
   text-align: left;
 }
 
+.chat-thinking-open .chat-thinking-header {
+  padding: 6px 12px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
 .chat-thinking-header:hover {
-  color: var(--text);
   background: var(--surface-2);
 }
 
-.chat-thinking-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  flex: none;
+.chat-thinking-icon {
+  line-height: 1;
+  flex-shrink: 0;
 }
 
-.chat-thinking-live .chat-thinking-dot {
-  background: var(--accent);
+.chat-thinking-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.chat-thinking-open .chat-thinking-label {
+  font-family: inherit;
+  font-style: italic;
+  white-space: normal;
+}
+
+.chat-thinking-live .chat-thinking-icon {
   animation: chat-thinking-pulse 1.2s infinite ease-in-out;
 }
 
 @keyframes chat-thinking-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.75); }
-}
-
-.chat-thinking-label {
-  flex: 1;
-  font-style: italic;
 }
 
 .chat-thinking-caret {
