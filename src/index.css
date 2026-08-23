@@ -1956,26 +1956,11 @@ select.form-input {
   white-space: nowrap;
 }
 
-.chat-history-item-delete {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 0.8rem;
-  padding: 6px 10px;
-  border-radius: 4px;
-  transition: opacity 0.15s, color 0.15s, background 0.15s;
-  flex-shrink: 0;
-  min-width: 36px;
-  min-height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.chat-history-item-delete:hover {
-  color: var(--danger);
+.chat-delete-btn.armed,
+.chat-delete-btn.armed:hover {
   background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 /* Message list (scroll area) */
@@ -2828,7 +2813,8 @@ select.form-input {
   }
 
   .chat-new-btn,
-  .chat-compact-btn {
+  .chat-compact-btn,
+  .chat-delete-btn {
     padding: 4px 8px;
     font-size: 0.75rem;
   }

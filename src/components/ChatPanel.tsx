@@ -1407,6 +1407,36 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     [bundleId, handleSelectChat],
   );
 
+  /**
+   * Delete confirmation: the header Delete button arms on the first click
+   * ("Confirm delete?") and only deletes on a second click within a 3s
+   * window — no native confirm() dialog. The armed state is keyed by chat
+   * id, so switching chats disarms it automatically.
+   */
+  const [armedChatId, setArmedChatId] = useState<string | null>(null);
+  const deleteArmTimer = useRef<number | null>(null);
+  const deleteArmed = armedChatId !== null && armedChatId === chatId;
+
+  useEffect(() => () => {
+    if (deleteArmTimer.current !== null) window.clearTimeout(deleteArmTimer.current);
+  }, []);
+
+  const handleDeleteClick = useCallback(() => {
+    const id = chatIdRef.current;
+    if (id === null || loading) return;
+    if (deleteArmTimer.current !== null) {
+      window.clearTimeout(deleteArmTimer.current);
+      deleteArmTimer.current = null;
+    }
+    if (armedChatId !== id) {
+      setArmedChatId(id);
+      deleteArmTimer.current = window.setTimeout(() => setArmedChatId(null), 3000);
+      return;
+    }
+    setArmedChatId(null);
+    void handleDeleteChat(id);
+  }, [armedChatId, loading, handleDeleteChat]);
+
   // On mount / bundle change: fetch the chat list and auto-load the most recent.
   useEffect(() => {
     let cancelled = false;
@@ -1565,6 +1595,15 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               {gitUntracked > 0 && <span className="git-untracked">?{gitUntracked}</span>}
             </button>
           )}
+          <button
+            type="button"
+            className="chat-new-btn"
+            onClick={handleNewChat}
+            title="New chat"
+            disabled={loading}
+          >
+            + New
+          </button>
           {messages.length > 0 && !loading ? (
             <button
               type="button"
@@ -1592,15 +1631,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               </span>
             );
           })()}
-          <button
-            type="button"
-            className="chat-new-btn"
-            onClick={handleNewChat}
-            title="New chat"
-            disabled={loading}
-          >
-            + New
-          </button>
           {messages.length > 0 && !loading && (
             <button
               type="button"
@@ -1609,6 +1639,17 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               title="Generate a meaningful title from the conversation"
             >
               Retitle
+            </button>
+          )}
+          {chatId !== null && (
+            <button
+              type="button"
+              className={`chat-new-btn chat-delete-btn ${deleteArmed ? 'armed' : ''}`.trim()}
+              onClick={handleDeleteClick}
+              disabled={loading}
+              title={deleteArmed ? 'Click again to confirm deletion' : 'Delete this chat'}
+            >
+              {deleteArmed ? 'Confirm delete?' : 'Delete'}
             </button>
           )}
         </div>
@@ -1636,19 +1677,6 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                     <span className="chat-history-item-date">
                       {formatDate(c.updatedAt)}
                     </span>
-                    <button
-                      type="button"
-                      className="chat-history-item-delete"
-                      title="Delete chat"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (confirm(`Delete "${c.title}"?`)) {
-                          void handleDeleteChat(c.id);
-                        }
-                      }}
-                    >
-                      ✕
-                    </button>
                   </span>
                 </div>
               ))}
