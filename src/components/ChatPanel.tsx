@@ -1798,13 +1798,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             );
           }
           if (ev.kind === 'thinking') {
-            return (
-              <ThinkingBlock
-                key={`th${i}`}
-                text={ev.text}
-                live={loading && i === turnEvents.length - 1}
-              />
-            );
+            // Transient by design: only the streaming frontier renders. Once
+            // content or tool calls take over, the reasoning box steps aside
+            // entirely — a collapsed leftover between chips reads as a
+            // stray separator line (and duplicates what the dots convey).
+            if (!loading || i !== turnEvents.length - 1) return null;
+            return <ThinkingBlock key={`th${i}`} text={ev.text} live />;
           }
           if (ev.kind === 'notice') {
             return (
