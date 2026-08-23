@@ -203,3 +203,22 @@ describe('streamChat — abort behavior', () => {
     expect(received[3].event).toBe('done');
   });
 });
+
+describe('parseEvent — SSE id field (reconnect cursor)', () => {
+  // parseEvent is module-private; verify ids surface through streamChat's
+  // yielded events by feeding id-annotated blocks through the mock stream.
+  it('yields the numeric id from id: lines', async () => {
+    const wire =
+      `id: 7\nevent: content\ndata: ${JSON.stringify({ text: 'hi' })}\n\n` +
+      `event: done\ndata: {}\n\n`;
+    const fetchMock = vi.fn(async () => new Response(wire, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const seen: Array<number | undefined> = [];
+    for await (const ev of streamChat('b', [{ role: 'user', content: 'x' }], null)) {
+      seen.push(ev.id);
+    }
+    expect(seen[0]).toBe(7);
+    expect(seen[1]).toBeUndefined(); // events without id: carry none
+  });
+});

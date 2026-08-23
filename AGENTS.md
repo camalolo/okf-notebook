@@ -130,9 +130,24 @@ deploy/  ← example nginx reverse-proxy config
 4. When the LLM returns plain content (no tool calls), emit a final `done`
    event and end the stream.
 
-SSE events: `tool_call`, `content`, `edit_applied`, `retry`, `done`, `error`. The
-frontend (`src/services/chat.ts`) hand-parses the SSE stream from a
+SSE events: `tool_call`, `content`, `thinking`, `usage`, `edit_applied`,
+`retry`, `done`, `error` — each written with an `id:` (monotonic per turn).
+The frontend (`src/services/chat.ts`) hand-parses the SSE stream from a
 `ReadableStream` (no EventSource — POST is needed).
+
+**True stream reconnect** (`server/lib/turn-stream.ts`): every emitted
+event is buffered per running turn (key `${bundleId}/${chatId}`) and
+fanned out to subscribers. `GET /:bundleId/chat/stream?chatId=…&since=N`
+re-attaches: replays buffered events with id > N (the whole turn when
+since < 0), then live events until the terminal one. On a mid-turn stream
+drop the client re-attaches from its last seen id (up to 6 attempts)
+before falling back to timeline-polling recovery; after a page reload it
+re-attaches with a full replay when the tab had stored a stream position
+(`localStorage nb-str:*`), so reload recovery streams live (thinking
+included) instead of polling. Buffers live 60s past turn end, then drop;
+`event: gone` tells the client there is nothing to attach to. Buffers are
+in-memory — a server restart mid-turn still needs the boot sweep + Resume
+button path.
 
 **Client disconnects do NOT stop a turn.** The loop keeps running and
 persisting every event to the chat timeline even after the SSE connection

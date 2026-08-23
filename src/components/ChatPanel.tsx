@@ -12,7 +12,8 @@ import type {
   ToolCallInfo,
   TurnEvent,
 } from '../types.ts';
-import { streamChat } from '../services/chat.ts';
+import { streamChat, attachChatStream, TurnGoneError } from '../services/chat.ts';
+import type { ChatSSEEvent } from '../services/chat.ts';
 import {
   abortChat,
   compactChat,
@@ -53,6 +54,54 @@ interface ToolCallLabel {
 }
 
 type ProposedEvent = Extract<TurnEvent, { kind: 'proposed' }>;
+
+/** Per-turn mutable state shared by the stream event processor. */
+interface TurnSink {
+  /** Same role as the old turnEventsLocal — drives rendering + finalization. */
+  events: TurnEvent[];
+  /** Set when the terminal `done` SSE event arrives. */
+  gotDone: boolean;
+  /** Last server stream id seen — the reconnect cursor. */
+  lastId: number;
+}
+
+// --- Stream-position persistence (reconnect across page reloads) -------------
+//
+// The last seen SSE event id is stored per chat so a page reload mid-turn can
+// re-attach to the server's buffered stream (true reconnect) instead of
+// falling back to timeline polling.
+
+function streamPosKey(bundleId: string, chatId: string): string {
+  return `nb-str:${bundleId}:${chatId}`;
+}
+
+function readStreamPos(bundleId: string, chatId: string): number | null {
+  try {
+    const raw = localStorage.getItem(streamPosKey(bundleId, chatId));
+    const n = raw === null ? NaN : parseInt(raw, 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeStreamPos(bundleId: string, chatId: string | null, sink: TurnSink): void {
+  if (!chatId || sink.lastId < 0) return;
+  try {
+    localStorage.setItem(streamPosKey(bundleId, chatId), String(sink.lastId));
+  } catch {
+    // storage unavailable — reconnect after reload degrades to polling
+  }
+}
+
+function clearStreamPos(bundleId: string, chatId: string | null): void {
+  if (!chatId) return;
+  try {
+    localStorage.removeItem(streamPosKey(bundleId, chatId));
+  } catch {
+    // ignore
+  }
+}
 
 /**
  * Live/collapsed display of a thinking model's chain-of-thought.
@@ -560,10 +609,53 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       setLoading(true);
       setFollowing(true);
       void (async () => {
-        // Fast (2.5s) polling with incremental application — the open turn's
-        // events render live as the server persists them. 2.5s × 120 = up to
-        // 5 minutes; long LLM turns with tool loops can run for minutes, and
-        // the server keeps going after disconnects.
+        // TRUE reconnect after a reload: when a stream position was stored
+        // for this chat (a tab of this browser was streaming the turn), skip
+        // polling — re-attach with a FULL replay and drive the same live
+        // pipeline (thinking cards included). Falls through to polling when
+        // there is nothing to attach to.
+        if (readStreamPos(bundleId, id) !== null) {
+          const sink: TurnSink = { events: [], gotDone: false, lastId: -1 };
+          try {
+            setTurnEvents([]);
+            let errored = false;
+            for await (const ev of attachChatStream(bundleId, id, -1)) {
+              if (watchGenRef.current !== gen) return;
+              try {
+                processStreamEvent(ev, sink);
+                storeStreamPos(bundleId, id, sink);
+              } catch {
+                errored = true; // terminal error event — sync from the timeline
+                break;
+              }
+              if (sink.gotDone) break;
+            }
+            if (watchGenRef.current !== gen) return;
+            if (sink.gotDone || errored) {
+              clearStreamPos(bundleId, id);
+              try {
+                const session = await loadChat(bundleId, id);
+                if (session) applySession(session);
+              } catch {
+                // best-effort — polling below would also settle it
+              }
+              setLoading(false);
+              setFollowing(false);
+              void refreshChatList();
+              void refreshGitStatus();
+              return;
+            }
+            // The attach stream dropped without `done` — everything replayed
+            // so far is rendered; keep following via polling below.
+          } catch {
+            // gone (turn ended >60s ago / restarted) or network — polling.
+          }
+        }
+
+        // Polling fallback — the open turn's events render live as the
+        // server persists them. 2.5s × 120 = up to 5 minutes; long LLM turns
+        // with tool loops can run for minutes, and the server keeps going
+        // after disconnects.
         for (let attempt = 0; attempt < 120; attempt++) {
           if (attempt > 0) await new Promise((r) => setTimeout(r, 2500));
           if (watchGenRef.current !== gen) return;
@@ -574,6 +666,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               applySession(session);
               setLoading(false);
               setFollowing(false);
+              clearStreamPos(bundleId, id);
               void refreshChatList();
               void refreshGitStatus();
               return;
@@ -663,6 +756,157 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
    * turn — the server rebuilds the history from the timeline in that case,
    * so apiHistory is empty).
    */
+  /**
+   * Shared SSE event processor — the single event→UI switch used by every
+   * stream consumer: the live POST stream, drop-reconnect attaches, and the
+   * reload re-attach (watchBackgroundTurn). Mutates the caller's sink.
+   * Throws on `error` events (callers treat as stream failure).
+   */
+  const processStreamEvent = (ev: ChatSSEEvent, sink: TurnSink): void => {
+    if (typeof ev.id === 'number') sink.lastId = ev.id;
+    const data = ev.data;
+
+    if (ev.event === 'usage') {
+      // Exact per-call token usage from the API's final chunk. The
+      // prompt size is the true context of the last LLM call.
+      const obj = data as { promptTokens?: unknown; contextLimit?: unknown };
+      if (typeof obj.promptTokens === 'number') {
+        setExactPromptTokens(obj.promptTokens);
+      }
+      if (typeof obj.contextLimit === 'number' && obj.contextLimit > 0) {
+        setCtxLimit(obj.contextLimit);
+      }
+    } else if (ev.event === 'thinking') {
+      // Chain-of-thought from a thinking model, streamed before the
+      // visible answer. Transient display only — coalesced into the
+      // trailing thinking event, never resent to the LLM, not persisted.
+      const obj = data as { text?: unknown };
+      if (typeof obj.text === 'string') {
+        setTurnEvents((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.kind === 'thinking') {
+            return [...prev.slice(0, -1), { kind: 'thinking', text: last.text + obj.text }];
+          }
+          return [...prev, { kind: 'thinking', text: obj.text as string }];
+        });
+        const last = sink.events[sink.events.length - 1];
+        if (last && last.kind === 'thinking') {
+          sink.events[sink.events.length - 1] = { kind: 'thinking', text: last.text + obj.text };
+        } else {
+          sink.events.push({ kind: 'thinking', text: obj.text });
+        }
+      }
+    } else if (ev.event === 'content') {
+      const obj = data as { text?: unknown };
+      if (typeof obj.text === 'string') {
+        appendContent(obj.text);
+        // Also track in local for finalization ordering (preserves
+        // the correct content-to-tool interleaving).
+        const last = sink.events[sink.events.length - 1];
+        if (last && last.kind === 'content') {
+          sink.events[sink.events.length - 1] = { kind: 'content', text: last.text + obj.text };
+        } else {
+          sink.events.push({ kind: 'content', text: obj.text });
+        }
+      }
+    } else if (ev.event === 'tool_call') {
+      const obj = data as Partial<ToolCallInfo>;
+      const toolCall: ToolCallInfo = {
+        name: typeof obj.name === 'string' ? obj.name : 'tool',
+        args: obj.args ?? {},
+        result: obj.result,
+      };
+      const te: TurnEvent = { kind: 'tool', toolCall };
+      setTurnEvents((prev) => [...prev, te]);
+      sink.events.push(te);
+
+      // Detect expired Workspace auth — trigger redirect to login.
+      if (isWorkspaceAuthRequired(toolCall)) {
+        setWorkspaceExpired(true);
+      }
+
+      // Refresh git badge after commits and file edits.
+      if (toolCall.name === 'git_commit' || toolCall.name === 'edit_file' || toolCall.name === 'undo_edit' || toolCall.name === 'create_file' || toolCall.name === 'delete_file') {
+        void refreshGitStatus();
+      }
+    } else if (ev.event === 'edit_applied') {
+      const obj = data as {
+        type?: unknown;
+        path?: unknown;
+        oldContent?: unknown;
+        newContent?: unknown;
+      };
+      const change: ProposedChange = {
+        id: makeId(),
+        type:
+          obj.type === 'create' ? 'create'
+          : obj.type === 'delete' ? 'delete'
+          : 'edit',
+        path: typeof obj.path === 'string' ? obj.path : '',
+        oldContent:
+          typeof obj.oldContent === 'string' ? obj.oldContent : undefined,
+        newContent: typeof obj.newContent === 'string' ? obj.newContent : '',
+        status: 'applied',
+      };
+      setProposedChanges((prev) => [...prev, change]);
+      const te: TurnEvent = { kind: 'proposed', change };
+      setTurnEvents((prev) => [...prev, te]);
+      sink.events.push(te);
+      onFilesChanged?.();
+      void refreshGitStatus();
+    } else if (ev.event === 'retry') {
+      // The server hit a transient upstream failure and is retrying.
+      // Partial content from the failed attempt is discarded (the full
+      // answer is re-streamed), so drop trailing content and show a
+      // transient notice while the retry is in flight.
+      const obj = data as { attempt?: unknown; maxAttempts?: unknown; reason?: unknown };
+      const attempt = typeof obj.attempt === 'number' ? obj.attempt : '?';
+      const maxAttempts = typeof obj.maxAttempts === 'number' ? obj.maxAttempts : '?';
+      const reason = typeof obj.reason === 'string' ? `: ${trunc(obj.reason, 80)}` : '';
+      while (
+        sink.events.length > 0 &&
+        (sink.events[sink.events.length - 1].kind === 'content' ||
+          sink.events[sink.events.length - 1].kind === 'thinking')
+      ) {
+        sink.events.pop();
+      }
+      setTurnEvents((prev) => {
+        const p = [...prev];
+        while (
+          p.length > 0 &&
+          (p[p.length - 1].kind === 'content' || p[p.length - 1].kind === 'thinking')
+        ) p.pop();
+        return p;
+      });
+      const te: TurnEvent = {
+        kind: 'notice',
+        text: `Upstream hiccup${reason} — retrying (attempt ${attempt}/${maxAttempts})…`,
+      };
+      setTurnEvents((prev) => [...prev, te]);
+      sink.events.push(te);
+    } else if (ev.event === 'commit_proposed') {
+      const obj = data as { message?: unknown };
+      const te: TurnEvent = {
+        kind: 'tool',
+        toolCall: {
+          name: 'commit',
+          args: {
+            message: typeof obj.message === 'string' ? obj.message : '',
+          },
+        },
+      };
+      setTurnEvents((prev) => [...prev, te]);
+      sink.events.push(te);
+    } else if (ev.event === 'done') {
+      sink.gotDone = true;
+    } else if (ev.event === 'error') {
+      const obj = data as { message?: unknown };
+      throw new Error(
+        typeof obj.message === 'string' ? obj.message : 'Chat error',
+      );
+    }
+  };
+
   const runTurn = useCallback(async (opts: {
     /** Messages for the API (empty in resume mode — server-side reconstruction). */
     apiHistory: ChatMessage[];
@@ -681,165 +925,45 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     const { resume = false, isComplete } = opts;
 
     // Local tracking for this turn (mirrors the setTurnEvents/setProposedChanges
-    // calls so we can compute the final snapshot accurately).
-    const turnEventsLocal: TurnEvent[] = [];
-    // Set when the server sends the `done` SSE event. A stream that ends
-    // cleanly *without* `done` means an intermediary (e.g. nginx
-    // proxy_read_timeout) closed the connection mid-turn — treat it like a
-    // connection error and try to recover from the server timeline.
-    let gotDone = false;
+    // calls so we can compute the final snapshot accurately) + the reconnect
+    // cursor (lastId). A stream that ends cleanly *without* `done` means an
+    // intermediary (e.g. nginx proxy_read_timeout) closed the connection
+    // mid-turn — true reconnect is attempted before polling recovery.
+    const sink: TurnSink = { events: [], gotDone: false, lastId: readStreamPos(bundleId, chatIdRef.current ?? '') ?? -1 };
     let streamErr: unknown = null;
 
     try {
       for await (const ev of streamChat(bundleId, opts.apiHistory, chatIdRef.current, controller.signal, resume ? { resume: true } : undefined)) {
-        const data = ev.data;
+        processStreamEvent(ev, sink);
+        storeStreamPos(bundleId, chatIdRef.current, sink);
+        if (sink.gotDone) break;
+      }
 
-        if (ev.event === 'usage') {
-          // Exact per-call token usage from the API's final chunk. The
-          // prompt size is the true context of the last LLM call.
-          const obj = data as { promptTokens?: unknown; contextLimit?: unknown };
-          if (typeof obj.promptTokens === 'number') {
-            setExactPromptTokens(obj.promptTokens);
-          }
-          if (typeof obj.contextLimit === 'number' && obj.contextLimit > 0) {
-            setCtxLimit(obj.contextLimit);
-          }
-        } else if (ev.event === 'thinking') {
-          // Chain-of-thought from a thinking model, streamed before the
-          // visible answer. Transient display only — coalesced into the
-          // trailing thinking event, never resent to the LLM, not persisted.
-          const obj = data as { text?: unknown };
-          if (typeof obj.text === 'string') {
-            setTurnEvents((prev) => {
-              const last = prev[prev.length - 1];
-              if (last && last.kind === 'thinking') {
-                return [...prev.slice(0, -1), { kind: 'thinking', text: last.text + obj.text }];
-              }
-              return [...prev, { kind: 'thinking', text: obj.text as string }];
-            });
-            const last = turnEventsLocal[turnEventsLocal.length - 1];
-            if (last && last.kind === 'thinking') {
-              turnEventsLocal[turnEventsLocal.length - 1] = { kind: 'thinking', text: last.text + obj.text };
-            } else {
-              turnEventsLocal.push({ kind: 'thinking', text: obj.text });
+      // TRUE reconnect: the primary stream ended without `done` — the server
+      // is still running the turn (disconnects are tolerated server-side).
+      // Re-attach to the buffered stream and continue live; the old polling
+      // recovery below only runs when re-attaching is impossible.
+      if (!sink.gotDone && !stoppedRef.current && chatIdRef.current) {
+        for (let attempt = 0; attempt < 6 && !sink.gotDone && !stoppedRef.current; attempt++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          if (stoppedRef.current) break;
+          try {
+            for await (const ev of attachChatStream(bundleId, chatIdRef.current, sink.lastId, controller.signal)) {
+              processStreamEvent(ev, sink);
+              storeStreamPos(bundleId, chatIdRef.current, sink);
+              if (sink.gotDone) break;
             }
+          } catch (attachErr) {
+            if (attachErr instanceof TurnGoneError) break; // turn ended — sync below
+            // transient attach failure — retry
           }
-        } else if (ev.event === 'content') {
-          const obj = data as { text?: unknown };
-          if (typeof obj.text === 'string') {
-            appendContent(obj.text);
-            // Also track in local for finalization ordering (preserves
-            // the correct content-to-tool interleaving).
-            const last = turnEventsLocal[turnEventsLocal.length - 1];
-            if (last && last.kind === 'content') {
-              turnEventsLocal[turnEventsLocal.length - 1] = { kind: 'content', text: last.text + obj.text };
-            } else {
-              turnEventsLocal.push({ kind: 'content', text: obj.text });
-            }
-          }
-        } else if (ev.event === 'tool_call') {
-          const obj = data as Partial<ToolCallInfo>;
-          const toolCall: ToolCallInfo = {
-            name: typeof obj.name === 'string' ? obj.name : 'tool',
-            args: obj.args ?? {},
-            result: obj.result,
-          };
-          const te: TurnEvent = { kind: 'tool', toolCall };
-          setTurnEvents((prev) => [...prev, te]);
-          turnEventsLocal.push(te);
-
-          // Detect expired Workspace auth — trigger redirect to login.
-          if (isWorkspaceAuthRequired(toolCall)) {
-            setWorkspaceExpired(true);
-          }
-
-          // Refresh git badge after commits and file edits.
-          if (toolCall.name === 'git_commit' || toolCall.name === 'edit_file' || toolCall.name === 'undo_edit' || toolCall.name === 'create_file' || toolCall.name === 'delete_file') {
-            void refreshGitStatus();
-          }
-        } else if (ev.event === 'edit_applied') {
-          const obj = data as {
-            type?: unknown;
-            path?: unknown;
-            oldContent?: unknown;
-            newContent?: unknown;
-          };
-          const change: ProposedChange = {
-            id: makeId(),
-            type:
-              obj.type === 'create' ? 'create'
-              : obj.type === 'delete' ? 'delete'
-              : 'edit',
-            path: typeof obj.path === 'string' ? obj.path : '',
-            oldContent:
-              typeof obj.oldContent === 'string' ? obj.oldContent : undefined,
-            newContent: typeof obj.newContent === 'string' ? obj.newContent : '',
-            status: 'applied',
-          };
-          setProposedChanges((prev) => [...prev, change]);
-          const te: TurnEvent = { kind: 'proposed', change };
-          setTurnEvents((prev) => [...prev, te]);
-          turnEventsLocal.push(te);
-          onFilesChanged?.();
-          void refreshGitStatus();
-        } else if (ev.event === 'retry') {
-          // The server hit a transient upstream failure and is retrying.
-          // Partial content from the failed attempt is discarded (the full
-          // answer is re-streamed), so drop trailing content and show a
-          // transient notice while the retry is in flight.
-          const obj = data as { attempt?: unknown; maxAttempts?: unknown; reason?: unknown };
-          const attempt = typeof obj.attempt === 'number' ? obj.attempt : '?';
-          const maxAttempts = typeof obj.maxAttempts === 'number' ? obj.maxAttempts : '?';
-          const reason = typeof obj.reason === 'string' ? `: ${trunc(obj.reason, 80)}` : '';
-          while (
-            turnEventsLocal.length > 0 &&
-            (turnEventsLocal[turnEventsLocal.length - 1].kind === 'content' ||
-              turnEventsLocal[turnEventsLocal.length - 1].kind === 'thinking')
-          ) {
-            turnEventsLocal.pop();
-          }
-          setTurnEvents((prev) => {
-            const p = [...prev];
-            while (
-              p.length > 0 &&
-              (p[p.length - 1].kind === 'content' || p[p.length - 1].kind === 'thinking')
-            ) p.pop();
-            return p;
-          });
-          const te: TurnEvent = {
-            kind: 'notice',
-            text: `Upstream hiccup${reason} — retrying (attempt ${attempt}/${maxAttempts})…`,
-          };
-          setTurnEvents((prev) => [...prev, te]);
-          turnEventsLocal.push(te);
-        } else if (ev.event === 'commit_proposed') {
-          const obj = data as { message?: unknown };
-          const te: TurnEvent = {
-            kind: 'tool',
-            toolCall: {
-              name: 'commit',
-              args: {
-                message: typeof obj.message === 'string' ? obj.message : '',
-              },
-            },
-          };
-          setTurnEvents((prev) => [...prev, te]);
-          turnEventsLocal.push(te);
-        } else if (ev.event === 'done') {
-          gotDone = true;
-          break;
-        } else if (ev.event === 'error') {
-          const obj = data as { message?: unknown };
-          throw new Error(
-            typeof obj.message === 'string' ? obj.message : 'Chat error',
-          );
         }
       }
     } catch (err) {
       streamErr = err;
     }
 
-    if (streamErr || !gotDone) {
+    if (streamErr || !sink.gotDone) {
       // If the user pressed STOP, poll the server timeline briefly until the
       // aborted turn's end is persisted, then sync from it. The server breaks
       // out of its loop quickly but may have completed in-flight tool calls.
@@ -944,14 +1068,17 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               ? 'Chat request failed'
               : 'Connection lost before the response finished.';
         const errEvent: TurnEvent = { kind: 'error', text: chatError };
-        turnEventsLocal.push(errEvent);
+        sink.events.push(errEvent);
         setTurnEvents((prev) => [...prev, errEvent]);
       }
     }
 
     abortRef.current = null;
 
-    // Split turnEventsLocal into segments at content/non-content boundaries.
+    // Turn finished and finalized — the reconnect cursor is obsolete.
+    clearStreamPos(bundleId, chatIdRef.current);
+
+    // Split sink.events into segments at content/non-content boundaries.
     // Each content segment becomes an assistant message; non-content events
     // (tool calls, proposed changes, errors) become the pastTurns entry for
     // the FOLLOWING assistant message. This preserves the correct visual
@@ -960,7 +1087,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     const segTurns: TurnEvent[][] = [];
     let pendingEvents: TurnEvent[] = [];
 
-    for (const ev of turnEventsLocal) {
+    for (const ev of sink.events) {
       if (ev.kind === 'content') {
         // Content arrives — flush pending tools as the pastTurns for this
         // content's assistant message.

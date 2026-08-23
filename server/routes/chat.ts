@@ -8,6 +8,13 @@ const simpleGit = require('simple-git') as (cwd: string) => import('simple-git')
 import { createPatch } from 'diff';
 import { getBundle, resolveBundlePath } from '../bundles.js';
 import {
+  beginTurn,
+  recordEvent,
+  attachSubscriber,
+  endTurn,
+  turnKey,
+} from '../lib/turn-stream.js';
+import {
   chatCompletion,
   chatCompletionStream,
   contextLimitFor,
@@ -773,12 +780,6 @@ export async function buildSystemPrompt(
 type SSEEmit = (event: string, data: unknown) => void;
 
 /** Create an SSE emit function bound to a response (already headered). */
-function makeEmitter(res: import('express').Response): SSEEmit {
-  return (event, data) => {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-}
 
 // --- Active turn registry -----------------------------------------------------
 
@@ -799,6 +800,70 @@ const activeAborts = new Map<string, { controller: AbortController; userId: stri
  * (the UI's STOP button). Client disconnects alone no longer cancel turns,
  * so stopping requires this call. Returns 404 when no turn is active.
  */
+/**
+ * GET /:bundleId/chat/stream?chatId=…&since=N — re-attach to a running
+ * turn's SSE stream (true reconnect). Replays every buffered event with
+ * id > since (the whole turn when since < 0), then live events until the
+ * turn's terminal event. `event: gone` + close when nothing is buffered
+ * (turn long ended, never started, or the server restarted) — the client
+ * falls back to timeline sync.
+ */
+router.get('/:bundleId/chat/stream', async (req, res, next) => {
+  const bundleId = req.params.bundleId as string;
+  try {
+    const chatId = typeof req.query.chatId === 'string' ? req.query.chatId : '';
+    const since = typeof req.query.since === 'string' ? parseInt(req.query.since, 10) : -1;
+    if (!chatId) {
+      return res.status(400).json({ error: 'chatId is required' });
+    }
+    // Ownership mirrors every other chat read.
+    const session = await loadChat(bundleId, chatId, req.user!.email);
+    if (!session) {
+      return res.status(404).json({ error: 'Chat not found' });
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders?.();
+
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+      } catch {
+        clearInterval(heartbeat);
+      }
+    }, 25_000);
+
+    let detach: (() => void) | null = null;
+    res.on('close', () => {
+      clearInterval(heartbeat);
+      detach?.();
+    });
+
+    try {
+      const attached = attachSubscriber(
+        turnKey(bundleId, chatId),
+        Number.isFinite(since) ? since : -1,
+        {
+          write: (chunk) => res.write(chunk),
+          end: () => res.end(),
+        },
+      );
+      detach = attached.detach;
+    } catch {
+      // No buffer for this turn.
+      res.write('event: gone\ndata: {}\n\n');
+      res.end();
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/:bundleId/chat/abort', async (req, res, next) => {
   try {
     const bundleId = req.params.bundleId as string;
@@ -849,6 +914,9 @@ router.post('/:bundleId/chat', async (req, res, next) => {
   // Registry key for the explicit-abort endpoint — declared here so the
   // outer finally can always unregister the turn.
   let abortKey: string | null = null;
+  // Turn stream buffer key — outer catch/finally record the terminal event
+  // and release the buffer even when the inner loop throws.
+  let streamKey: string | null = null;
 
   try {
     const bundle = await getBundle(bundleId);
@@ -972,11 +1040,19 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     }, 25_000);
     res.on('close', () => clearInterval(heartbeat));
 
-    const rawEmit = makeEmitter(res);
+    // Turn stream buffer — enables clients to re-attach after a drop or
+    // page reload (GET /chat/stream) and continue the SAME event stream.
+    streamKey = chatId ? turnKey(bundleId, chatId) : null;
+    if (streamKey) beginTurn(streamKey);
     const emit: SSEEmit = (event, data) => {
+      // Record regardless of connection — the server-side loop keeps
+      // running after a client disconnect, and reconnectors replay this.
+      const id = streamKey ? recordEvent(streamKey, event, data) : -1;
       if (!clientConnected) return;
       try {
-        rawEmit(event, data);
+        if (id >= 0) res.write(`id: ${id}\n`);
+        res.write(`event: ${event}\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
       } catch {
         clientConnected = false;
       }
@@ -1316,6 +1392,9 @@ router.post('/:bundleId/chat', async (req, res, next) => {
           persist({ kind: 'assistant', content: turnContent });
         }
         persist({ kind: 'turn_end' });
+        // Terminal marker for re-attached clients (the primary client is
+        // gone or stopping; the buffer's subscribers need closure too).
+        if (streamKey) recordEvent(streamKey, 'done', { aborted: true });
         if (clientConnected) res.end();
         return;
       }
@@ -1336,12 +1415,15 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     }
     // Already streaming — best-effort error event then close.
     try {
-      res.write(`event: error\ndata: ${JSON.stringify({ message: String(err) })}\n\n`);
+      const msg = String(err);
+      if (streamKey) recordEvent(streamKey, 'error', { message: msg });
+      res.write(`event: error\ndata: ${JSON.stringify({ message: msg })}\n\n`);
     } catch {
       // ignore
     }
     res.end();
   } finally {
+    if (streamKey) endTurn(streamKey);
     if (abortKey) activeAborts.delete(abortKey);
   }
 });
