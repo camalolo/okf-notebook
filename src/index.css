@@ -2312,6 +2312,8 @@ select.form-input {
 
 /* Inline error event in the chat timeline */
 .chat-error-event {
+  align-self: flex-start;
+  max-width: 100%;
   padding: 8px 14px;
   background: var(--danger-soft);
   border: 1px solid rgba(240, 97, 109, 0.3);
@@ -2323,6 +2325,8 @@ select.form-input {
 
 /* Transient notice in the chat timeline (e.g. server retrying an upstream failure) */
 .chat-notice-event {
+  align-self: flex-start;
+  max-width: 100%;
   padding: 8px 14px;
   background: var(--warning-bg, #fef3cd);
   border: 1px solid var(--warning-border, #ffc107);
@@ -2337,11 +2341,15 @@ select.form-input {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  align-self: stretch;
+  align-self: flex-start;
+  max-width: 100%;
 }
 
-/* Proposed change card */
+/* Proposed change card. Hugs content like the tool chips — a full-width
+ * collapsed card reads as a horizontal separator line in the chat column. */
 .proposed-change {
+  align-self: flex-start;
+  max-width: 100%;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
