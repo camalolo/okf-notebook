@@ -1994,6 +1994,14 @@ select.form-input {
   --tl-gap: 6px;
 }
 
+/* Nothing inside a scrollable column may ever shrink: when content
+ * overflows, flex-shrink otherwise compresses children whose automatic
+ * min-height is 0 (overflow:hidden items — the thinking box flattened to
+ * a 2px horizontal line in long, scrolled chats). */
+.chat-messages > * {
+  flex-shrink: 0;
+}
+
 .chat-messages > .chat-tool-call,
 .chat-messages > .chat-thinking,
 .chat-messages > .proposed-change,
