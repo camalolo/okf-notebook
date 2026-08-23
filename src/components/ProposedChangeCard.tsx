@@ -109,7 +109,7 @@ export const ProposedChangeCard = memo(function ProposedChangeCard({
   const removed = diffLines.filter((l) => l.type === 'removed').length;
 
   return (
-    <div className="proposed-change proposed-change-applied">
+    <div className={`proposed-change proposed-change-applied${expanded ? '' : ' pc-collapsed'}`}>
       <div
         role="button"
         tabIndex={0}
@@ -117,19 +117,41 @@ export const ProposedChangeCard = memo(function ProposedChangeCard({
         onClick={() => setExpanded((v) => !v)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v); } }}
         aria-expanded={expanded}
+        title={change.path}
       >
-        <span className="pc-chevron" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
-        <span className={`pc-badge pc-badge-${change.type}`}>
-          {isCreate ? '✨ Create' : isDelete ? '🗑 Delete' : '✏️ Edit'}
-        </span>
-        <code className="pc-path">{change.path}</code>
-        {!isCreate && (
-          <span className="pc-summary">
-            <span className="pc-stat pc-stat-added">+{added}</span>
-            <span className="pc-stat pc-stat-removed">−{removed}</span>
-          </span>
+        {expanded ? (
+          <>
+            <span className="pc-chevron" aria-hidden="true">▾</span>
+            <span className={`pc-badge pc-badge-${change.type}`}>
+              {isCreate ? '✨ Create' : isDelete ? '🗑 Delete' : '✏️ Edit'}
+            </span>
+            <code className="pc-path">{change.path}</code>
+            {!isCreate && (
+              <span className="pc-summary">
+                <span className="pc-stat pc-stat-added">+{added}</span>
+                <span className="pc-stat pc-stat-removed">−{removed}</span>
+              </span>
+            )}
+            <span className="pc-status pc-status-applied">✓ Applied</span>
+          </>
+        ) : (
+          // Collapsed: a chip sibling of the tool chips — icon, truncated
+          // path, stats, check. (A wide thin card here read as a separator
+          // line; the pill metrics match .chat-tool-call.)
+          <>
+            <span className="pc-chip-icon" aria-hidden="true">
+              {isCreate ? '✨' : isDelete ? '🗑' : '✏️'}
+            </span>
+            <code className="pc-path">{change.path}</code>
+            {!isCreate && (
+              <span className="pc-summary">
+                <span className="pc-stat pc-stat-added">+{added}</span>
+                <span className="pc-stat pc-stat-removed">−{removed}</span>
+              </span>
+            )}
+            <span className="pc-status pc-status-applied" aria-label="applied">✓</span>
+          </>
         )}
-        <span className="pc-status pc-status-applied">✓ Applied</span>
       </div>
 
       {expanded && shown.length > 0 && (
