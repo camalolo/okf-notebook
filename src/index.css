@@ -1974,6 +1974,33 @@ select.form-input {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  /* Timeline elements (tool/thinking chips, change cards, notices) carry
+   * negative margins so they cluster tightly INSIDE the 16px message gap —
+   * a cluster reads as one activity block; spaced-out pills floating in the
+   * column gap read as horizontal separator lines. */
+  --tl-gap: 6px;
+}
+
+.chat-messages > .chat-tool-call,
+.chat-messages > .chat-thinking,
+.chat-messages > .proposed-change,
+.chat-messages > .chat-notice-event,
+.chat-messages > .chat-error-event,
+.chat-messages > .chat-resume-row {
+  margin-top: calc(var(--tl-gap) - 16px);
+}
+
+.chat-messages > .chat-message + .chat-tool-call,
+.chat-messages > .chat-message + .chat-thinking,
+.chat-messages > .chat-message + .proposed-change,
+.chat-messages > .chat-message + .chat-notice-event,
+.chat-messages > .chat-message + .chat-error-event {
+  /* First timeline element after a bubble: breathe a little more. */
+  margin-top: calc(var(--tl-gap) - 10px);
+}
+
+.chat-messages > .chat-message {
+  margin-top: 0;
 }
 
 .chat-empty {
