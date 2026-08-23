@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { BUNDLES_FILE } from './config.js';
 import type { BundleConfig, DigestConfig } from './config.js';
 import type { User } from './config.js';
+import { OKF_SPEC } from './lib/okf-template.js';
+import { agentsTemplate } from './lib/agents-template.js';
 
 const BUNDLES_PATH = fileURLToPath(BUNDLES_FILE);
 
@@ -155,6 +157,47 @@ export interface NewBundleInput {
   digest?: DigestConfig;
 }
 
+/**
+ * Write `content` to `target` only when it does not exist yet (atomic `wx`
+ * flag — an existing file is never clobbered). A write failure other than
+ * EEXIST is logged, not thrown: seeded files are optional and must never
+ * block bundle registration. Returns true when the file was written.
+ */
+async function writeIfAbsent(target: string, content: string): Promise<boolean> {
+  try {
+    await fs.writeFile(target, content, { flag: 'wx' });
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    console.warn(
+      `[bundles] Could not seed ${path.basename(target)} into ${path.dirname(target)}: ` +
+        (err instanceof Error ? err.message : String(err)),
+    );
+    return false;
+  }
+}
+
+/**
+ * Seed the canonical OKF spec as `OKF.md` in a bundle directory that lacks
+ * one, so every new bundle is self-describing from the start (the chat
+ * system prompt and the OKF cleanup pass both read it). Returns true when
+ * the spec was written.
+ */
+export async function seedOkfSpec(bundlePath: string): Promise<boolean> {
+  return writeIfAbsent(path.join(bundlePath, 'OKF.md'), OKF_SPEC);
+}
+
+/**
+ * Seed a starter `AGENTS.md` into a bundle directory that lacks one, so the
+ * chat system prompt has bundle guidance (purpose, organization, domain
+ * context) instead of `(none)` from day one. It interpolates the registered
+ * name/description and leaves TODO sections for the owner — or the chat
+ * agent — to fill in. Returns true when the file was written.
+ */
+export async function seedAgentsMd(bundlePath: string, name: string, description = ''): Promise<boolean> {
+  return writeIfAbsent(path.join(bundlePath, 'AGENTS.md'), agentsTemplate(name, description));
+}
+
 /** Add a new bundle after validating that the path is an existing directory. */
 export async function addBundle(data: NewBundleInput): Promise<BundleConfig> {
   // Validate the path exists and is a directory.
@@ -166,6 +209,15 @@ export async function addBundle(data: NewBundleInput): Promise<BundleConfig> {
   }
   if (!stat.isDirectory()) {
     throw new BundleError(`Path is not a directory: ${data.path}`, 'PATH_NOT_DIRECTORY');
+  }
+
+  // Ship the OKF spec and a starter AGENTS.md with every new bundle
+  // (no-ops when already present).
+  if (await seedOkfSpec(data.path)) {
+    console.log(`[bundles] Seeded OKF.md into ${data.path}`);
+  }
+  if (await seedAgentsMd(data.path, data.name, data.description ?? '')) {
+    console.log(`[bundles] Seeded starter AGENTS.md into ${data.path}`);
   }
 
   const bundles = await loadBundles();

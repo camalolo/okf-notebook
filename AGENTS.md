@@ -496,7 +496,13 @@ annotated list):
 
 `server/bundles.json` (gitignored) holds bundle registrations. It starts
 empty; bundles are added through the Settings UI (any existing directory of
-`.md` files).
+`.md` files). Registering a bundle seeds files it lacks, never overwriting
+existing ones (`seedOkfSpec()`/`seedAgentsMd()` in `server/bundles.ts`;
+templates embedded as TS strings in `server/lib/okf-template.ts` and
+`server/lib/agents-template.ts` — deploy ships only compiled JS, never raw
+`.md` assets): a canonical `OKF.md` spec, and a starter `AGENTS.md` that
+interpolates the registered name/description and leaves TODO sections for
+the owner (or the chat agent) to fill in.
 
 ## OKF Format
 

@@ -7,6 +7,11 @@ import path from 'node:path';
 const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'notebook-bundles-test-'));
 process.env.NOTEBOOK_BUNDLES_FILE = path.join(tmpDir, 'bundles.json');
 
+// A temp directory standing in for a real bundle directory (registering the
+// repo root would seed OKF.md/AGENTS.md into the repo itself).
+const bundleDir = path.join(tmpDir, 'bundle');
+await fs.mkdir(bundleDir, { recursive: true });
+
 const {
   sanitizeMcps,
   sanitizeDigest,
@@ -14,14 +19,15 @@ const {
   addBundle,
   loadBundles,
   BundleError,
+  seedOkfSpec,
 } = await import('./bundles.js');
+const { OKF_SPEC } = await import('./lib/okf-template.js');
+const { agentsTemplate } = await import('./lib/agents-template.js');
 
 const VALID_MCPS = ['google-workspace', 'browser', 'ibkr-flex'];
 
 beforeAll(async () => {
-  // Seed with one real directory (the repo itself) so addBundle's path check passes.
-  const repoRoot = path.resolve(import.meta.dirname, '..', '..');
-  await addBundle({ name: 'Test Bundle', path: repoRoot, icon: '🧪', description: '' });
+  await addBundle({ name: 'Test Bundle', path: bundleDir, icon: '🧪', description: '' });
 });
 
 afterAll(async () => {
@@ -135,5 +141,57 @@ describe('sanitizeThinking', () => {
     expect(() => sanitizeThinking(true)).toThrow(BundleError);
     expect(() => sanitizeThinking('enabled')).toThrow(BundleError);
     expect(() => sanitizeThinking(1)).toThrow(BundleError);
+  });
+});
+
+describe('addBundle seeding', () => {
+  it('seeds OKF.md and a starter AGENTS.md into the registered directory', async () => {
+    // Registered in beforeAll — both files must now exist there.
+    await expect(fs.readFile(path.join(bundleDir, 'OKF.md'), 'utf8')).resolves.toBe(OKF_SPEC);
+    const agents = await fs.readFile(path.join(bundleDir, 'AGENTS.md'), 'utf8');
+    expect(agents).toBe(agentsTemplate('Test Bundle', ''));
+  });
+
+  it('re-registering the same directory never overwrites existing files', async () => {
+    await fs.writeFile(path.join(bundleDir, 'OKF.md'), 'custom spec\n', 'utf8');
+    await fs.writeFile(path.join(bundleDir, 'AGENTS.md'), 'hand-written guidance\n', 'utf8');
+    await addBundle({ name: 'Second', path: bundleDir });
+    await expect(fs.readFile(path.join(bundleDir, 'OKF.md'), 'utf8')).resolves.toBe('custom spec\n');
+    await expect(fs.readFile(path.join(bundleDir, 'AGENTS.md'), 'utf8')).resolves.toBe(
+      'hand-written guidance\n',
+    );
+  });
+});
+
+describe('seedOkfSpec', () => {
+  it('writes OKF.md into a directory that lacks one', async () => {
+    const dir = path.join(tmpDir, 'seed-fresh');
+    await fs.mkdir(dir, { recursive: true });
+    await expect(seedOkfSpec(dir)).resolves.toBe(true);
+    const written = await fs.readFile(path.join(dir, 'OKF.md'), 'utf8');
+    expect(written).toBe(OKF_SPEC);
+    expect(written.startsWith('# Open Knowledge Format (OKF)')).toBe(true);
+  });
+
+  it('reports failure (does not throw) when the directory is read-only', async () => {
+    const dir = path.join(tmpDir, 'seed-readonly');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.chmod(dir, 0o500);
+    try {
+      await expect(seedOkfSpec(dir)).resolves.toBe(false);
+    } finally {
+      await fs.chmod(dir, 0o700);
+    }
+  });
+});
+
+describe('seedAgentsMd', () => {
+  it('interpolates name and description', () => {
+    const out = agentsTemplate('Kitchen Renovation', 'Cabinets, contractors, budget');
+    expect(out).toContain('# AGENTS.md — Kitchen Renovation');
+    expect(out).toContain('Cabinets, contractors, budget');
+    expect(out).toContain('TODO');
+    // Must not restate the OKF spec (the system prompt embeds OKF.md itself).
+    expect(out).not.toContain(OKF_SPEC.slice(0, 40));
   });
 });
