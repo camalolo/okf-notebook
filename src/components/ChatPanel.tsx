@@ -236,6 +236,11 @@ function formatToolCall(tc: ToolCallInfo): ToolCallLabel {
       return { icon: '🌿', text: str('message') ? `Commit: ${trunc(str('message'), 50)}` : 'Commit' };
     case 'web_search':
       return { icon: '🔍', text: `Search: "${trunc(str('query'), 50)}"` };
+    case 'erc20_balances': {
+      const addr = str('address');
+      const short = addr ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : 'address';
+      return { icon: '🪙', text: `ERC-20 balances: ${short} on ${str('chain') || 'chain'}` };
+    }
 
     // --- Browser MCP tools ---
     case 'browser_navigate':

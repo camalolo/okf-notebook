@@ -205,7 +205,7 @@ Each successful `edit_file`/`create_file`/`delete_file`/`undo_edit` emits an
 `edit_applied` SSE
 event carrying the diff/contents so the frontend can render a collapsible diff
 card. Readonly-role users get only `read_file`, `list_files`, `eval_maths`,
-and `web_search`. Git inspection (`git_status`, `git_diff`, `git_log`) is
+`web_search`, and `erc20_balances`. Git inspection (`git_status`, `git_diff`, `git_log`) is
 **full-role only** (`GIT_TOOLS` in `chat.ts`, spread into `FULL_TOOLS`;
 also given to the digest agent) — they were removed from `READONLY_TOOLS`
 by mistake in 6cb3ac3 and restored 2026-08-21. `buildSystemPrompt` derives
@@ -366,6 +366,28 @@ serper**. Providers without an env key are skipped; providers that error at
 runtime fall through to the next. Set one or more of: `EXA_API_KEY`,
 `TAVILY_API_KEY`, `TINYFISH_API_KEY`, `SERPER_API_KEY`. The implementation lives
 in `server/lib/web-search.ts`.
+
+### ERC-20 balances (`erc20_balances` built-in tool)
+
+The `erc20_balances` tool is a **built-in** tool (not an MCP server) exposed to
+all users (readonly + full; part of `READONLY_TOOLS`). It enumerates every
+ERC-20 token held by an address on `ethereum` or `gnosis` via the public
+**Blockscout v2 API** (`/api/v2/addresses/{addr}/token-balances` — no key
+needed, read-only, no wallet key material involved). Implementation:
+`server/lib/erc20.ts`. Notes:
+
+- Filters to `type === "ERC-20"` (drops NFTs) and non-zero balances; the live
+  API names the token contract field `address_hash` (older docs say `address`) —
+  both are accepted.
+- Normalizes `value` by `10^decimals` using BigInt math (rounded to 10 decimal
+  places — the exact units stay in `raw_balance`); `usd_value` =
+  `balance × exchange_rate` rounded to cents, `null` when the rate is unknown
+  (most RealT property tokens have no on-explorer rate).
+- Output is sorted by USD value desc (unknown-rate tokens last, by balance) and
+  **capped at 200 rows** (`truncated: true` + `total` when cut) — busy wallets
+  can hold thousands of spam-airdrop tokens that would otherwise flood the chat
+  context.
+- Chain aliases accepted: `eth`→ethereum, `xdai`/`gno`→gnosis.
 
 ### Auth model (`server/auth.ts`, `server/config.ts`, `server/lib/workspace-auth.ts`)
 

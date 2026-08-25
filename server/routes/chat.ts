@@ -24,6 +24,7 @@ import { getSettings } from '../settings.js';
 import { buildResumeMessages } from '../lib/resume.js';
 import { chatLogger, newTraceId } from '../lib/logger.js';
 import { webSearch } from '../lib/web-search.js';
+import { erc20Balances } from '../lib/erc20.js';
 import { evalMaths } from '../lib/maths.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
@@ -234,6 +235,33 @@ const WEB_SEARCH_TOOL: ToolDefinition = {
   },
 };
 
+const ERC20_BALANCES_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'erc20_balances',
+    description:
+      'List all ERC-20 tokens held by an address on an EVM chain, with symbol, normalized balance, ' +
+      'and USD value where known. Read-only public API (Blockscout). Returns ' +
+      '{ address, chain, tokens: [{ chain, token_address, symbol, name, raw_balance, balance, usd_value }] } ' +
+      'sorted by USD value — usd_value is null when no exchange rate is known. Capped at 200 rows ' +
+      '(wallets can hold thousands of spam airdrops); truncated: true + total then report the cut.',
+    parameters: {
+      type: 'object',
+      properties: {
+        address: {
+          type: 'string',
+          description: 'The wallet address (0x-prefixed hex), e.g. 0xe2680516C89bd1D814A21fE6eCbf34eeC2b8793f.',
+        },
+        chain: {
+          type: 'string',
+          description: 'The EVM chain: "ethereum" or "gnosis".',
+        },
+      },
+      required: ['address', 'chain'],
+    },
+  },
+};
+
 const EVAL_MATHS_TOOL: ToolDefinition = {
   type: 'function',
   function: {
@@ -291,6 +319,7 @@ export const READONLY_TOOLS: ToolDefinition[] = [
   LIST_FILES_TOOL,
   EVAL_MATHS_TOOL,
   WEB_SEARCH_TOOL,
+  ERC20_BALANCES_TOOL,
 ];
 
 /**
@@ -469,6 +498,18 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
       if (!query) return { error: 'query is required' };
       const numResults = Number(args?.num_results) || 5;
       return webSearch(query, numResults);
+    }
+
+    case 'erc20_balances': {
+      const address = String(args?.address ?? '').trim();
+      const chain = String(args?.chain ?? '').trim();
+      if (!address) return { error: 'address is required' };
+      if (!chain) return { error: 'chain is required (ethereum or gnosis)' };
+      try {
+        return await erc20Balances(address, chain);
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
     }
 
     case 'eval_maths': {
@@ -739,6 +780,14 @@ export async function buildSystemPrompt(
     'You also have access to a web_search tool for quick web searches, and an eval_maths',
     'tool for exact calculations — ALWAYS call eval_maths for arithmetic beyond trivial',
     'mental math instead of guessing: it is exact (no floating-point errors) and free.',
+    ...(has('erc20_balances')
+      ? [
+          '',
+          'You also have an erc20_balances tool to enumerate the ERC-20 tokens held by a wallet',
+          'address on ethereum or gnosis (with USD values where known). Use it whenever the user',
+          'asks about token holdings, wallet balances, or portfolio values on those chains.',
+        ]
+      : []),
     ...(mcpToolNames.length > 0
       ? [
           '',
