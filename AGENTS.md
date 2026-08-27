@@ -369,6 +369,20 @@ The chat route filters MCP tools through `getToolDefinitions(bundle.mcps)`,
 refuses calls to hidden-but-known MCP tools, and the system prompt only
 advertises the exposed tools.
 
+**Why the `browser` server pins `@playwright/mcp@<version> --browser chromium`**:
+`@playwright/mcp` ships near-daily releases, and every release bundles a
+`playwright-core` that expects a specific chromium build in
+`~/.cache/ms-playwright`. Unpinned `npx -y @playwright/mcp` re-resolves
+"latest" on every service restart, so each new release broke every browser
+tool ("Chromium distribution 'chrome' is not found" / "expected executable at
+chromium-NNNN") until someone ran `npx playwright install` — this recurring
+every few days was the symptom. Newer versions also switched their default to
+the system Chrome channel (`/opt/google/chrome/chrome`), absent on servers
+without Google Chrome. The pin + `--browser chromium` freezes the pairing
+with the installed build (`chromium-1237` pairs with `0.0.79`). To upgrade
+deliberately: change the pin in Settings → MCP servers, then
+`npx playwright install chromium` as the service user.
+
 **ibkr-flex** (`bin/ibkr-flex-mcp`, static-musl Rust binary): read-only IBKR
 account reporting via the Flex Web Service (`flex_positions`, `flex_trades`,
 `flex_cash`, `flex_run_query`). Third-party (MIT):
