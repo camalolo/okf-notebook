@@ -1,12 +1,87 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TreeNode } from '../types.ts';
 
 interface FileTreeProps {
   node: TreeNode;
+  /** Bundle id — scopes the persisted open/closed directory state. */
+  bundleId: string;
   activePath: string;
   onSelect: (path: string) => void;
   /** Called when the user confirms deletion of a file. */
   onDelete?: (path: string) => void;
+}
+
+/** localStorage key holding the expanded-directory set for a bundle. */
+function storageKeyFor(bundleId: string): string {
+  return `nb-tree:${bundleId}`;
+}
+
+/** Load the persisted expanded-directory set; corrupted entries start fresh. */
+function loadExpanded(bundleId: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(storageKeyFor(bundleId));
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return new Set(parsed.filter((p): p is string => typeof p === 'string'));
+      }
+    }
+  } catch {
+    // fall through — corrupted entry behaves like "nothing stored"
+  }
+  return new Set();
+}
+
+/** Directory paths from the root down to (excluding) the file. */
+function ancestorDirs(path: string): string[] {
+  const parts = path.split('/');
+  const dirs: string[] = [];
+  for (let i = 1; i < parts.length; i++) {
+    dirs.push(parts.slice(0, i).join('/'));
+  }
+  return dirs;
+}
+
+/**
+ * Which directories are expanded, persisted per bundle in localStorage so the
+ * tree starts exactly as the user left it (all closed on first visit).
+ */
+function useTreeExpansion(bundleId: string) {
+  const [expanded, setExpanded] = useState<Set<string>>(() => loadExpanded(bundleId));
+
+  // Persist every change (also covers the active-path reveal below).
+  useEffect(() => {
+    try {
+      localStorage.setItem(storageKeyFor(bundleId), JSON.stringify([...expanded]));
+    } catch {
+      // Storage full or blocked — in-memory state still works for this mount.
+    }
+  }, [bundleId, expanded]);
+
+  const toggle = useCallback((path: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }, []);
+
+  /** Expand all ancestors of `path` so the file is visible in the tree. */
+  const reveal = useCallback((path: string) => {
+    setExpanded((prev) => {
+      const missing = ancestorDirs(path).filter((d) => !prev.has(d));
+      if (missing.length === 0) return prev;
+      const next = new Set(prev);
+      for (const dir of missing) next.add(dir);
+      return next;
+    });
+  }, []);
+
+  return { expanded, toggle, reveal };
 }
 
 /** Pick an emoji for a file based on its OKF concept type or filename. */
@@ -46,22 +121,31 @@ interface TreeItemProps {
   onSelect: (path: string) => void;
   onDelete?: (path: string) => void;
   level: number;
-  defaultExpanded: boolean;
+  expandedDirs: ReadonlySet<string>;
+  onToggleDir: (path: string) => void;
 }
 
-function TreeItem({ node, activePath, onSelect, onDelete, level, defaultExpanded }: TreeItemProps) {
-  const [expanded, setExpanded] = useState(defaultExpanded);
+function TreeItem({
+  node,
+  activePath,
+  onSelect,
+  onDelete,
+  level,
+  expandedDirs,
+  onToggleDir,
+}: TreeItemProps) {
   const isDirectory = node.type === 'directory';
   const isActive = !isDirectory && node.path === activePath;
   const indent = level * 14 + 10;
 
   if (isDirectory) {
+    const expanded = expandedDirs.has(node.path);
     return (
       <li className="tree-node" role="none">
         <button
           className="tree-row tree-row-dir"
           style={{ paddingLeft: `${indent}px` }}
-          onClick={() => setExpanded((open) => !open)}
+          onClick={() => onToggleDir(node.path)}
           aria-expanded={expanded}
         >
           <span className="tree-chevron" aria-hidden="true">
@@ -82,7 +166,8 @@ function TreeItem({ node, activePath, onSelect, onDelete, level, defaultExpanded
                 onSelect={onSelect}
                 onDelete={onDelete}
                 level={level + 1}
-                defaultExpanded={false}
+                expandedDirs={expandedDirs}
+                onToggleDir={onToggleDir}
               />
             ))}
           </ul>
@@ -181,11 +266,20 @@ function FileItem({
   );
 }
 
-export function FileTree({ node, activePath, onSelect, onDelete }: FileTreeProps) {
+export function FileTree({ node, bundleId, activePath, onSelect, onDelete }: FileTreeProps) {
+  const { expanded, toggle, reveal } = useTreeExpansion(bundleId);
+
+  // When the active file changes (search result, chat link, deep link), expand
+  // its ancestors so it is visible. Re-running only on activePath changes means
+  // the user can still collapse a branch containing the active file afterwards.
+  useEffect(() => {
+    if (activePath) reveal(activePath);
+  }, [activePath, reveal]);
+
   const children = node.children ?? [];
   return (
     <ul className="tree" role="tree">
-      {children.map((child, index) => (
+      {children.map((child) => (
         <TreeItem
           key={child.path}
           node={child}
@@ -193,7 +287,8 @@ export function FileTree({ node, activePath, onSelect, onDelete }: FileTreeProps
           onSelect={onSelect}
           onDelete={onDelete}
           level={0}
-          defaultExpanded={index === 0}
+          expandedDirs={expanded}
+          onToggleDir={toggle}
         />
       ))}
     </ul>

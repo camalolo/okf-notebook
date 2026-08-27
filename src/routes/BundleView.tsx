@@ -319,7 +319,7 @@ function BundleWorkspace({
                 <div className="spinner spinner-sm" />
               </div>
             ) : tree ? (
-              <FileTree node={tree} activePath={filePath} onSelect={onSelect} onDelete={handleDeleteFile} />
+              <FileTree node={tree} bundleId={bundleId} activePath={filePath} onSelect={onSelect} onDelete={handleDeleteFile} />
             ) : null}
           </div>
         )}
