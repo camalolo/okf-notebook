@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { remarkPlugins, rehypePlugins } from '../lib/markdown.ts';
 import type { KeyboardEvent } from 'react';
 import type {
   ChatMessage,
@@ -186,7 +186,7 @@ const ChatMarkdown = memo(function ChatMarkdown({
     },
   };
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components}>
       {content}
     </ReactMarkdown>
   );
