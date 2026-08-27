@@ -68,7 +68,11 @@ if (existsSync(path.join(publicDir, 'index.html'))) {
     express.static(publicDir, {
       setHeaders: (res, filePath) => {
         if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
-        else if (filePath.startsWith(path.join(publicDir, 'assets'))) {
+        else if (filePath === path.join(publicDir, 'sw.js') || filePath.endsWith('.webmanifest')) {
+          // The service worker and manifest must revalidate so installs and
+          // SW updates are picked up immediately after a deploy.
+          res.setHeader('Cache-Control', 'no-cache');
+        } else if (filePath.startsWith(path.join(publicDir, 'assets'))) {
           res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
         }
       },

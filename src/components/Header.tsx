@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { User } from '../types.ts';
+import {
+  detectInstallPlatform,
+  isStandaloneDisplay,
+  SHOW_INSTALL_PROMPT_EVENT,
+} from '../hooks/useInstallPrompt.ts';
 
 interface HeaderProps {
   user: User;
@@ -10,6 +15,7 @@ interface HeaderProps {
 export function Header({ user, onLogout }: HeaderProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const installable = detectInstallPlatform() !== null && !isStandaloneDisplay();
 
   useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
@@ -24,6 +30,11 @@ export function Header({ user, onLogout }: HeaderProps) {
   const handleSignOut = () => {
     setMenuOpen(false);
     void onLogout();
+  };
+
+  const handleInstall = () => {
+    setMenuOpen(false);
+    window.dispatchEvent(new Event(SHOW_INSTALL_PROMPT_EVENT));
   };
 
   return (
@@ -82,6 +93,17 @@ export function Header({ user, onLogout }: HeaderProps) {
                   {user.role === 'full' ? 'Full access' : 'Read-only'}
                 </span>
               </div>
+              {installable && (
+                <button className="user-dropdown-item" onClick={handleInstall} role="menuitem">
+                  <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                    <path
+                      fill="currentColor"
+                      d="M12 3a1 1 0 0 1 1 1v9.59l2.29-2.3a1 1 0 1 1 1.42 1.42l-4 4a1 1 0 0 1-1.42 0l-4-4a1 1 0 1 1 1.42-1.42l2.29 2.3V4a1 1 0 0 1 1-1ZM5 19a1 1 0 0 1 1-1h12a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1Z"
+                    />
+                  </svg>
+                  Install app
+                </button>
+              )}
               <button className="user-dropdown-item" onClick={handleSignOut} role="menuitem">
                 <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
                   <path

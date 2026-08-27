@@ -107,6 +107,37 @@ deploy/  ← example nginx reverse-proxy config
   serves static files from `public/` and provides the SPA fallback for
   client-side routing.
 - In dev, Vite proxies `/api/notebook` → `localhost:3002` (see `vite.config.ts`).
+
+### PWA install (mobile "Install on your phone?" prompt)
+
+The app is an installable PWA (kasa-web-ui-style, but with a friendlier
+full-screen prompt instead of a toolbar button):
+
+- `public/manifest.webmanifest` + icons in `public/icons/` (notebook glyph on
+  purple gradient; `maskable-512.png` is the full-bleed variant, icons were
+  generated with GraphicsMagick — note `convert`/`composite` here are GM, not
+  ImageMagick, and `-alpha`/`-composite` flags don't exist).
+- `public/sw.js` — deliberately minimal service worker: cache-first **only**
+  for `/assets/*` (Vite content-hashed, immutable). Navigations, `/api/*`,
+  and everything else always hit the network — no offline app shell, no
+  stale-shell-after-deploy trap. Registered in `src/main.tsx` **prod builds
+  only** (`import.meta.env.PROD`). Bump `CACHE_NAME` if you change caching.
+- `index.html` carries the PWA metas plus a tiny inline script that captures
+  `beforeinstallprompt` before React mounts (stashes it on
+  `window.__notebookInstallPrompt`; the event can fire pre-hydration).
+- `src/hooks/useInstallPrompt.ts` — detection logic: Android/Chromium uses the
+  native install dialog (deferred `beforeinstallprompt`), iOS Safari (which
+  never fires that event) gets Share → Add to Home Screen step-by-step
+  instructions. Desktop never auto-prompts. `display-mode: standalone`
+  suppresses everything once installed; "Not now" is remembered in
+  `localStorage` (`nb-install-dismissed-at`) for 14 days.
+- `src/components/InstallPrompt.tsx` — the full-screen dialog (rendered from
+  `App.tsx`, post-login only). Auto-shows ~1.2s after mount on mobile when
+  eligible; also openable anytime via the user menu → "Install app"
+  (dispatches `SHOW_INSTALL_PROMPT_EVENT`).
+- Server: `express.static` sets `Cache-Control: no-cache` on `sw.js` and
+  `*.webmanifest` so installs/updates aren't blocked by stale caches.
+
 - All API routes mount under `/api/notebook/` (`server/index.ts`):
   - `/auth/*` — Google OAuth + `/me` + `/logout`
   - `/bundles/*` — bundle CRUD + composed sub-routers (`files`, `git`, `chat`)

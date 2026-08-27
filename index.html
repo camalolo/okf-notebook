@@ -3,9 +3,26 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📓</text></svg>" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#1c1c22" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Notebook" />
     <title>Notebook — Knowledge Browser</title>
     <meta name="description" content="Browse, edit, and chat with OKF knowledge bundles." />
+    <script>
+      // Capture the browser's install signal as early as possible — it can
+      // fire before the React app mounts. useInstallPrompt picks it up from
+      // here and also listens for later firings.
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        window.__notebookInstallPrompt = e;
+        window.dispatchEvent(new Event('notebook:install-available'));
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>

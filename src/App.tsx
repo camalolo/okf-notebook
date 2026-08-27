@@ -2,6 +2,7 @@ import { Routes, Route } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth.ts';
 import { Header } from './components/Header.tsx';
 import { Login } from './components/Login.tsx';
+import { InstallPrompt } from './components/InstallPrompt.tsx';
 import { ProjectList } from './routes/ProjectList.tsx';
 import { BundleView } from './routes/BundleView.tsx';
 import { Settings } from './routes/Settings.tsx';
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="/settings" element={<Settings user={user} />} />
         </Routes>
       </main>
+      <InstallPrompt />
     </div>
   );
 }
