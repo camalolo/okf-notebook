@@ -89,10 +89,20 @@ async function main() {
 
   // 2. Deploy server: copy compiled JS (preserve runtime data).
   // Old stale .js files from removed modules are harmless (never imported).
+  // The filter is the "preserve runtime data" guarantee: anything under
+  // dist/server/data/ (mcps.json, sessions, workspace-auth tokens — possibly
+  // seeded by a local smoke-test run of the compiled server) and a dist-side
+  // bundles.json must NEVER overwrite the live registry in DEPLOY_DIR.
   const serverDst = path.join(DEPLOY_DIR, 'server');
   console.log('[deploy] Copying server code →', serverDst);
   await mkdir(serverDst, { recursive: true });
-  await cp(distServer, serverDst, { recursive: true, force: true });
+  const runtimeDataDir = path.join(distServer, 'data');
+  const runtimeBundlesJson = path.join(distServer, 'bundles.json');
+  await cp(distServer, serverDst, {
+    recursive: true,
+    force: true,
+    filter: (src) => src !== runtimeDataDir && !src.startsWith(runtimeDataDir + path.sep) && src !== runtimeBundlesJson,
+  });
 
   // 2.5. Ship bundled MCP binaries (bin/ — e.g. ibkr-flex-mcp). Server code
   // resolves them as ../bin relative to the compiled server/ directory.
