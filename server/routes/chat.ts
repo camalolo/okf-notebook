@@ -29,7 +29,13 @@ import { evalMaths } from '../lib/maths.js';
 import { mcpManager } from '../lib/mcp-manager.js';
 import { validateWorkspaceAuth } from '../lib/workspace-auth.js';
 import { ensureGitRepo, isNoCommitsError } from '../lib/git-repo.js';
-import { appendEvent, renameChat, loadChat, updateChatMeta } from '../chats.js';
+import {
+  appendEvent,
+  renameChat,
+  loadChat,
+  updateChatMeta,
+  autoTitleCandidate,
+} from '../chats.js';
 import { sendMail } from '../lib/mailer.js';
 import type {
   ToolDefinition,
@@ -1429,6 +1435,12 @@ router.post('/:bundleId/chat', async (req, res, next) => {
             reasoningTokens: usageTotals.reasoning,
           },
         });
+        // Auto-retitle: right after the first reply, replace the truncated
+        // first-message title with an LLM-generated one (fire-and-forget,
+        // sequenced after the pending persists so it can't race them).
+        if (chatId) {
+          scheduleAutoTitle(persistChain, bundleId, chatId, req.user!.email, log);
+        }
         if (clientConnected) res.end();
         return;
       }
@@ -1444,6 +1456,11 @@ router.post('/:bundleId/chat', async (req, res, next) => {
         // Terminal marker for re-attached clients (the primary client is
         // gone or stopping; the buffer's subscribers need closure too).
         if (streamKey) recordEvent(streamKey, 'done', { aborted: true });
+        // A stopped first turn still produced a reply (partial) — worth
+        // titling. Same fire-and-forget-after-persists pattern as above.
+        if (chatId) {
+          scheduleAutoTitle(persistChain, bundleId, chatId, req.user!.email, log);
+        }
         if (clientConnected) res.end();
         return;
       }
@@ -1652,6 +1669,110 @@ router.post('/:bundleId/compact', async (req, res, next) => {
 // --- Retitle ----------------------------------------------------------------
 
 /**
+ * Ask the LLM for a concise, meaningful chat title from a conversation.
+ * Returns null when the model gave nothing usable. Used by the manual
+ * /retitle route and by the automatic post-first-reply retitle.
+ */
+async function generateChatTitle(
+  bundle: BundleConfig,
+  messages: ChatMessage[],
+  log: ReturnType<typeof chatLogger>,
+): Promise<string | null> {
+  const titleRequest: ChatMessage[] = [
+    {
+      role: 'system',
+      content: [
+        'You generate concise, highly identifiable chat titles.',
+        'The title must help the user instantly recall what this conversation was about.',
+        'Rules:',
+        '- 4 to 8 words, never more than 60 characters',
+        '- Focus on the core topic, task, or outcome — not greetings or small talk',
+        '- Use specific nouns (file names, feature names, entities) over vague words',
+        '- No quotes, no trailing period, no emoji',
+        '- Title case',
+        'Analyze the conversation, then call the set_title tool with the title.',
+        'Do not reply with any other content.',
+      ].join('\n'),
+    },
+    ...messages,
+    {
+      role: 'user',
+      content: 'Generate a concise title for this conversation.',
+    },
+  ];
+
+  log.info(`Title generation: ${messages.length} msgs`);
+  const result = await chatCompletion(titleRequest, [SET_TITLE_TOOL], {
+    thinking: bundle.thinking === 'on' ? undefined : 'off',
+    log,
+  });
+  // Prefer the tool call; fall back to plain content if the model answered
+  // in text instead of calling the tool.
+  const title =
+    extractSetTitle(result) ??
+    result.content.trim().replace(/^["']|["']$/g, '').slice(0, 60);
+  return title || null;
+}
+
+/**
+ * Replace the truncated first-message auto-title with an LLM-generated one
+ * once the first reply has landed. Fire-and-forget: called at the end of a
+ * turn (sequenced after the pending persists so it can't race appendEvent's
+ * read-modify-write), it must never block or fail the response. Eligibility
+ * is decided by autoTitleCandidate — a chat the LLM or the user has already
+ * titled is left alone, and only the first exchange qualifies.
+ */
+async function maybeAutoTitleChat(
+  bundleId: string,
+  chatId: string,
+  userId: string,
+  log: ReturnType<typeof chatLogger>,
+): Promise<void> {
+  try {
+    const session = await loadChat(bundleId, chatId, userId);
+    if (!session) return;
+    const candidate = autoTitleCandidate(session.events, session.title);
+    if (!candidate) return;
+    const bundle = await getBundle(bundleId);
+    if (!bundle) return;
+    const title = await generateChatTitle(
+      bundle,
+      [
+        { role: 'user', content: candidate.user },
+        { role: 'assistant', content: candidate.assistant },
+      ],
+      log,
+    );
+    if (!title) return;
+    // Re-check eligibility after the LLM round trip: the user may have sent a
+    // second message while the title was being generated (then it's no longer
+    // the first exchange), or renamed/compacted the chat meanwhile. The fresh
+    // read also minimises the renameChat read-modify-write window against
+    // concurrently-appended events.
+    const fresh = await loadChat(bundleId, chatId, userId);
+    if (!fresh || !autoTitleCandidate(fresh.events, fresh.title)) return;
+    await renameChat(bundleId, chatId, userId, title);
+    log.info(`Auto-titled chat ${chatId}: "${title}"`);
+  } catch (err) {
+    // Best-effort — the truncated title stays until a manual retitle.
+    log.errorTrace('Auto-title failed', err);
+  }
+}
+
+/** Schedule the auto-retitle once this turn's pending persists have settled. */
+function scheduleAutoTitle(
+  persistChain: Promise<void>,
+  bundleId: string,
+  chatId: string,
+  userId: string,
+  log: ReturnType<typeof chatLogger>,
+): void {
+  void persistChain
+    .then(() => maybeAutoTitleChat(bundleId, chatId, userId, log))
+    .catch(() => { /* best-effort */ });
+}
+
+/**
  * POST /:bundleId/retitle — ask the LLM for a concise, meaningful chat title
  * derived from the conversation. Updates the persisted session title.
  */
@@ -1669,39 +1790,7 @@ router.post('/:bundleId/retitle', async (req, res, next) => {
     const chatId: string | null =
       typeof req.body?.chatId === 'string' ? req.body.chatId : null;
 
-    const titleRequest: ChatMessage[] = [
-      {
-        role: 'system',
-        content: [
-          'You generate concise, highly identifiable chat titles.',
-          'The title must help the user instantly recall what this conversation was about.',
-          'Rules:',
-          '- 4 to 8 words, never more than 60 characters',
-          '- Focus on the core topic, task, or outcome — not greetings or small talk',
-          '- Use specific nouns (file names, feature names, entities) over vague words',
-          '- No quotes, no trailing period, no emoji',
-          '- Title case',
-          'Analyze the conversation, then call the set_title tool with the title.',
-          'Do not reply with any other content.',
-        ].join('\n'),
-      },
-      ...messages,
-      {
-        role: 'user',
-        content: 'Generate a concise title for this conversation.',
-      },
-    ];
-
-    log.info(`Retitle: ${messages.length} msgs, chatId=${chatId ?? 'none'}`);
-    const result = await chatCompletion(titleRequest, [SET_TITLE_TOOL], {
-      thinking: bundle.thinking === 'on' ? undefined : 'off',
-      log,
-    });
-    // Prefer the tool call; fall back to plain content if the model answered
-    // in text instead of calling the tool.
-    const title =
-      extractSetTitle(result) ??
-      result.content.trim().replace(/^["']|["']$/g, '').slice(0, 60);
+    const title = await generateChatTitle(bundle, messages, log);
 
     if (chatId && title) {
       try {
@@ -1711,7 +1800,7 @@ router.post('/:bundleId/retitle', async (req, res, next) => {
       }
     }
 
-    res.json({ title });
+    res.json({ title: title ?? '' });
   } catch (err) {
     log.errorTrace('Retitle failed', err);
     next(err);

@@ -205,6 +205,23 @@ waitMs }` and discards the partial content of the failed attempt (the client
 drops its trailing content and shows a transient notice); the full answer is
 re-streamed, so content is never duplicated.
 
+**Auto-retitle after the first reply**: the placeholder title (a 60-char
+truncation of the first user message, set by `appendEvent()` in
+`server/chats.ts`) is replaced by an LLM-generated title as soon as the first
+turn ends. At the normal-completion and STOP-abort endings, the loop calls
+`scheduleAutoTitle()` → `maybeAutoTitleChat()` (in `chat.ts`) fire-and-forget,
+sequenced after `persistChain` so it can't race the event appends'
+read-modify-write. Eligibility is decided by `autoTitleCandidate()` in
+`chats.ts`: exactly one user event, at least one non-empty assistant reply,
+and the title still equals the truncation (or "New chat") — a chat the LLM
+(compact/retitle) or the user has already titled is never overwritten, and a
+first turn that errored is skipped (the reply would be an error placeholder).
+The generation itself is the same `generateChatTitle()` prompt the manual
+`POST /:bundleId/retitle` route uses (`set_title` tool, content fallback).
+The SSE stream is already closed by then, so the client learns the new title
+via `scheduleTitleSync()` in `ChatPanel.tsx` — extra `listChats` refreshes 8s
+and 20s after a turn settles, which sync the header + history list.
+
 **Abort / STOP**: because disconnects are tolerated, the STOP button must
 call `POST /:bundleId/chat/abort` (`abortChat()` in `src/services/api.ts`)
 which aborts the turn's registered `AbortController` (tracked in the

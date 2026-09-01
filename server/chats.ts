@@ -183,6 +183,39 @@ export async function saveChat(
 }
 
 /**
+ * The automatic fallback title: a truncation of the first user message.
+ * Used both when the first user event lands (appendEvent) and to detect
+ * that a chat still carries this placeholder (autoTitleCandidate).
+ */
+export function autoTitleFromFirstMessage(content: string): string {
+  return content.slice(0, 60).trim() || 'New chat';
+}
+
+/**
+ * Whether a chat is due for an LLM-generated title, and the material to
+ * generate it from. Eligible only when the timeline holds exactly one user
+ * message (the first), at least one non-empty assistant reply, and the title
+ * is still the automatic first-message truncation (or "New chat") — i.e.
+ * neither the LLM nor the user has set a real title yet.
+ *
+ * @returns the first user message and the last assistant reply, or null.
+ */
+export function autoTitleCandidate(
+  events: StoredEvent[],
+  title: string,
+): { user: string; assistant: string } | null {
+  const userEvents = events.filter((e) => e.kind === 'user' && e.content);
+  if (userEvents.length !== 1) return null; // only after the first message's reply
+  const assistant = [...events]
+    .reverse()
+    .find((e) => e.kind === 'assistant' && e.content && e.content.trim());
+  if (!assistant?.content) return null;
+  const expected = autoTitleFromFirstMessage(userEvents[0].content!);
+  if (title !== 'New chat' && title !== expected) return null;
+  return { user: userEvents[0].content!, assistant: assistant.content };
+}
+
+/**
  * Append a single event to an existing chat session. Assigns the next monotonic
  * `seq` number. Auto-titles the chat from the first user message.
  */
@@ -205,7 +238,7 @@ export async function appendEvent(
   // Auto-title from first user message.
   let { title } = existing;
   if (title === 'New chat' && event.kind === 'user' && event.content) {
-    title = event.content.slice(0, 60).trim() || 'New chat';
+    title = autoTitleFromFirstMessage(event.content);
   }
 
   const updated: ChatSession = {

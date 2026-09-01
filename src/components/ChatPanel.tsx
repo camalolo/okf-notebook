@@ -535,6 +535,28 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   }, [bundleId]);
 
   /**
+   * Schedule extra chat-list refreshes after a turn settles. The server
+   * generates an LLM title in the background right after the first reply to
+   * a chat (replacing the truncated first-message placeholder) — the stream
+   * is already closed by then, so the header picks the new title up here.
+   * Two attempts (8s, 20s) cover slow title generations; both are cheap
+   * metadata calls and no-ops once the title is already synced.
+   */
+  const titleSyncTimersRef = useRef<number[]>([]);
+  const scheduleTitleSync = useCallback(() => {
+    for (const t of titleSyncTimersRef.current) window.clearTimeout(t);
+    titleSyncTimersRef.current = [8_000, 20_000].map((ms) =>
+      window.setTimeout(() => void refreshChatList(), ms),
+    );
+  }, [refreshChatList]);
+  useEffect(
+    () => () => {
+      for (const t of titleSyncTimersRef.current) window.clearTimeout(t);
+    },
+    [],
+  );
+
+  /**
    * Append a content chunk to the current turn's timeline. Consecutive chunks
    * coalesce into a single growing bubble; a chunk that follows a tool call or
    * proposed change starts a new bubble so chronology is preserved.
@@ -651,6 +673,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               setLoading(false);
               setFollowing(false);
               void refreshChatList();
+              scheduleTitleSync();
               void refreshGitStatus();
               return;
             }
@@ -677,6 +700,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               setFollowing(false);
               clearStreamPos(bundleId, id);
               void refreshChatList();
+              scheduleTitleSync();
               void refreshGitStatus();
               return;
             }
@@ -695,7 +719,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
         }
       })();
     },
-    [bundleId, applySession, applyPartialSession, refreshChatList, refreshGitStatus],
+    [bundleId, applySession, applyPartialSession, refreshChatList, refreshGitStatus, scheduleTitleSync],
   );
 
   /** Queue selected files for upload on next Send (no upload yet). */
@@ -989,6 +1013,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                 setLoading(false);
                 abortRef.current = null;
                 void refreshChatList();
+                scheduleTitleSync();
                 void refreshGitStatus();
                 return;
               }
@@ -1026,6 +1051,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                 setLoading(false);
                 setReconnecting(false);
                 void refreshChatList();
+                scheduleTitleSync();
                 void refreshGitStatus();
                 recovered = true;
                 break;
@@ -1059,6 +1085,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                 setLoading(false);
                 abortRef.current = null;
                 void refreshChatList();
+                scheduleTitleSync();
                 void refreshGitStatus();
                 return;
               }
@@ -1127,7 +1154,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
     // Refresh chat list (server is now source of truth for persistence + title).
     void refreshChatList();
-  }, [bundleId, appendContent, applySession, applyPartialSession, onFilesChanged, refreshGitStatus, refreshChatList]);
+    // The server may be auto-titling the chat right now (first reply) —
+    // sync the header once the background title generation has landed.
+    scheduleTitleSync();
+  }, [bundleId, appendContent, applySession, applyPartialSession, onFilesChanged, refreshGitStatus, refreshChatList, scheduleTitleSync]);
 
   /**
    * Resume the last interrupted turn (killed by a server restart, closed by
