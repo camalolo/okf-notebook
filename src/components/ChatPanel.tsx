@@ -24,6 +24,7 @@ import {
   listChats,
   loadChat,
   retitleChat,
+  undoTurn,
   uploadFile,
 } from '../services/api.ts';
 import type { UploadResult } from '../services/api.ts';
@@ -1472,6 +1473,54 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     void handleDeleteChat(id);
   }, [armedChatId, loading, handleDeleteChat]);
 
+  /**
+   * Undo the last turn: server-side truncation of the timeline back to
+   * before the final user message (reply, tool calls, and recorded edits
+   * included). Same arm-then-confirm pattern as Delete — the first click
+   * arms ("Confirm undo?"), a second click within 3s executes. File edits
+   * the turn already applied to the bundle are not reverted.
+   */
+  const [armedUndoId, setArmedUndoId] = useState<string | null>(null);
+  const undoArmTimer = useRef<number | null>(null);
+  const [undoing, setUndoing] = useState(false);
+  const undoArmed = armedUndoId !== null && armedUndoId === chatId;
+  const undoVisible = chatId !== null && !loading && messages.some((m) => m.role === 'user');
+
+  useEffect(() => () => {
+    if (undoArmTimer.current !== null) window.clearTimeout(undoArmTimer.current);
+  }, []);
+
+  const handleUndoClick = useCallback(() => {
+    const id = chatIdRef.current;
+    if (id === null || loading || undoing) return;
+    if (undoArmTimer.current !== null) {
+      window.clearTimeout(undoArmTimer.current);
+      undoArmTimer.current = null;
+    }
+    if (armedUndoId !== id) {
+      setArmedUndoId(id);
+      undoArmTimer.current = window.setTimeout(() => setArmedUndoId(null), 3000);
+      return;
+    }
+    setArmedUndoId(null);
+    setUndoing(true);
+    void (async () => {
+      try {
+        const session = await undoTurn(bundleId, id);
+        // lastUsage refers to the removed turn's final LLM call — drop it so
+        // the context indicator falls back to the (now smaller) estimate.
+        applySession({ ...session, lastUsage: undefined });
+        setChatTitle(session.title);
+        chatTitleRef.current = session.title;
+        void refreshChatList();
+      } catch {
+        // Best-effort — leave the conversation as it was.
+      } finally {
+        setUndoing(false);
+      }
+    })();
+  }, [armedUndoId, loading, undoing, bundleId, applySession, refreshChatList]);
+
   // On mount / bundle change: fetch the chat list and auto-load the most recent.
   useEffect(() => {
     let cancelled = false;
@@ -1674,6 +1723,21 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
               title="Generate a meaningful title from the conversation"
             >
               Retitle
+            </button>
+          )}
+          {undoVisible && (
+            <button
+              type="button"
+              className={`chat-new-btn chat-undo-btn ${undoArmed ? 'armed' : ''}`.trim()}
+              onClick={handleUndoClick}
+              disabled={loading || undoing}
+              title={
+                undoArmed
+                  ? 'Click again to delete the last turn'
+                  : 'Delete the last user message and its reply from this chat (file edits already applied are not reverted)'
+              }
+            >
+              {undoing ? 'Undoing…' : undoArmed ? 'Confirm undo?' : '↶ Undo'}
             </button>
           )}
           {chatId !== null && (

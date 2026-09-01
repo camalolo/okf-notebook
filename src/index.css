@@ -1957,7 +1957,9 @@ select.form-input {
 }
 
 .chat-delete-btn.armed,
-.chat-delete-btn.armed:hover {
+.chat-delete-btn.armed:hover,
+.chat-undo-btn.armed,
+.chat-undo-btn.armed:hover {
   background: var(--danger-soft);
   border-color: var(--danger);
   color: var(--danger);
@@ -2814,7 +2816,8 @@ select.form-input {
 
   .chat-new-btn,
   .chat-compact-btn,
-  .chat-delete-btn {
+  .chat-delete-btn,
+  .chat-undo-btn {
     padding: 4px 8px;
     font-size: 0.75rem;
   }

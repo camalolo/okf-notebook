@@ -291,6 +291,75 @@ export async function renameChat(  bundleId: string,
   await fs.writeFile(chatPath(bundleId, chatId), JSON.stringify(updated, null, 2), 'utf8');
 }
 
+/**
+ * Error messages thrown by undoLastTurn — the route maps them to HTTP
+ * statuses (404 / 409). Kept as exported constants so route and tests agree.
+ */
+export const UNDO_ERRORS = {
+  notFound: 'Chat not found',
+  nothingToUndo: 'Nothing to undo — the conversation has no user messages',
+  running: 'The last turn is still running — stop it before undoing',
+} as const;
+
+/**
+ * Delete the last user turn: the final `user` event and everything after it
+ * (assistant reply, tool calls, applied edits, turn_end) are removed from
+ * the timeline, restoring the conversation to the state before that message.
+ * File edits the turn already applied to the bundle are NOT reverted — they
+ * live in git, not in the timeline.
+ *
+ * Refuses (throws) when the last turn has not terminated (`turn_end` /
+ * closing assistant missing): a still-running loop re-reads the file on
+ * every append, so truncating under it would leave half a turn stranded.
+ * The route additionally checks the in-memory turn registry, which knows
+ * about turns that have started but not yet persisted their user event.
+ *
+ * Title: when this removes the conversation's only user message and the
+ * title is still the auto-placeholder derived from it, reset to 'New chat'
+ * so the next message re-titles; manually/LLM-set titles are kept.
+ *
+ * @returns the updated session.
+ */
+export async function undoLastTurn(
+  bundleId: string,
+  chatId: string,
+  userId: string,
+): Promise<ChatSession> {
+  validateId(bundleId);
+  validateId(chatId);
+  const existing = await loadChat(bundleId, chatId, userId);
+  if (!existing) throw new Error(UNDO_ERRORS.notFound);
+
+  const events = existing.events;
+  let lastUserIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'user') {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx === -1) throw new Error(UNDO_ERRORS.nothingToUndo);
+  if (!isLastTurnTerminated(events)) throw new Error(UNDO_ERRORS.running);
+
+  const kept = events.slice(0, lastUserIdx);
+  let { title } = existing;
+  if (
+    !kept.some((e) => e.kind === 'user') &&
+    title === autoTitleFromFirstMessage(events[lastUserIdx].content ?? '')
+  ) {
+    title = 'New chat';
+  }
+
+  const updated: ChatSession = {
+    ...existing,
+    title,
+    events: kept,
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(chatPath(bundleId, chatId), JSON.stringify(updated, null, 2) + '\n', 'utf8');
+  return updated;
+}
+
 /** Delete a chat session. No-op if not found or not owned by user. */
 export async function deleteChat(
   bundleId: string,

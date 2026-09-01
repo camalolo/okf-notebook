@@ -195,6 +195,18 @@ export function deleteChat(bundleId: string, chatId: string): Promise<void> {
   );
 }
 
+/**
+ * Undo the last turn: server-side truncation of the timeline back to before
+ * the final user message (reply, tool calls, and recorded edits included).
+ * Returns the updated session so the client can rebuild its state from it.
+ */
+export function undoTurn(bundleId: string, chatId: string): Promise<ChatSession> {
+  return request<ChatSession>(
+    `${API_BASE}/chats/${encodeURIComponent(bundleId)}/${encodeURIComponent(chatId)}/undo-turn`,
+    { method: 'POST' },
+  );
+}
+
 /** Compact the conversation: ask the LLM to summarise, persist, return summary (+ refreshed title). */
 export function compactChat(
   bundleId: string,

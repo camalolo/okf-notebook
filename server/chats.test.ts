@@ -7,7 +7,7 @@ import path from 'node:path';
 const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'notebook-chats-test-'));
 process.env.NOTEBOOK_CHATS_DIR = path.join(tmpDir, 'chats');
 
-const { isLastTurnTerminated, finalizeOrphanedTurns, autoTitleCandidate, autoTitleFromFirstMessage } =
+const { isLastTurnTerminated, finalizeOrphanedTurns, autoTitleCandidate, autoTitleFromFirstMessage, undoLastTurn, UNDO_ERRORS } =
   await import('./chats.js');
 
 const ev = (kind: 'user' | 'assistant' | 'tool' | 'turn_end', seq: number, content = '') => ({
@@ -196,3 +196,86 @@ describe('autoTitleCandidate', () => {
   });
 });
 
+describe('undoLastTurn', () => {
+  const owner = 'u@x.com';
+
+  it('truncates the last user turn and everything after it, keeping seqs', async () => {
+    await writeChat('bundo', 'multi', [
+      ev('user', 0, 'first question'),
+      ev('assistant', 1, 'first answer'),
+      ev('turn_end', 2),
+      ev('user', 3, 'second question'),
+      ev('tool', 4),
+      ev('assistant', 5, 'second answer'),
+      ev('turn_end', 6),
+    ]);
+    const updated = await undoLastTurn('bundo', 'multi', owner);
+    expect(updated.events).toHaveLength(3);
+    expect(updated.events.map((e) => e.kind)).toEqual(['user', 'assistant', 'turn_end']);
+    expect(updated.events.map((e) => e.seq)).toEqual([0, 1, 2]);
+    expect(updated.title).toBe('t'); // untouched — first message survives
+  });
+
+  it('removes the only turn entirely and resets an auto-placeholder title', async () => {
+    await writeChat('bundo', 'only', [
+      ev('user', 0, 'what is okf?'),
+      ev('assistant', 1, 'It is a markdown format.'),
+      ev('turn_end', 2),
+    ]);
+    // The stored title is still the automatic truncation of that message.
+    const dir = path.join(tmpDir, 'chats', 'bundo');
+    const file = path.join(dir, 'only.json');
+    const before = JSON.parse(await fs.readFile(file, 'utf8'));
+    before.title = autoTitleFromFirstMessage('what is okf?');
+    await fs.writeFile(file, JSON.stringify(before), 'utf8');
+
+    const updated = await undoLastTurn('bundo', 'only', owner);
+    expect(updated.events).toHaveLength(0);
+    expect(updated.title).toBe('New chat');
+  });
+
+  it('keeps a manually set title even when the only turn is removed', async () => {
+    await writeChat('bundo', 'titled', [ev('user', 0, 'hi'), ev('assistant', 1, 'hello'), ev('turn_end', 2)]);
+    const updated = await undoLastTurn('bundo', 'titled', owner);
+    expect(updated.events).toHaveLength(0);
+    expect(updated.title).toBe('t'); // writeChat's placeholder, not the auto one
+  });
+
+  it('keeps the surviving first message\u2019s placeholder title on later undos', async () => {
+    const firstMsg = 'first question';
+    await writeChat('bundo', 'keepauto', [
+      ev('user', 0, firstMsg),
+      ev('assistant', 1, 'a'),
+      ev('turn_end', 2),
+      ev('user', 3, 'second'),
+      ev('assistant', 4, 'b'),
+      ev('turn_end', 5),
+    ]);
+    const dir = path.join(tmpDir, 'chats', 'bundo');
+    const file = path.join(dir, 'keepauto.json');
+    const before = JSON.parse(await fs.readFile(file, 'utf8'));
+    before.title = autoTitleFromFirstMessage(firstMsg);
+    await fs.writeFile(file, JSON.stringify(before), 'utf8');
+
+    const updated = await undoLastTurn('bundo', 'keepauto', owner);
+    expect(updated.title).toBe(autoTitleFromFirstMessage(firstMsg));
+    expect(updated.events.some((e) => e.kind === 'user')).toBe(true);
+  });
+
+  it('refuses while the last turn is unterminated', async () => {
+    await writeChat('bundo', 'running', [
+      ev('user', 0, 'q'),
+      ev('assistant', 1, 'a'),
+      ev('turn_end', 2),
+      ev('user', 3, 'next'),
+      ev('tool', 4),
+    ]);
+    await expect(undoLastTurn('bundo', 'running', owner)).rejects.toThrow(UNDO_ERRORS.running);
+  });
+
+  it('refuses when there is no user message to undo', async () => {
+    await writeChat('bundo', 'empty', []);
+    await expect(undoLastTurn('bundo', 'empty', owner)).rejects.toThrow(UNDO_ERRORS.nothingToUndo);
+    await expect(undoLastTurn('bundo', 'missing-chat', owner)).rejects.toThrow(UNDO_ERRORS.notFound);
+  });
+});
