@@ -85,4 +85,23 @@ describe('buildSystemPrompt advertises only exposed capabilities', () => {
     expect(prompt).toContain('edit_file or create_file');
     expect(prompt).toContain('git_commit');
   });
+
+  it('tells the LLM who it is talking to when a user is given', async () => {
+    const prompt = await buildSystemPrompt(bundle, [], [], {
+      name: 'Laurent',
+      email: 'laurent@example.com',
+    });
+    expect(prompt).toContain('talking to Laurent (laurent@example.com)');
+
+    const noName = await buildSystemPrompt(bundle, [], [], {
+      name: '',
+      email: 'laurent@example.com',
+    });
+    expect(noName).toContain('talking to laurent@example.com');
+  });
+
+  it('omits the identity line for background tasks without a user', async () => {
+    const prompt = await buildSystemPrompt(bundle);
+    expect(prompt).not.toContain('talking to');
+  });
 });

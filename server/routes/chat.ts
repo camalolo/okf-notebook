@@ -44,7 +44,7 @@ import type {
   ToolCall,
 } from '../lib/llm.js';
 import { TIMEZONE } from '../config.js';
-import type { BundleConfig } from '../config.js';
+import type { BundleConfig, User } from '../config.js';
 
 const router = Router();
 
@@ -700,12 +700,15 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
  * the prompt never advertises tools the request doesn't have. `toolNames`
  * likewise lists the built-in tools exposed to THIS request (role-dependent);
  * the capability sentences are derived from it so e.g. readonly users are
- * never told they can check git status or edit files.
+ * never told they can check git status or edit files. `user`, when given, is
+ * the logged-in Google account of whoever is chatting — told to the LLM so it
+ * knows who it is talking to.
  */
 export async function buildSystemPrompt(
   bundle: BundleConfig,
   mcpToolNames: string[] = [],
   toolNames: string[] = READONLY_TOOLS.map((t) => t.function.name),
+  user?: Pick<User, 'name' | 'email'>,
 ): Promise<string> {
   const bundlePath = bundle.path;
   const has = (name: string) => toolNames.includes(name);
@@ -741,8 +744,14 @@ export async function buildSystemPrompt(
   const filePaths = await listMdFiles(bundlePath, '');
   const fileList = filePaths.length > 0 ? filePaths.map((p) => `- ${p}`).join('\n') : '(no files)';
 
+  const userLine = user
+    ? `You are talking to ${user.name || user.email} (${user.email}). Git commits are authored in their name.`
+    : '';
+
   return [
     `You are an AI assistant helping manage an OKF knowledge bundle called "${bundle.name}".`,
+    '',
+    userLine,
     '',
     `Current date/time: ${new Date().toLocaleString('en-US', {
       timeZone: TIMEZONE,
@@ -1118,6 +1127,7 @@ router.post('/:bundleId/chat', async (req, res, next) => {
       bundle,
       [...exposedMcpTools],
       allTools.map((t) => t.function.name),
+      req.user,
     );
     const callMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
