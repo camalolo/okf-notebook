@@ -20,6 +20,7 @@ describe('chat tool lists (regression: git tools silently unplugged in 6cb3ac3)'
       'list_files',
       'eval_maths',
       'web_search',
+      'web_fetch',
       'erc20_balances',
     ]);
   });

@@ -24,6 +24,7 @@ import { getSettings } from '../settings.js';
 import { buildResumeMessages } from '../lib/resume.js';
 import { chatLogger, newTraceId } from '../lib/logger.js';
 import { webSearch } from '../lib/web-search.js';
+import { webFetch } from '../lib/web-fetch.js';
 import { erc20Balances } from '../lib/erc20.js';
 import { evalMaths } from '../lib/maths.js';
 import { mcpManager } from '../lib/mcp-manager.js';
@@ -229,7 +230,8 @@ const WEB_SEARCH_TOOL: ToolDefinition = {
     name: 'web_search',
     description:
       'Search the web. Returns { query, provider, results: [{ title, url, snippet, content? }] }. ' +
-      'Uses whichever search API is configured (exa, tavily, tinyfish, or serper).',
+      'Served by the search proxy (server-side provider failover, e.g. "proxy:tavily"); ' +
+      'falls back to directly-configured search APIs (exa, tavily, tinyfish, serper) when unavailable.',
     parameters: {
       type: 'object',
       properties: {
@@ -237,6 +239,27 @@ const WEB_SEARCH_TOOL: ToolDefinition = {
         num_results: { type: 'number', description: 'Number of results (default 5, max 10).' },
       },
       required: ['query'],
+    },
+  },
+};
+
+const WEB_FETCH_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'web_fetch',
+    description:
+      'Fetch a web page by URL and return its readable text content (capped at ~20k chars). ' +
+      'Goes through the scrape proxy, which also handles JS-heavy and bot-protected pages; ' +
+      'a plain direct fetch is the fallback. ' +
+      'Use after web_search to read the actual source page — verify facts against page content, not search snippets. ' +
+      'Public http(s) URLs only; private/internal addresses are refused; binary files (PDFs, images) usually fail. ' +
+      'Returns { url, finalUrl, title?, content, provider?, truncated? } or { error }.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'The http(s) URL to fetch.' },
+      },
+      required: ['url'],
     },
   },
 };
@@ -325,6 +348,7 @@ export const READONLY_TOOLS: ToolDefinition[] = [
   LIST_FILES_TOOL,
   EVAL_MATHS_TOOL,
   WEB_SEARCH_TOOL,
+  WEB_FETCH_TOOL,
   ERC20_BALANCES_TOOL,
 ];
 
@@ -504,6 +528,12 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
       if (!query) return { error: 'query is required' };
       const numResults = Number(args?.num_results) || 5;
       return webSearch(query, numResults);
+    }
+
+    case 'web_fetch': {
+      const url = String(args?.url ?? '').trim();
+      if (!url) return { error: 'url is required' };
+      return webFetch(url);
     }
 
     case 'erc20_balances': {
