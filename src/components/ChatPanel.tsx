@@ -193,6 +193,71 @@ const ChatMarkdown = memo(function ChatMarkdown({
   );
 });
 
+/** Fallback clipboard write for non-secure contexts (http:// origins have no
+ *  navigator.clipboard). Returns true on success. */
+function copyTextFallback(text: string): boolean {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Tiny "copy" icon on the assistant message header row: copies the raw
+ *  markdown text to the clipboard and flips to a checkmark for a moment. */
+const CopyButton = memo(function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  const onCopy = useCallback(() => {
+    const flash = () => {
+      setCopied(true);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopied(false), 1500);
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(flash, () => {
+        if (copyTextFallback(text)) flash();
+      });
+    } else if (copyTextFallback(text)) {
+      flash();
+    }
+  }, [text]);
+
+  return (
+    <button
+      type="button"
+      className={`chat-copy-btn${copied ? ' chat-copy-btn--copied' : ''}`}
+      onClick={onCopy}
+      aria-label={copied ? 'Copied' : 'Copy message'}
+      title="Copy message"
+    >
+      {copied ? (
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+    </button>
+  );
+});
+
 function trunc(s: string, max = 60): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
@@ -1817,7 +1882,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                     // Render inline content (between tool calls) as a bubble.
                     return (
                       <div className="chat-message chat-message-assistant" key={`pc${i}-${j}`}>
-                        <span className="chat-author">GLM</span>
+                        <div className="chat-msg-meta">
+                          <span className="chat-author">GLM</span>
+                          <CopyButton text={ev.text} />
+                        </div>
                         <div className="chat-bubble"><ChatMarkdown content={ev.text} onNavigate={onNavigate} /></div>
                       </div>
                     );
@@ -1897,7 +1965,12 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
                   <div
                     className={`chat-message chat-message-${m.role === 'user' ? 'user' : 'assistant'}`}
                   >
-                    {m.role !== 'user' && <span className="chat-author">GLM</span>}
+                    {m.role !== 'user' && (
+                      <div className="chat-msg-meta">
+                        <span className="chat-author">GLM</span>
+                        <CopyButton text={m.content} />
+                      </div>
+                    )}
                     <div className="chat-bubble"><ChatMarkdown content={m.content} onNavigate={onNavigate} /></div>
                   </div>
                 )}
@@ -1955,7 +2028,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           if (ev.kind === 'content') {
             return (
               <div className="chat-message chat-message-assistant" key={`c${i}`}>
-                <span className="chat-author">GLM</span>
+                <div className="chat-msg-meta">
+                  <span className="chat-author">GLM</span>
+                  <CopyButton text={ev.text} />
+                </div>
                 <div className="chat-bubble"><ChatMarkdown content={ev.text} onNavigate={onNavigate} /></div>
               </div>
             );

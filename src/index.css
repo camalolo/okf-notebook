@@ -2061,6 +2061,41 @@ select.form-input {
   padding: 0 4px;
 }
 
+/* Message header row: author label + copy action */
+.chat-msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.chat-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.65;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.chat-copy-btn:hover {
+  opacity: 1;
+  color: var(--text);
+}
+
+.chat-copy-btn:focus-visible {
+  outline: 1px solid var(--accent);
+}
+
+.chat-copy-btn--copied {
+  opacity: 1;
+  color: var(--success);
+}
+
 .chat-bubble {
   padding: 10px 14px;
   border-radius: var(--radius);
