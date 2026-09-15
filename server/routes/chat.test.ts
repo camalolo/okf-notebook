@@ -105,4 +105,16 @@ describe('buildSystemPrompt advertises only exposed capabilities', () => {
     const prompt = await buildSystemPrompt(bundle);
     expect(prompt).not.toContain('talking to');
   });
+
+  it('mentions web_fetch alongside web_search when exposed (digest/agent prompts)', async () => {
+    const prompt = await buildSystemPrompt(bundle, [], names(READONLY_TOOLS));
+    expect(prompt).toContain('web_search');
+    expect(prompt).toContain('web_fetch');
+  });
+
+  it('mentions only web_search when web_fetch is not exposed', async () => {
+    const prompt = await buildSystemPrompt(bundle, [], ['read_file', 'list_files', 'eval_maths', 'web_search']);
+    expect(prompt).toContain('web_search');
+    expect(prompt).not.toContain('web_fetch');
+  });
 });

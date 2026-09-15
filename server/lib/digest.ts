@@ -85,7 +85,7 @@ const SEND_DIGEST_TOOL: ToolDefinition = {
           description:
             'Markdown email body. Concise — typically 3-10 bullet points. Lead with the most urgent item. ' +
             'Reference source files with relative markdown links like [appt](health/appointments.md). ' +
-            'Include dates, times, and timezones. Mention any web_search lookups inline briefly.',
+            'Include dates, times, and timezones. Mention any web_search/web_fetch lookups inline briefly.',
         },
       },
       required: ['urgency', 'subject', 'body'],
@@ -112,7 +112,8 @@ const DIGEST_TASK_PROMPT = [
   '   items, reminders. Skip purely historical or reference material.',
   '4. If a timely external fact would clarify whether something needs action',
   '   (e.g. tomorrow\'s weather, a public holiday, a news event tied to a',
-  '   tracked item), use web_search to look it up. Otherwise skip web_search.',
+  '   tracked item), use web_search to look it up — web_fetch the top result',
+  '   when the snippet alone is not enough to act on. Otherwise skip web_search.',
   '',
   'When you are done, signal your decision by calling EXACTLY ONE of:',
   '- skip_digest    — if nothing needs attention in the next 24 hours.',

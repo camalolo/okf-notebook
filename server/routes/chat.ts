@@ -822,9 +822,19 @@ export async function buildSystemPrompt(
     'Do NOT use raw HTML <a> tags or absolute paths starting with /. Use the',
     'relative path exactly as it appears in list_files output.',
     '',
-    'You also have access to a web_search tool for quick web searches, and an eval_maths',
-    'tool for exact calculations — ALWAYS call eval_maths for arithmetic beyond trivial',
-    'mental math instead of guessing: it is exact (no floating-point errors) and free.',
+    ...(has('web_fetch')
+      ? [
+          'You also have web_search (quick web searches) and web_fetch (read a web page\'s full',
+          'text by URL — verify facts against the actual page, not just a search snippet) tools,',
+          'and an eval_maths tool for exact calculations — ALWAYS call eval_maths for arithmetic',
+          'beyond trivial mental math instead of guessing: it is exact (no floating-point errors)',
+          'and free.',
+        ]
+      : [
+          'You also have access to a web_search tool for quick web searches, and an eval_maths',
+          'tool for exact calculations — ALWAYS call eval_maths for arithmetic beyond trivial',
+          'mental math instead of guessing: it is exact (no floating-point errors) and free.',
+        ]),
     ...(has('erc20_balances')
       ? [
           '',
