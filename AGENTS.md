@@ -317,11 +317,12 @@ compact/retitle and tests).
 ### Daily digest (`server/lib/digest.ts`, `server/lib/scheduler.ts`)
 
 Per-bundle config lives in `bundles.json` as
-`digest?: { enabled?, cleanup?, googleUser? }`
+`digest?: { enabled?, cleanup?, research?, googleUser? }`
 (Settings → "Digest…" per bundle; `GET /api/notebook/mcps` feeds the Google
 account dropdown from `listWorkspaceUsers()`). `enabled: false` skips the
 bundle in the scheduler. `cleanup: true` runs the OKF maintenance pass
-first (see below). `googleUser` (an email with Workspace tokens on disk)
+first (see below). `research: true` runs the knowledge-verification pass
+after cleanup (see below). `googleUser` (an email with Workspace tokens on disk)
 gives the digest read-only `gw_` tools (calendar + mail subset) routed to that
 user's MCP instance via `runReadOnlyTask({ mcpTools, mcpUserEmail })` — one
 notebook can digest one person's calendar, another's. Global knobs remain
@@ -348,6 +349,31 @@ always starts from a committed state. Cleanup failures are recorded in the
 digest record (`cleanup` field) and do NOT abort the digest. Preview a run
 manually with `node server/index.ts --run-cleanup [bundleId]` (runs
 regardless of the per-bundle setting).
+
+**Knowledge-verification pass** (`server/lib/research.ts`): opt-in
+pre-digest research phase (`digest.research`), running after cleanup (if
+enabled) and before the review. Where cleanup grounds its edits in a
+deterministic lint report, this pass grounds them in the **live web**: a
+`runReadOnlyTask` loop (default `READONLY_TOOLS` — which include
+`web_search`, `web_fetch` and `erc20_balances` — plus `WRITE_TOOLS` via
+`extraTools`, author "Notebook Maintenance", max 40 iterations) reads the
+bundle's factual claims (numbers, prices, versions, statuses, "as of …"
+notes), verifies them online — `web_search` to find candidate sources,
+then `web_fetch` to read the actual page (the prompt forbids trusting
+snippets for numbers/dates/thresholds) — and surgically edits stale/wrong
+passages with "verified <date>" annotations citing the **fetched page URL** (today's date is injected into the
+prompt in the digest timezone). Flow mirrors cleanup: (1) pre-research
+snapshot commit (`docs(verify): snapshot working tree before research` — a
+no-op when cleanup already left a committed tree), (2) the agent verifies
+and edits, committing with a `docs(verify):` message, (3) the runner safety
+commits if the tree is still dirty. Unlike cleanup there is **no fast
+skip** — facts drift daily, so every scheduled run re-verifies (the digest
+lastrun gate already limits it to once per day). Hard rules in the prompt:
+never invent facts (unverifiable claims are left untouched and reported),
+conservative scope ("nothing to verify" is a valid outcome). The run
+record (`research` field in the digest record) counts `webSearches`,
+`fileWrites`, and commits; failures do NOT abort the digest. Preview with
+`node server/index.ts --run-research [bundleId]`.
 
 ### MCP servers (`server/lib/mcp-manager.ts`, `server/mcps.ts`)
 
@@ -422,12 +448,43 @@ OAuth flow when running headless.
 ### Web search (`web_search` built-in tool)
 
 The `web_search` tool is a **built-in** tool (not an MCP server) exposed to all
-users (readonly + full). It searches the web via whichever search API key is
-configured, trying providers in preference order: **exa → tavily → tinyfish →
-serper**. Providers without an env key are skipped; providers that error at
-runtime fall through to the next. Set one or more of: `EXA_API_KEY`,
-`TAVILY_API_KEY`, `TINYFISH_API_KEY`, `SERPER_API_KEY`. The implementation lives
-in `server/lib/web-search.ts`.
+users (readonly + full). It searches the web trying providers in preference
+order: **search proxy → exa → tavily → tinyfish → serper**. The search proxy
+(`server/lib/search-proxy.ts`) is the **inference proxy's** `GET /api/search`
+— the same host that serves the LLM calls, derived from `LLM_BASE_URL` with
+its version segment stripped (override with `SEARCH_PROXY_URL`), auth via
+`SEARCH_API_KEY` falling back to `LLM_API_KEY`, and no key at all needed from
+the LAN. The proxy does its own provider failover server-side; the upstream
+it picked is surfaced in the result as `provider: "proxy:<name>"`. A single
+429 is retried once per `Retry-After` (capped at 5s). Keyed direct providers
+remain as fallback (skipped without an env key, runtime errors fall through):
+`EXA_API_KEY`, `TAVILY_API_KEY`, `TINYFISH_API_KEY`, `SERPER_API_KEY`. The
+chain lives in `server/lib/web-search.ts`. Note that snippets are thin: only
+exa (fallback) returns page text, capped at 2,000 chars — anything beyond
+skimming needs `web_fetch`.
+
+### Web fetch (`web_fetch` built-in tool)
+
+`web_fetch` (in `server/lib/web-fetch.ts`) fetches a URL and returns readable
+text (20k-char cap), exposed to all users as part of `READONLY_TOOLS`. Two
+paths, in preference order: **(1)** the scrape proxy — the inference proxy's
+`GET /api/scrape?url=…&format=json` (`depth` left at `auto`; see
+`server/lib/search-proxy.ts`), which handles JS-heavy and bot-protected pages
+via server-side provider failover and reports `provider`/`title`/`finalUrl`;
+any proxy failure (down, 429 after the one retry, 502, 503) falls through to
+**(2)** the direct hardened fetch: HTML stripped, 2 MB download cap, 15s
+timeout, redirects followed manually with per-hop revalidation (max 5), and
+non-text content types (PDF, images) refused. Because the URL comes from the
+LLM, the SSRF guard (`assertSafeUrl`) runs *before* either path — the proxy
+is never asked to fetch internal addresses either: http(s) only, no embedded
+credentials, DNS resolved up front with every address checked against a
+private-IP blocklist (loopback, RFC1918, CGNAT, link-local/cloud-metadata,
+IPv6 ULA/link-local/mapped-v4). Known accepted residual risks: DNS TOCTOU
+rebinding on the direct path, and on the proxy path the redirect targets are
+validated by the proxy, not here — both fine for a trusted-user homelab.
+PDF pages are unsupported on the direct path (the proxy may or may not
+extract them; gov sites often host the authoritative text as PDF — a future
+improvement would route those through `doc-extract`).
 
 ### ERC-20 balances (`erc20_balances` built-in tool)
 
@@ -572,8 +629,12 @@ annotated list):
   endpoint config (defaults: local proxy at `127.0.0.1:3003/api/v1`,
   `glm-5.2`).
 - `TIMEZONE` — IANA tz for the chat date stamp; defaults to the server's own.
+- `SEARCH_PROXY_URL` / `SEARCH_API_KEY` — the inference proxy's
+  search/scrape API (`/api/search`, `/api/scrape`), used by `web_search` and
+  `web_fetch` first. Default host: `LLM_BASE_URL` with its version segment
+  stripped; key defaults to `LLM_API_KEY` (LAN needs none).
 - `EXA_API_KEY` / `TAVILY_API_KEY` / `TINYFISH_API_KEY` / `SERPER_API_KEY` —
-  optional, for the `web_search` tool (any one enables it).
+  optional, direct web_search fallbacks (any one enables them).
 - `DIGEST_TO` / `DIGEST_FROM` / `DIGEST_SMTP_HOST` / `DIGEST_SMTP_PORT` /
   `DIGEST_CRON` / `DIGEST_TZ` / `DIGEST_DISABLED` — daily digest email.
 - `DEPLOY_DIR` — target directory for `scripts/deploy.mjs`.
