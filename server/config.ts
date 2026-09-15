@@ -9,6 +9,14 @@ export interface DigestConfig {
    */
   cleanup?: boolean;
   /**
+   * Run a knowledge-verification pass before the daily digest (after the OKF
+   * cleanup pass, if enabled): the LLM verifies the bundle's factual claims
+   * against the live web (web_search), surgically updates stale/wrong
+   * content, and commits the changes before the digest review runs.
+   * `undefined`/`false` = off (default).
+   */
+  research?: boolean;
+  /**
    * Email of the Google account whose Calendar/Gmail the digest may read
    * via gw_ MCP tools (per-notebook). Empty/undefined = no Google access.
    * The account must have logged in once (Workspace tokens on disk).

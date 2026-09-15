@@ -92,6 +92,15 @@ describe('sanitizeDigest', () => {
     expect(() => sanitizeDigest({ cleanup: 'yes' })).toThrow(BundleError);
   });
 
+  it('keeps the research flag and rejects non-boolean values', () => {
+    expect(sanitizeDigest({ enabled: true, research: true })).toEqual({
+      enabled: true,
+      research: true,
+    });
+    expect(sanitizeDigest({ research: false })).toEqual({ research: false });
+    expect(() => sanitizeDigest({ research: 'yes' })).toThrow(BundleError);
+  });
+
   it('drops an empty googleUser', () => {
     expect(sanitizeDigest({ enabled: true, googleUser: '' })).toEqual({ enabled: true });
   });

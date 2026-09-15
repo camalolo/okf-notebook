@@ -17,6 +17,7 @@ import { loadMcpServers } from './mcps.js';
 import { finalizeOrphanedTurns } from './chats.js';
 import { startDigestScheduler, runDigestTick } from './lib/scheduler.js';
 import { runCleanupTick } from './lib/cleanup.js';
+import { runResearchTick } from './lib/research.js';
 
 const app = express();
 
@@ -108,6 +109,32 @@ async function main() {
       console.log(
         `[cleanup] ${r.status}${r.skipped ? ' (skipped — last commit is an OKF cleanup commit, tree clean)' : ''}: ` +
           `lint=${r.lintViolations} violations / ${r.lintDuplicates} dup-groups, ` +
+          `${r.commits.length} commit(s), ${r.iterations} iter` +
+          (r.restorePoint ? `, restore=${r.restorePoint.slice(0, 12)}` : '') +
+          (r.error ? ` ERROR: ${r.error}` : ` summary="${r.summary.slice(0, 120)}"`),
+      );
+    }
+    process.exit(records.some((r) => r.status === 'error') ? 1 : 0);
+  }
+
+  // CLI: `node server/index.ts --run-research [bundleId]` runs ONLY the
+  // knowledge-verification pass (all bundles, or a specific one — regardless
+  // of the digest.research setting), prints a summary, and exits. Use it to
+  // preview what the research agent would change before enabling it.
+  const researchArgIdx = process.argv.indexOf('--run-research');
+  if (researchArgIdx !== -1) {
+    const onlyBundleId = process.argv[researchArgIdx + 1];
+    const records = await runResearchTick({ onlyBundleId });
+    if (onlyBundleId && records.length === 0) {
+
+      console.error(`Bundle not found: ${onlyBundleId}`);
+      process.exit(1);
+    }
+    for (const r of records) {
+
+      console.log(
+        `[research] ${r.status}: ` +
+          `${r.webSearches} search(es), ${r.fileWrites} file write(s), ` +
           `${r.commits.length} commit(s), ${r.iterations} iter` +
           (r.restorePoint ? `, restore=${r.restorePoint.slice(0, 12)}` : '') +
           (r.error ? ` ERROR: ${r.error}` : ` summary="${r.summary.slice(0, 120)}"`),

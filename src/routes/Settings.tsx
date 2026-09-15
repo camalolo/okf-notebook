@@ -478,6 +478,7 @@ export function Settings({ user }: SettingsProps) {
     setDigestDraft({
       enabled: b.digest?.enabled !== false,
       cleanup: b.digest?.cleanup === true,
+      research: b.digest?.research === true,
       googleUser: b.digest?.googleUser ?? '',
     });
     setDigestError(null);
@@ -492,6 +493,7 @@ export function Settings({ user }: SettingsProps) {
         digest: {
           enabled: digestDraft.enabled !== false,
           cleanup: digestDraft.cleanup === true,
+          research: digestDraft.research === true,
           ...(digestDraft.googleUser ? { googleUser: digestDraft.googleUser } : {}),
         },
       });
@@ -831,6 +833,7 @@ export function Settings({ user }: SettingsProps) {
                     <span className="bundle-list-access">
                       Digest: {b.digest?.enabled === false ? 'off' : 'on'}
                       {b.digest?.cleanup ? ' · OKF cleanup: on' : ''}
+                      {b.digest?.research ? ' · research: on' : ''}
                       {b.digest?.googleUser ? ` · Google: ${b.digest.googleUser}` : ''}
                       {` · Thinking: ${b.thinking === 'on' ? 'on' : 'off'}`}
                     </span>
@@ -1113,6 +1116,22 @@ export function Settings({ user }: SettingsProps) {
                       />
                       <span>Run an OKF cleanup pass first (LLM edits and commits)</span>
                     </label>
+                    <label className="mcp-check">
+                      <input
+                        type="checkbox"
+                        checked={digestDraft.research === true}
+                        onChange={(e) =>
+                          setDigestDraft((prev) => ({ ...prev, research: e.target.checked }))
+                        }
+                      />
+                      <span>
+                        Verify facts online and update files first
+                        <em className="mcp-check-meta">
+                          {' '}
+                          — LLM checks the notes against the web and commits corrections
+                        </em>
+                      </span>
+                    </label>
                     <label className="form-field">
                       <span className="form-label">Google account for the digest</span>
                       <select
@@ -1140,13 +1159,17 @@ export function Settings({ user }: SettingsProps) {
                       within 24 hours. The optional cleanup pass runs first: the LLM
                       organizes, deduplicates, and validates the .md files against the
                       bundle's OKF.md spec and commits the changes (as "Notebook
-                      Maintenance") before the digest review. Uncommitted work is
-                      snapshotted in its own commit before the pass starts, so nothing
-                      can be lost — reset to that restore point to undo everything the
-                      pass did. Selecting a Google account lets the digest read that
-                      account calendar and mail too. Each user must log in once with
-                      Google so their tokens are captured; in chat, Google tools always
-                      follow the logged-in user.
+                      Maintenance") before the digest review. The optional research pass
+                      runs next: the LLM verifies the notes' factual claims against the
+                      live web (web search + page reads), updates anything stale or
+                      wrong, and commits — so the digest always works from current
+                      information. Both passes
+                      snapshot uncommitted work in their own commit before starting, so
+                      nothing can be lost — reset to that restore point to undo
+                      everything a pass did. Selecting a Google account lets the digest
+                      read that account calendar and mail too. Each user must log in once
+                      with Google so their tokens are captured; in chat, Google tools
+                      always follow the logged-in user.
                     </span>
                     {digestError && (
                       <div className="error-banner error-banner-sm">{digestError}</div>

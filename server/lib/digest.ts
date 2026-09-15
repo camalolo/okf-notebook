@@ -3,6 +3,13 @@
  * actionable within the next 24 hours and either send an email summary or
  * stay silent.
  *
+ * Optional pre-review phases (both opt-in per bundle, both never throwing —
+ * a phase failure is recorded and the digest proceeds):
+ *   - cleanup  (digest.cleanup)  — OKF maintenance pass (server/lib/cleanup.ts)
+ *   - research (digest.research) — knowledge-verification pass: verify the
+ *     bundle's factual claims against the live web and update stale/wrong
+ *     content (server/lib/research.ts)
+ *
  * Decision mechanism: the LLM signals its decision by calling one of two
  * terminal tools — `skip_digest` (nothing urgent) or `send_digest` (with
  * subject/body/urgency args). Tool-call arguments are schema-constrained
@@ -23,6 +30,7 @@ import { chatLogger, newTraceId } from './logger.js';
 import { runReadOnlyTask, type ToolCallRecord } from './bundle-agent.js';
 import { GIT_TOOLS } from '../routes/chat.js';
 import { runCleanupForBundle, type CleanupRunRecord } from './cleanup.js';
+import { runResearchForBundle, type ResearchRunRecord } from './research.js';
 import { sendMail } from './mailer.js';
 import { mcpManager } from './mcp-manager.js';
 import { validateWorkspaceAuth } from './workspace-auth.js';
@@ -207,6 +215,14 @@ export interface DigestRunRecord {
    * NOT abort the digest.
    */
   cleanup?: CleanupRunRecord;
+  /**
+   * Knowledge-verification pass (opt-in via digest.research): ran before the
+   * digest review, verified the bundle's factual claims against the live web
+   * (web_search), updated stale/wrong content, and committed. Present only
+   * when the pass was enabled for this run. Failures are recorded here and
+   * do NOT abort the digest.
+   */
+  research?: ResearchRunRecord;
   /** Final assistant turn (raw text) — kept for debugging. */
   rawContent: string;
   error: string | null;
@@ -318,7 +334,21 @@ export async function runDigestForBundle(
       }
     }
 
+    // Phase 1 (opt-in): knowledge-verification pass — verify factual claims
+    // against the live web and update stale/wrong content, so the review
+    // below (and the email it may produce) works from current information.
+    // Never throws.
+    if (bundle.digest?.research === true) {
+      log.info(`Research phase enabled for ${bundle.id} — verifying facts online first`);
+      base.research = await runResearchForBundle(bundle, log, todayStamp(tz));
+      if (base.research.status === 'error') {
+        log.warn(`Research phase failed for ${bundle.id}: ${base.research.error} — proceeding with digest`);
+      }
+    }
+
     const google = await resolveGoogleTools(bundle, log);
+
+    // Phase 2: the 24h review itself.
     const result = await runReadOnlyTask(bundle, DIGEST_TASK_PROMPT, {
       log,
       // Inherit the bundle's thinking setting.

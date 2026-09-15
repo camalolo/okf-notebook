@@ -37,12 +37,15 @@ import { WRITE_TOOLS } from '../routes/chat.js';
 import { fromAddress } from './mailer.js';
 import type { BundleConfig } from '../config.js';
 
-/** Identity used for commits made by background maintenance runs. */
-const CLEANUP_AUTHOR = {
+/**
+ * Identity used for commits made by background maintenance runs (OKF
+ * cleanup, knowledge research). Shared with research.ts.
+ */
+export const MAINTENANCE_AUTHOR = {
   name: 'Notebook Maintenance',
   email: fromAddress(),
   // Role is required by the User type but unused here — this identity only
-  // feeds git_commit authorship inside the already-authorized cleanup run.
+  // feeds git_commit authorship inside the already-authorized background run.
   role: 'full',
 } as const;
 
@@ -164,6 +167,7 @@ function dirtyPaths(status: import('simple-git').StatusResult): string[] {
 export async function snapshotWorkingTree(
   git: import('simple-git').SimpleGit,
   log?: ReturnType<typeof chatLogger>,
+  message: string = PRE_CLEANUP_MESSAGE,
 ): Promise<{ dirty: string[]; preCleanupCommit: string | null; restorePoint: string | null }> {
   const dirty = dirtyPaths(await git.status());
   if (dirty.length === 0) {
@@ -175,8 +179,8 @@ export async function snapshotWorkingTree(
     }
   }
   await git.add('-A');
-  const snap = await git.commit(PRE_CLEANUP_MESSAGE, undefined, {
-    '--author': `${CLEANUP_AUTHOR.name} <${CLEANUP_AUTHOR.email}>`,
+  const snap = await git.commit(message, undefined, {
+    '--author': `${MAINTENANCE_AUTHOR.name} <${MAINTENANCE_AUTHOR.email}>`,
   });
   const preCleanupCommit = snap.commit || null;
   log?.info(`Cleanup snapshot: committed ${dirty.length} dirty path(s) as ${preCleanupCommit} before starting`);
@@ -260,7 +264,7 @@ export async function runCleanupForBundle(
       log,
       maxIterations: 40,
       extraTools: WRITE_TOOLS,
-      user: CLEANUP_AUTHOR,
+      user: MAINTENANCE_AUTHOR,
       // Inherit the bundle's thinking setting — cleanup is file maintenance;
       // most bundles don't need chain-of-thought for it.
       thinking: bundle.thinking === 'on' ? undefined : 'off',
@@ -282,7 +286,7 @@ export async function runCleanupForBundle(
     if (!after.isClean()) {
       await git.add('-A');
       const res = await git.commit(SAFETY_COMMIT_MESSAGE, undefined, {
-        '--author': `${CLEANUP_AUTHOR.name} <${CLEANUP_AUTHOR.email}>`,
+        '--author': `${MAINTENANCE_AUTHOR.name} <${MAINTENANCE_AUTHOR.email}>`,
       });
       if (res.commit) record.commits.push(res.commit);
       log.warn(`Cleanup safety commit: ${res.commit} (agent left the tree dirty)`);

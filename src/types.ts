@@ -20,6 +20,12 @@ export interface DigestConfig {
    * `undefined`/`false` = off (default).
    */
   cleanup?: boolean;
+  /**
+   * Knowledge-verification pass before the digest: the LLM verifies factual
+   * claims in the notes against the live web, updates stale/wrong content,
+   * and commits the changes.
+   */
+  research?: boolean;
   /** Google account (email) whose Calendar/Gmail the digest may read. */
   googleUser?: string;
 }

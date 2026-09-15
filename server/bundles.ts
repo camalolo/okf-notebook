@@ -110,9 +110,10 @@ export function sanitizeDigest(raw: unknown): DigestConfig | undefined {
   if (typeof raw !== 'object') {
     throw new BundleError('digest must be an object', 'INVALID_DIGEST');
   }
-  const { enabled, cleanup, googleUser } = raw as {
+  const { enabled, cleanup, research, googleUser } = raw as {
     enabled?: unknown;
     cleanup?: unknown;
+    research?: unknown;
     googleUser?: unknown;
   };
   if (enabled !== undefined && typeof enabled !== 'boolean') {
@@ -120,6 +121,9 @@ export function sanitizeDigest(raw: unknown): DigestConfig | undefined {
   }
   if (cleanup !== undefined && typeof cleanup !== 'boolean') {
     throw new BundleError('digest.cleanup must be a boolean', 'INVALID_DIGEST');
+  }
+  if (research !== undefined && typeof research !== 'boolean') {
+    throw new BundleError('digest.research must be a boolean', 'INVALID_DIGEST');
   }
   let user: string | undefined;
   if (googleUser !== undefined && googleUser !== null && googleUser !== '') {
@@ -131,6 +135,7 @@ export function sanitizeDigest(raw: unknown): DigestConfig | undefined {
   return {
     ...(enabled !== undefined ? { enabled } : {}),
     ...(cleanup !== undefined ? { cleanup } : {}),
+    ...(research !== undefined ? { research } : {}),
     ...(user ? { googleUser: user } : {}),
   };
 }
