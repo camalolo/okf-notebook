@@ -40,6 +40,59 @@ const schema = {
 export const remarkPlugins: PluggableList = [remarkGfm];
 
 /**
+ * Resolve a markdown link target to a bundle-root-relative file path, or
+ * null when the link is not an in-bundle `.md` link.
+ *
+ * Authored notes use several styles (all must navigate in-app, never open a
+ * new tab):
+ *   /university/tunghai.md      → bundle-absolute
+ *   economics.md                → relative to the current file's directory
+ *   ../credits/status.md        → relative with parent segments
+ *   economics.md#section        → fragment stripped (headings aren't slugged,
+ *                                 so opening the target file is the best move)
+ *
+ * Returns null for external URLs (`https:`, `mailto:`, `//host/…`),
+ * fragment-only in-page links (`#section`), and anything not ending in `.md`
+ * — those stay regular anchors (external ones keep target="_blank").
+ * `currentPath` is the bundle-relative path of the file being rendered; pass
+ * null/undefined (chat bubbles) to resolve relative links against the bundle
+ * root.
+ */
+export function resolveMarkdownPath(
+  href: string,
+  currentPath?: string | null,
+): string | null {
+  if (!href) return null;
+  const hash = href.indexOf('#');
+  const raw = hash === -1 ? href : href.slice(0, hash);
+  // Percent-decode explicit escapes (`My%20Notes.md` → `My Notes.md`) — the
+  // app routes carry raw filesystem names. Malformed escapes (`100%.md`)
+  // throw in decodeURIComponent; keep the authored form instead.
+  const pathPart = (() => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  })();
+  if (!pathPart) return null; // fragment-only (#section) — in-page, not a file
+  if (pathPart.startsWith('//')) return null; // protocol-relative URL
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(pathPart)) return null; // any scheme
+  if (!/\.md$/i.test(pathPart)) return null;
+  const base =
+    pathPart.startsWith('/') || !currentPath
+      ? ''
+      : currentPath.slice(0, currentPath.lastIndexOf('/') + 1);
+  const segments: string[] = [];
+  for (const seg of (base + pathPart).split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') segments.pop();
+    else segments.push(seg);
+  }
+  return segments.join('/') || null;
+}
+
+/**
  * Drop whitespace-only text nodes in table/list containers and at the tree
  * root. Browsers collapse those in normal flow, but chat bubbles render with
  * `white-space: pre-wrap`, and parse5 (rehype-raw's HTML re-parse) actually

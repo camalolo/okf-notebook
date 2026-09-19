@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
-import { remarkPlugins, rehypePlugins } from '../lib/markdown.ts';
+import { remarkPlugins, rehypePlugins, resolveMarkdownPath } from '../lib/markdown.ts';
 import type { KeyboardEvent } from 'react';
 import type {
   ChatMessage,
@@ -161,20 +161,25 @@ const ChatMarkdown = memo(function ChatMarkdown({
 }) {
   const components: Components = {
     a({ href, children }) {
-      if (href && onNavigate && !href.startsWith('http') && href.endsWith('.md')) {
-        const relativePath = href.replace(/^\/+/, '');
+      const navigate = onNavigate;
+      const internal = href && navigate ? resolveMarkdownPath(href) : null;
+      if (internal && navigate) {
         return (
           <a
             href="#"
             className="md-internal-link"
             onClick={(e) => {
               e.preventDefault();
-              onNavigate(relativePath);
+              navigate(internal);
             }}
           >
             {children}
           </a>
         );
+      }
+      // In-page fragment anchors keep default behavior — no new tab.
+      if (href && href.startsWith('#')) {
+        return <a href={href}>{children}</a>;
       }
       return (
         <a href={href} target="_blank" rel="noopener noreferrer">

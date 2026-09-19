@@ -1,29 +1,36 @@
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
-import { remarkPlugins, rehypePlugins } from '../lib/markdown.ts';
+import { remarkPlugins, rehypePlugins, resolveMarkdownPath } from '../lib/markdown.ts';
 
 interface MarkdownViewerProps {
   content: string;
+  /** Bundle-relative path of the file being rendered — relative links like
+   *  (economics.md) resolve against its directory. Omitted = bundle root. */
+  currentPath?: string;
   onNavigate: (relativePath: string) => void;
 }
 
-export function MarkdownViewer({ content, onNavigate }: MarkdownViewerProps) {
+export function MarkdownViewer({ content, currentPath, onNavigate }: MarkdownViewerProps) {
   const components: Components = {
     a({ href, children }) {
-      if (href && href.startsWith('/') && href.endsWith('.md')) {
-        const relativePath = href.replace(/^\/+/, '');
+      const internal = href ? resolveMarkdownPath(href, currentPath) : null;
+      if (internal) {
         return (
           <a
             href="#"
             className="md-internal-link"
             onClick={(event) => {
               event.preventDefault();
-              onNavigate(relativePath);
+              onNavigate(internal);
             }}
           >
             {children}
           </a>
         );
+      }
+      // In-page fragment anchors keep default behavior — no new tab.
+      if (href && href.startsWith('#')) {
+        return <a href={href}>{children}</a>;
       }
       return (
         <a href={href} target="_blank" rel="noopener noreferrer">

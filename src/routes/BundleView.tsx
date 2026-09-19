@@ -72,7 +72,7 @@ function FilePane({
         <h1 className="doc-title">{content.title ?? content.path}</h1>
         <span className="doc-path">{content.path}</span>
       </header>
-      <MarkdownViewer content={content.body} onNavigate={onNavigate} />
+      <MarkdownViewer content={content.body} currentPath={filePath} onNavigate={onNavigate} />
     </article>
   );
 }
