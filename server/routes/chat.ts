@@ -778,10 +778,35 @@ export async function buildSystemPrompt(
     ? `You are talking to ${user.name || user.email} (${user.email}). Git commits are authored in their name.`
     : '';
 
+  // Reply-language contract. Stated twice — once up front (primacy) and once as
+  // the last line of the prompt (recency) — because bundle content, tool
+  // outputs, and chat history can be in another language and drown a single
+  // mention (observed: all-English questions answered in Chinese).
+  const languageRules = [
+    '## Reply language (mandatory)',
+    'Detect the language of the user\'s own words in their latest message and reply in',
+    'THAT language — every turn, including short follow-ups like "ok", "nice", or a',
+    'terse status report. NONE of the following ever determine the reply language, no',
+    'matter how much of the context they fill: pasted/quoted text, bundle files, tool',
+    'outputs, calendar entries, AGENTS.md, OKF.md, or earlier messages in the chat',
+    'history. Example: an all-Chinese notebook plus a Chinese document plus an English',
+    'question ⇒ reply in English. A language note in AGENTS.md (e.g. "draft messages',
+    'for school staff in Chinese") applies ONLY to artifacts the user asked you to',
+    'draft for someone else — NEVER to your replies to the user. Keep code, commands,',
+    'file paths, identifiers, proper names, and direct quotes untranslated; when',
+    'editing bundle files, match the language of the surrounding content, not of the',
+    'request.',
+  ];
+  const languageReminder =
+    'REMINDER — Reply language: reply in the language of the user\'s own words in their ' +
+    'latest message, never in the language of the bundle content or chat history.';
+
   return [
     `You are an AI assistant helping manage an OKF knowledge bundle called "${bundle.name}".`,
     '',
     userLine,
+    '',
+    ...languageRules,
     '',
     `Current date/time: ${new Date().toLocaleString('en-US', {
       timeZone: TIMEZONE,
@@ -885,6 +910,8 @@ export async function buildSystemPrompt(
     '',
     '## Files in this bundle',
     fileList,
+    '',
+    languageReminder,
   ].join('\n');
 }
 
