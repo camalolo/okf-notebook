@@ -41,6 +41,24 @@ describe('shared markdown pipeline', () => {
   });
 });
 
+describe('strikethrough tildes', () => {
+  it('renders single tildes literally (approx notation must not strike through)', () => {
+    // GFM's default also matches a single `~`, so one "approximately" tilde
+    // opened a <del> that swallowed everything up to the next tilde in the
+    // message — chat showed strikethrough from `($148.50~149)` onwards.
+    const html = render(
+      'below the last mark ($148.50~149) — so it is protective above $148',
+    );
+    expect(html).not.toContain('<del>');
+    expect(html).toContain('$148.50~149');
+  });
+
+  it('still renders double-tilde strikethrough', () => {
+    const html = render('a ~~struck~~ word');
+    expect(html).toContain('<del>struck</del>');
+  });
+});
+
 describe('resolveMarkdownPath', () => {
   const ctx = 'university/glossary/index.md';
 

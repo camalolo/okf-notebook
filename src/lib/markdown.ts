@@ -37,7 +37,12 @@ const schema = {
   },
 };
 
-export const remarkPlugins: PluggableList = [remarkGfm];
+// GFM with one deliberate divergence: `singleTilde: false`. GitHub's default
+// treats a single `~approx~` as strikethrough, so one stray "approximately"
+// tilde in chat text (`~$148`, `$148.50~149`) silently struck through every
+// following word until the next tilde in the message. Real emphasis is always
+// authored with `~~double~~`; single tildes now render literally.
+export const remarkPlugins: PluggableList = [[remarkGfm, { singleTilde: false }]];
 
 /**
  * Resolve a markdown link target to a bundle-root-relative file path, or
