@@ -257,8 +257,13 @@ export function updateModel(model: string): Promise<AppSettingsInfo> {
 
 export interface McpServerConfig {
   name: string;
-  command: string;
-  args: string[];
+  /** stdio server: child-process command (+ args/env). */
+  command?: string;
+  args?: string[];
+  /** remote server: streamable-HTTP MCP endpoint (OAuth sign-in required). */
+  url?: string;
+  /** OAuth scopes requested for `url` servers (e.g. ['mcp.read']). */
+  scopes?: string[];
   env?: Record<string, string>;
   toolPrefix?: string;
   allowTools?: string[];
@@ -272,6 +277,10 @@ export interface McpServerInfo {
   config: McpServerConfig;
   /** Last startup/connect error, if any (cleared on a successful start). */
   error?: string;
+  /** Remote server waiting for the OAuth sign-in to complete. */
+  authRequired?: boolean;
+  /** Authorization URL from the last flow (Connect re-generates it). */
+  authUrl?: string;
 }
 
 export interface McpsInfo {
@@ -312,6 +321,22 @@ export function removeMcpServer(name: string): Promise<McpsInfo> {
 /** Restart a server (e.g. after an external change). */
 export function restartMcpServer(name: string): Promise<McpsInfo> {
   return request<McpsInfo>(`${API_BASE}/mcps/${encodeURIComponent(name)}/restart`, {
+    method: 'POST',
+  });
+}
+
+/** Start the OAuth sign-in for a remote MCP server — returns the provider's
+ *  authorization URL for the browser to open. */
+export function authorizeMcpServer(name: string): Promise<{ authUrl: string }> {
+  return request<{ authUrl: string }>(
+    `${API_BASE}/mcps/${encodeURIComponent(name)}/authorize`,
+    { method: 'POST' },
+  );
+}
+
+/** Revoke and drop the stored OAuth grant of a remote MCP server. */
+export function disconnectMcpServer(name: string): Promise<McpsInfo> {
+  return request<McpsInfo>(`${API_BASE}/mcps/${encodeURIComponent(name)}/disconnect`, {
     method: 'POST',
   });
 }

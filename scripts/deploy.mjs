@@ -104,8 +104,8 @@ async function main() {
     filter: (src) => src !== runtimeDataDir && !src.startsWith(runtimeDataDir + path.sep) && src !== runtimeBundlesJson,
   });
 
-  // 2.5. Ship bundled MCP binaries (bin/ — e.g. ibkr-flex-mcp). Server code
-  // resolves them as ../bin relative to the compiled server/ directory.
+  // 2.5. Ship bundled MCP binaries (bin/, if any). Server configs reference
+  // them as ../bin relative to the compiled server/ directory.
   const binSrc = path.join(ROOT, 'bin');
   if (existsSync(binSrc)) {
     const binDst = path.join(DEPLOY_DIR, 'bin');

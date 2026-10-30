@@ -883,8 +883,8 @@ export async function buildSystemPrompt(
           `Additional tools are available in this notebook: ${mcpToolNames.join(', ')}.`,
           'Their exact capabilities are described in the tool definitions — use them',
           'whenever the user\'s request matches what they offer (e.g. gw_ tools for the',
-          'user\'s email/calendar, browser_ tools to read specific web pages, flex_ tools',
-          'for IBKR account data).',
+          'user\'s email/calendar, browser_ tools to read specific web pages, ibkr_ tools',
+          'for Interactive Brokers account and market data).',
         ]
       : []),
     '',

@@ -4,6 +4,8 @@ import type { BundleConfig, DigestConfig, User } from '../types.ts';
 import {
   addBundle,
   addMcpServer,
+  authorizeMcpServer,
+  disconnectMcpServer,
   getBundles,
   getMcps,
   getSettings,
@@ -34,6 +36,8 @@ interface McpFormState {
   command: string;
   argsText: string;
   envText: string;
+  url: string;
+  scopesText: string;
   toolPrefix: string;
   allowToolsText: string;
   perUser: boolean;
@@ -44,6 +48,8 @@ const EMPTY_MCP_FORM: McpFormState = {
   command: '',
   argsText: '',
   envText: '',
+  url: '',
+  scopesText: '',
   toolPrefix: '',
   allowToolsText: '',
   perUser: false,
@@ -113,6 +119,16 @@ export function Settings({ user }: SettingsProps) {
   const [mcpSaving, setMcpSaving] = useState(false);
   const [mcpFormError, setMcpFormError] = useState<string | null>(null);
   const [mcpRestarting, setMcpRestarting] = useState<string | null>(null);
+  /** Remote server currently going through OAuth connect/disconnect. */
+  const [mcpConnecting, setMcpConnecting] = useState<string | null>(null);
+  /** Post-OAuth-callback banner ("signed in" / error) — read once on mount. */
+  const [mcpAuthNotice, setMcpAuthNotice] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const server = params.get('mcpAuth');
+    if (!server) return null;
+    const err = params.get('mcpAuthError');
+    return err ? `Sign-in for "${server}" failed: ${err}` : `Signed in to "${server}".`;
+  });
   const [mcpConfirmName, setMcpConfirmName] = useState<string | null>(null);
 
   const handleSaveModel = async () => {
@@ -180,6 +196,28 @@ export function Settings({ user }: SettingsProps) {
     };
   }, []);
 
+  // Landing back from an MCP OAuth provider (Settings → Connect): strip the
+  // callback params from the URL and refresh — the server-side state changed
+  // while we were away. (The banner text is derived in the state initializer.)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.get('mcpAuth')) return;
+    params.delete('mcpAuth');
+    params.delete('mcpAuthError');
+    const rest = params.toString();
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${rest ? `?${rest}` : ''}`,
+    );
+    getMcps()
+      .then((info) => {
+        setMcpServers(info.servers);
+        setWorkspaceUsers(info.workspaceUsers);
+      })
+      .catch(() => {});
+  }, []);
+
   // Readonly users must not reach this page.
   if (user.role !== 'full') {
     return <Navigate to="/" replace />;
@@ -198,11 +236,13 @@ export function Settings({ user }: SettingsProps) {
         ? EMPTY_MCP_FORM
         : {
             name: target.config.name,
-            command: target.config.command,
-            argsText: target.config.args.join('\n'),
+            command: target.config.command ?? '',
+            argsText: (target.config.args ?? []).join('\n'),
             envText: Object.entries(target.config.env ?? {})
               .map(([k, v]) => `${k}=${v}`)
               .join('\n'),
+            url: target.config.url ?? '',
+            scopesText: (target.config.scopes ?? []).join(' '),
             toolPrefix: target.config.toolPrefix ?? '',
             allowToolsText: (target.config.allowTools ?? []).join(', '),
             perUser: target.config.perUser === true,
@@ -211,26 +251,34 @@ export function Settings({ user }: SettingsProps) {
   };
 
   const buildMcpConfig = (): McpServerConfig => {
-    const cfg: McpServerConfig = {
-      name: mcpForm.name.trim(),
-      command: mcpForm.command.trim(),
-      args: mcpForm.argsText
-        .split('\n')
-        .map((a) => a.trim())
-        .filter(Boolean),
-    };
+    const url = mcpForm.url.trim();
+    const cfg: McpServerConfig = url
+      ? { name: mcpForm.name.trim(), url }
+      : {
+          name: mcpForm.name.trim(),
+          command: mcpForm.command.trim(),
+          args: mcpForm.argsText
+            .split('\n')
+            .map((a) => a.trim())
+            .filter(Boolean),
+        };
     const env = parseEnvText(mcpForm.envText);
-    if (env) cfg.env = env;
+    if (env && !url) cfg.env = env;
+    const scopes = mcpForm.scopesText
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (scopes.length > 0 && url) cfg.scopes = scopes;
     const allowTools = parseListText(mcpForm.allowToolsText);
     if (allowTools) cfg.allowTools = allowTools;
     if (mcpForm.toolPrefix.trim()) cfg.toolPrefix = mcpForm.toolPrefix.trim();
-    if (mcpForm.perUser) cfg.perUser = true;
+    if (mcpForm.perUser && !url) cfg.perUser = true;
     return cfg;
   };
 
   const handleSaveMcpServer = async () => {
-    if (!mcpForm.name.trim() || !mcpForm.command.trim()) {
-      setMcpFormError('Name and command are required.');
+    if (!mcpForm.name.trim() || (!mcpForm.command.trim() && !mcpForm.url.trim())) {
+      setMcpFormError('Name and a command (or a URL) are required.');
       return;
     }
     setMcpSaving(true);
@@ -278,11 +326,38 @@ export function Settings({ user }: SettingsProps) {
     }
   };
 
+  /** OAuth sign-in for a remote server: fetch the provider URL and go there.
+   *  The provider redirects back to /settings?mcpAuth=<name> when done. */
+  const handleConnectMcpServer = async (name: string) => {
+    setMcpConnecting(name);
+    setMcpFormError(null);
+    try {
+      const { authUrl } = await authorizeMcpServer(name);
+      window.location.assign(authUrl);
+    } catch (err: unknown) {
+      setMcpFormError(toMessage(err, `Failed to start sign-in for ${name}`));
+      setMcpConnecting(null);
+    }
+  };
+
+  const handleDisconnectMcpServer = async (name: string) => {
+    setMcpConnecting(name);
+    try {
+      const info = await disconnectMcpServer(name);
+      setMcpServers(info.servers);
+    } catch (err: unknown) {
+      setMcpFormError(toMessage(err, `Failed to disconnect ${name}`));
+    } finally {
+      setMcpConnecting(null);
+    }
+  };
+
   const updateMcpField = (key: keyof McpFormState, value: string | boolean) => {
     setMcpForm((prev) => ({ ...prev, [key]: value }));
   };
 
   /** Add/Edit form body (rendered inline for a new server or under its entry). */
+  const isRemoteMcp = mcpForm.url.trim() !== '';
   const mcpServerForm = (
     <>
       <div className="form-row">
@@ -300,7 +375,7 @@ export function Settings({ user }: SettingsProps) {
           />
         </label>
         <label className="form-field">
-          <span className="form-label">Command</span>
+          <span className="form-label">Command{isRemoteMcp ? ' (unused — URL set)' : ''}</span>
           <input
             className="form-input"
             type="text"
@@ -313,16 +388,72 @@ export function Settings({ user }: SettingsProps) {
         </label>
       </div>
       <label className="form-field">
-        <span className="form-label">Arguments (one per line)</span>
-        <textarea
-          className="form-textarea"
-          value={mcpForm.argsText}
-          onChange={(e) => updateMcpField('argsText', e.target.value)}
-          placeholder={'-y\n@alanxchen/google-workspace-mcp'}
-          rows={2}
+        <span className="form-label">Remote MCP URL (alternative to a command)</span>
+        <input
+          className="form-input"
+          type="text"
+          value={mcpForm.url}
+          onChange={(e) => updateMcpField('url', e.target.value)}
+          placeholder="https://api.ibkr.com/v1/api/mcp-public"
           spellCheck={false}
+          autoComplete="off"
         />
       </label>
+      {isRemoteMcp ? (
+        <label className="form-field">
+          <span className="form-label">OAuth scopes (space- or comma-separated)</span>
+          <input
+            className="form-input"
+            type="text"
+            value={mcpForm.scopesText}
+            onChange={(e) => updateMcpField('scopesText', e.target.value)}
+            placeholder="mcp.read mcp.write"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </label>
+      ) : (
+        <>
+          <label className="form-field">
+            <span className="form-label">Arguments (one per line)</span>
+            <textarea
+              className="form-textarea"
+              value={mcpForm.argsText}
+              onChange={(e) => updateMcpField('argsText', e.target.value)}
+              placeholder={'-y\n@alanxchen/google-workspace-mcp'}
+              rows={2}
+              spellCheck={false}
+            />
+          </label>
+          <label className="form-field">
+            <span className="form-label">Environment variables (KEY=VALUE, one per line)</span>
+            <textarea
+              className="form-textarea"
+              value={mcpForm.envText}
+              onChange={(e) => updateMcpField('envText', e.target.value)}
+              placeholder={'API_TOKEN=secret'}
+              rows={2}
+              spellCheck={false}
+            />
+          </label>
+          <label className="mcp-check">
+            <input
+              type="checkbox"
+              checked={mcpForm.perUser}
+              onChange={(e) => updateMcpField('perUser', e.target.checked)}
+            />
+            <span>
+              One instance per logged-in user (token isolation via $HOME)
+              {mcpForm.name.trim() !== 'google-workspace' ? (
+                <em className="mcp-check-meta">
+                  {' '}
+                  — only works for a server named "google-workspace"
+                </em>
+              ) : null}
+            </span>
+          </label>
+        </>
+      )}
       <div className="form-row">
         <label className="form-field">
           <span className="form-label">Tool prefix (optional)</span>
@@ -349,37 +480,10 @@ export function Settings({ user }: SettingsProps) {
           />
         </label>
       </div>
-      <label className="form-field">
-        <span className="form-label">Environment variables (KEY=VALUE, one per line)</span>
-        <textarea
-          className="form-textarea"
-          value={mcpForm.envText}
-          onChange={(e) => updateMcpField('envText', e.target.value)}
-          placeholder={'API_TOKEN=secret'}
-          rows={2}
-          spellCheck={false}
-        />
-      </label>
-      <label className="mcp-check">
-        <input
-          type="checkbox"
-          checked={mcpForm.perUser}
-          onChange={(e) => updateMcpField('perUser', e.target.checked)}
-        />
-        <span>
-          One instance per logged-in user (token isolation via $HOME)
-          {mcpForm.name.trim() !== 'google-workspace' ? (
-            <em className="mcp-check-meta">
-              {' '}
-              — only works for a server named "google-workspace"
-            </em>
-          ) : null}
-        </span>
-      </label>
       <span className="settings-section-hint">
-        The server is started as a child process (stdio). If it fails to start it is
-        still saved — the error shows next to it and you can fix the config and
-        save again.
+        {isRemoteMcp
+          ? 'Remote (HTTP) MCP server — the chat tools come from the provider. Connect once via OAuth; tokens are stored locally and refreshed automatically.'
+          : 'The server is started as a child process (stdio). If it fails to start it is still saved — the error shows next to it and you can fix the config and save again.'}
       </span>
       {mcpFormError && mcpEditing !== null && (
         <div className="error-banner error-banner-sm">{mcpFormError}</div>
@@ -621,9 +725,23 @@ export function Settings({ user }: SettingsProps) {
         <h2 className="settings-section-title">MCP servers</h2>
         <p className="settings-section-hint">
           MCP (Model Context Protocol) servers extend the chat assistant with external
-          tools. Each server is a command run on the Notebook host — only add servers
-          you trust. Enabled per bundle under its "Tools…" button.
+          tools — local commands run on the Notebook host (stdio), or remote
+          OAuth-protected endpoints. Only add servers you trust. Enabled per bundle
+          under its "Tools…" button.
         </p>
+
+        {mcpAuthNotice && (
+          <div className="error-banner error-banner-sm" role="status">
+            {mcpAuthNotice}
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ marginLeft: '0.5rem' }}
+              onClick={() => setMcpAuthNotice(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {mcpServers.length > 0 && (
           <ul className="bundle-list">
@@ -637,10 +755,16 @@ export function Settings({ user }: SettingsProps) {
                     <span className="bundle-list-name">
                       {s.name}
                       {s.config.perUser ? ' · per-user' : ''}
+                      {s.config.url ? ' · remote' : ''}
                     </span>
                     <span className="bundle-list-path">
-                      {s.config.command}
-                      {s.config.args.length > 0 ? ` ${s.config.args.join(' ')}` : ''}
+                      {s.config.url
+                        ? s.config.url
+                        : `${s.config.command ?? ''}${
+                            (s.config.args ?? []).length > 0
+                              ? ` ${(s.config.args ?? []).join(' ')}`
+                              : ''
+                          }`}
                     </span>
                     <span className="bundle-list-access">
                       {s.running
@@ -650,7 +774,13 @@ export function Settings({ user }: SettingsProps) {
                       {s.config.allowTools
                         ? ` · ${s.config.allowTools.length} tool${s.config.allowTools.length === 1 ? '' : 's'} allow-listed`
                         : ' · all discovered tools'}
+                      {s.config.scopes ? ` · scopes: ${s.config.scopes.join(' ')}` : ''}
                     </span>
+                    {s.authRequired && (
+                      <span className="bundle-list-access error-banner error-banner-sm">
+                        Sign-in required — the tools appear after connecting.
+                      </span>
+                    )}
                     {s.error && (
                       <span className="bundle-list-access error-banner error-banner-sm">
                         {s.error}
@@ -692,6 +822,28 @@ export function Settings({ user }: SettingsProps) {
                     </div>
                   ) : (
                     <div className="bundle-list-actions">
+                      {s.config.url && (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => handleConnectMcpServer(s.name)}
+                          disabled={mcpConnecting === s.name}
+                        >
+                          {mcpConnecting === s.name
+                            ? 'Connecting…'
+                            : s.authRequired
+                              ? 'Connect…'
+                              : 'Reconnect…'}
+                        </button>
+                      )}
+                      {s.config.url && !s.authRequired && (
+                        <button
+                          className="btn btn-danger-ghost btn-sm"
+                          onClick={() => handleDisconnectMcpServer(s.name)}
+                          disabled={mcpConnecting === s.name}
+                        >
+                          Disconnect
+                        </button>
+                      )}
                       <button
                         className="btn btn-ghost btn-sm"
                         onClick={() => openMcpForm(s)}

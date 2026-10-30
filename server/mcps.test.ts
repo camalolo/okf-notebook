@@ -72,6 +72,49 @@ describe('sanitizeMcpConfig', () => {
     expect(() => sanitizeMcpConfig({ name: 'ok', command: 'x', allowTools: ['a', ''] })).toThrow(McpError);
     expect(() => sanitizeMcpConfig({ name: 'ok', command: 'x', perUser: 'yes' })).toThrow(McpError);
   });
+
+  it('accepts a remote url server with scopes', () => {
+    const cfg = sanitizeMcpConfig({
+      name: 'ibkr',
+      url: 'https://api.ibkr.com/v1/api/mcp-public',
+      toolPrefix: 'ibkr',
+      scopes: ['mcp.read', 'mcp.write'],
+    });
+    expect(cfg).toEqual({
+      name: 'ibkr',
+      url: 'https://api.ibkr.com/v1/api/mcp-public',
+      toolPrefix: 'ibkr',
+      scopes: ['mcp.read', 'mcp.write'],
+    });
+    expect('command' in cfg).toBe(false);
+    expect('args' in cfg).toBe(false);
+  });
+
+  it('rejects command+url and neither', () => {
+    expect(() =>
+      sanitizeMcpConfig({ name: 'ok', command: 'npx', url: 'https://x.example' }),
+    ).toThrow(McpError);
+    expect(() => sanitizeMcpConfig({ name: 'ok' })).toThrow(McpError);
+    expect(() => sanitizeMcpConfig({ name: 'ok', command: '' })).toThrow(McpError);
+  });
+
+  it('rejects bad urls', () => {
+    expect(() => sanitizeMcpConfig({ name: 'ok', url: 'not a url' })).toThrow(McpError);
+    expect(() => sanitizeMcpConfig({ name: 'ok', url: 'ftp://x.example' })).toThrow(McpError);
+    expect(() => sanitizeMcpConfig({ name: 'ok', url: 'https://user:pw@x.example' })).toThrow(McpError);
+  });
+
+  it('rejects perUser and bad scopes for url servers', () => {
+    expect(() =>
+      sanitizeMcpConfig({ name: 'ok', url: 'https://x.example', perUser: true }),
+    ).toThrow(McpError);
+    expect(() =>
+      sanitizeMcpConfig({ name: 'ok', url: 'https://x.example', scopes: ['mcp read'] }),
+    ).toThrow(McpError);
+    expect(() =>
+      sanitizeMcpConfig({ name: 'ok', url: 'https://x.example', scopes: 'mcp.read' }),
+    ).toThrow(McpError);
+  });
 });
 
 describe('registry persistence', () => {

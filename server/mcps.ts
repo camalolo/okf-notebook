@@ -7,7 +7,8 @@
  * default — a fresh install starts with zero MCP servers.
  *
  * ⚠️ Configs contain arbitrary `command` lines (and optional `env` secrets);
- * they are only editable by `full`-role users (routes/mcps.ts).
+ * they are only editable by `full`-role users (routes/mcps.ts). Remote
+ * servers (`url`) use OAuth 2.0 — see lib/mcp-oauth.ts.
  */
 
 import { promises as fs } from 'node:fs';
@@ -53,6 +54,8 @@ export type McpErrorCode =
   | 'INVALID_COMMAND'
   | 'INVALID_ARGS'
   | 'INVALID_ENV'
+  | 'INVALID_URL'
+  | 'INVALID_SCOPES'
   | 'INVALID_TOOL_PREFIX'
   | 'INVALID_ALLOW_TOOLS'
   | 'NOT_FOUND';
@@ -69,19 +72,47 @@ export class McpError extends Error {
 /** Server names are lowercase slugs (used as bundle.mcps ids and log tags). */
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
+/** OAuth scope tokens (e.g. `mcp.read`, `gmail.modify`). */
+const SCOPE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/;
+
+/** Validate a remote MCP endpoint URL (streamable-HTTP transport). */
+function sanitizeUrl(raw: unknown): string {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new McpError('url must be a non-empty string', 'INVALID_URL');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw.trim());
+  } catch {
+    throw new McpError(`url is not a valid URL: ${raw.trim()}`, 'INVALID_URL');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new McpError('url must use http or https', 'INVALID_URL');
+  }
+  if (parsed.username || parsed.password) {
+    throw new McpError('url must not embed credentials', 'INVALID_URL');
+  }
+  return parsed.toString();
+}
+
 /**
  * Normalize/validate an MCP server config from untrusted input (Settings UI)
  * or a hand-edited mcps.json. Returns a fresh, clean object.
+ *
+ * A server is either a child process (`command` [+ `args`/`env`]) or a
+ * remote endpoint (`url` [+ `scopes`]) — never both, never neither.
  */
 export function sanitizeMcpConfig(raw: unknown): McpServerConfig {
   if (raw === null || typeof raw !== 'object') {
     throw new McpError('MCP server config must be an object', 'INVALID_COMMAND');
   }
-  const { name, command, args, env, toolPrefix, allowTools, perUser } = raw as {
+  const { name, command, args, env, url, scopes, toolPrefix, allowTools, perUser } = raw as {
     name?: unknown;
     command?: unknown;
     args?: unknown;
     env?: unknown;
+    url?: unknown;
+    scopes?: unknown;
     toolPrefix?: unknown;
     allowTools?: unknown;
     perUser?: unknown;
@@ -94,9 +125,17 @@ export function sanitizeMcpConfig(raw: unknown): McpServerConfig {
     );
   }
 
-  if (typeof command !== 'string' || !command.trim()) {
-    throw new McpError('Command is required (e.g. "npx" or a binary path)', 'INVALID_COMMAND');
+  const hasCommand = typeof command === 'string' && command.trim() !== '';
+  const hasUrl = url !== undefined && url !== null && url !== '';
+  if (hasCommand === hasUrl) {
+    throw new McpError(
+      'Provide either a command (stdio server) or a url (remote HTTP server), not both/neither',
+      'INVALID_COMMAND',
+    );
   }
+
+  let cleanUrl: string | undefined;
+  if (hasUrl) cleanUrl = sanitizeUrl(url);
 
   let cleanArgs: string[] = [];
   if (args !== undefined && args !== null) {
@@ -144,12 +183,32 @@ export function sanitizeMcpConfig(raw: unknown): McpServerConfig {
   if (perUser !== undefined && perUser !== null && typeof perUser !== 'boolean') {
     throw new McpError('perUser must be a boolean', 'INVALID_COMMAND');
   }
+  if (perUser === true && cleanUrl) {
+    throw new McpError('perUser applies to stdio servers only', 'INVALID_COMMAND');
+  }
+
+  let cleanScopes: string[] | undefined;
+  if (scopes !== undefined && scopes !== null) {
+    if (
+      !Array.isArray(scopes) ||
+      scopes.some((s) => typeof s !== 'string' || !s.trim() || !SCOPE_RE.test(s.trim()))
+    ) {
+      throw new McpError(
+        'scopes must be an array of scope tokens (e.g. ["mcp.read"])',
+        'INVALID_SCOPES',
+      );
+    }
+    const cleaned = [...new Set((scopes as string[]).map((s) => s.trim()))].filter(Boolean);
+    if (cleaned.length > 0) cleanScopes = cleaned;
+  }
 
   return {
     name: name.trim(),
-    command: command.trim(),
-    args: cleanArgs,
+    ...(cleanUrl
+      ? { url: cleanUrl }
+      : { command: (command as string).trim(), args: cleanArgs }),
     ...(cleanEnv ? { env: cleanEnv } : {}),
+    ...(cleanScopes ? { scopes: cleanScopes } : {}),
     ...(cleanPrefix ? { toolPrefix: cleanPrefix } : {}),
     ...(cleanAllow ? { allowTools: cleanAllow } : {}),
     ...(perUser === true ? { perUser: true } : {}),

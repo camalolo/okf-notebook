@@ -1,8 +1,13 @@
 /**
  * MCP (Model Context Protocol) client manager.
  *
- * Spawns MCP servers as child processes (stdio transport), discovers their
- * tools, and routes tool calls from the LLM chat loop to the appropriate server.
+ * Two transport kinds, per config:
+ * - **stdio** (`command`/`args`): spawns the MCP server as a child process.
+ * - **streamable-HTTP** (`url`): connects to a remote MCP endpoint over HTTP,
+ *   with OAuth 2.0 (dynamic client registration + PKCE, tokens persisted by
+ *   FileOAuthProvider in server/data/mcp-oauth/). Remote servers start in a
+ *   "needs sign-in" state until the user completes the OAuth flow from
+ *   Settings → MCP servers → Connect.
  *
  * Tools are optionally namespaced with a prefix to avoid collisions between
  * MCP servers and the built-in bundle tools.
@@ -10,9 +15,12 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ToolDefinition } from './llm.js';
+import { FileOAuthProvider } from './mcp-oauth.js';
 import {
   hasWorkspaceTokens,
   listWorkspaceUsers,
@@ -20,13 +28,17 @@ import {
 } from './workspace-auth.js';
 
 export interface McpServerConfig {
-  /** Identifier for this MCP server (used in logs). */
+  /** Identifier for this MCP server (used in logs and bundle.mcps). */
   name: string;
-  /** Executable command (e.g. 'npx'). */
-  command: string;
-  /** Arguments for the command. */
-  args: string[];
-  /** Extra environment variables for the child process. */
+  /** Executable command (e.g. 'npx'). Required unless `url` is set. */
+  command?: string;
+  /** Arguments for the command (stdio servers). */
+  args?: string[];
+  /** Remote MCP endpoint (streamable-HTTP transport), e.g. https://…/mcp */
+  url?: string;
+  /** OAuth scopes to register/request for `url` servers (default: none). */
+  scopes?: string[];
+  /** Extra environment variables for the child process (stdio servers). */
   env?: Record<string, string>;
   /** Prefix added to all tool names exposed to the LLM (e.g. 'gw'). */
   toolPrefix?: string;
@@ -37,6 +49,7 @@ export interface McpServerConfig {
    * $HOME (token isolation). Tool calls are routed to the caller's instance
    * via `callTool(name, args, { userEmail })`. If no user has tokens yet, a
    * single tokenless instance is started for tool discovery only.
+   * Stdio servers only.
    */
   perUser?: boolean;
 }
@@ -59,6 +72,11 @@ class McpManager {
   private started = false;
   /** Last startup/connect error per server name (surfaced in the Settings UI). */
   private lastErrors = new Map<string, string>();
+  /**
+   * Remote servers awaiting OAuth sign-in: name → last generated
+   * authorization URL (undefined when no flow was started yet).
+   */
+  private authNeeded = new Map<string, string | undefined>();
 
   /** Start all configured MCP servers and discover their tools. */
   async start(configs: McpServerConfig[]): Promise<void> {
@@ -104,6 +122,14 @@ class McpManager {
 
     console.log(`[mcp] Starting "${config.name}"${who}...`);
 
+    if (config.url) {
+      await this.startHttpServer(config);
+      return;
+    }
+    if (!config.command) {
+      throw new Error(`MCP server "${config.name}" has neither a command nor a url`);
+    }
+
     let env: Record<string, string> | undefined;
     if (config.env) {
       env = { ...process.env, ...config.env } as Record<string, string>;
@@ -122,7 +148,7 @@ class McpManager {
 
     const transport = new StdioClientTransport({
       command: config.command,
-      args: config.args,
+      args: config.args ?? [],
       ...(env ? { env } : {}),
     });
 
@@ -138,6 +164,53 @@ class McpManager {
       this.clients.set(config.name, client);
     }
 
+    await this.registerTools(config, client);
+  }
+
+  /**
+   * Connect to a remote streamable-HTTP MCP server (OAuth-protected).
+   *
+   * The interactive OAuth flow is never started here: it needs the
+   * request-derived redirect URI, so it lives in the Settings "Connect"
+   * action (routes/mcps.ts). Without stored tokens the server simply starts
+   * in the "sign-in required" state; the callback restarts it.
+   */
+  private async startHttpServer(config: McpServerConfig): Promise<void> {
+    const url = config.url!;
+    const provider = await FileOAuthProvider.create(config.name, { scopes: config.scopes });
+
+    if (!provider.hasTokens) {
+      this.authNeeded.set(config.name, provider.pendingAuthorizationUrl);
+      throw new Error('Sign-in required — open Settings → MCP servers → Connect');
+    }
+
+    const transport = new StreamableHTTPClientTransport(new URL(url), {
+      authProvider: provider,
+    });
+    const client = new Client(
+      { name: 'notebook', version: '1.0.0' },
+      { capabilities: {} },
+    );
+
+    try {
+      await client.connect(transport);
+    } catch (err) {
+      await client.close().catch(() => {});
+      if (err instanceof UnauthorizedError) {
+        // Refresh failed (revoked/expired grant) — tokens are unusable.
+        this.authNeeded.set(config.name, provider.pendingAuthorizationUrl);
+        throw new Error('Sign-in expired — reconnect from Settings → MCP servers', { cause: err });
+      }
+      throw err;
+    }
+
+    this.authNeeded.delete(config.name);
+    this.clients.set(config.name, client);
+    await this.registerTools(config, client);
+  }
+
+  /** Discover a connected server's tools and expose them (namespaced). */
+  private async registerTools(config: McpServerConfig, client: Client): Promise<void> {
     const { tools } = await client.listTools();
     let count = 0;
 
@@ -172,7 +245,7 @@ class McpManager {
     }
 
     this.lastErrors.delete(config.name);
-    console.log(`[mcp] "${config.name}"${who} ready — ${count} new tools exposed`);
+    console.log(`[mcp] "${config.name}" ready — ${count} new tools exposed`);
   }
 
   /** Names of all configured MCP servers (started or not). */
@@ -189,11 +262,16 @@ class McpManager {
     config: McpServerConfig;
     /** Last startup/connect error, if any (cleared on a successful start). */
     error?: string;
+    /** Remote server waiting for the OAuth sign-in to complete. */
+    authRequired?: boolean;
+    /** Authorization URL from the last attempted flow (Connect re-generates). */
+    authUrl?: string;
   }> {
     return this.configs.map((c) => {
       const hasUserInstance = Array.from(this.userClients.keys()).some(
         (k) => k.startsWith(`${c.name}|`),
       );
+      const needsAuth = this.authNeeded.has(c.name);
       return {
         name: c.name,
         config: c,
@@ -202,6 +280,10 @@ class McpManager {
           (td) => this.toolMap.get(td.function.name)?.serverName === c.name,
         ).length,
         ...(this.lastErrors.has(c.name) ? { error: this.lastErrors.get(c.name) } : {}),
+        ...(needsAuth ? { authRequired: true } : {}),
+        ...(needsAuth && this.authNeeded.get(c.name)
+          ? { authUrl: this.authNeeded.get(c.name) }
+          : {}),
       };
     });
   }
@@ -256,12 +338,39 @@ class McpManager {
       client = this.clients.get(mapping.serverName);
     }
 
-    if (!client) throw new Error(`MCP server not connected: ${mapping.serverName}`);
+    if (!client) {
+      if (this.authNeeded.has(mapping.serverName)) {
+        throw new Error(
+          `MCP server "${mapping.serverName}" needs sign-in — reconnect it from Settings → MCP servers`,
+        );
+      }
+      throw new Error(`MCP server not connected: ${mapping.serverName}`);
+    }
 
-    const result = await client.callTool({
-      name: mapping.originalName,
-      arguments: (args as Record<string, unknown>) ?? {},
-    });
+    let result;
+    try {
+      result = await client.callTool({
+        name: mapping.originalName,
+        arguments: (args as Record<string, unknown>) ?? {},
+      });
+    } catch (err) {
+      // Remote servers can expire their HTTP session (or fail one refresh)
+      // mid-flight. A single reconnect retries with fresh tokens/session;
+      // if the grant itself is dead, the restart lands in the sign-in state
+      // and the retry surfaces the "needs sign-in" error above.
+      const msg = err instanceof Error ? err.message : String(err);
+      const recoverable =
+        err instanceof UnauthorizedError || /session|unauthor/i.test(msg);
+      if (!recoverable || this.clients.get(mapping.serverName) !== client) throw err;
+      console.warn(`[mcp] "${mapping.serverName}" reconnecting after: ${msg}`);
+      await this.restartServer(mapping.serverName);
+      const fresh = this.clients.get(mapping.serverName);
+      if (!fresh) throw err;
+      result = await fresh.callTool({
+        name: mapping.originalName,
+        arguments: (args as Record<string, unknown>) ?? {},
+      });
+    }
 
     if (result.isError) {
       const text = this.extractText(result.content);
@@ -333,6 +442,7 @@ class McpManager {
   async stopServer(name: string): Promise<void> {
     await this.closeServer(name);
     this.lastErrors.delete(name);
+    this.authNeeded.delete(name);
     this.configs = this.configs.filter((c) => c.name !== name);
   }
 
@@ -391,6 +501,7 @@ class McpManager {
     this.toolMap.clear();
     this.toolDefs = [];
     this.lastErrors.clear();
+    this.authNeeded.clear();
     this.started = false;
   }
 }
