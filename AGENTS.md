@@ -426,16 +426,45 @@ with the installed build (`chromium-1237` pairs with `0.0.79`). To upgrade
 deliberately: change the pin in Settings → MCP servers, then
 `npx playwright install chromium` as the service user.
 
-**ibkr-flex** (`bin/ibkr-flex-mcp`, static-musl Rust binary): read-only IBKR
-account reporting via the Flex Web Service (`flex_positions`, `flex_trades`,
-`flex_cash`, `flex_run_query`). Third-party (MIT):
-https://github.com/0xmichalis/ibkr-flex-mcp — the binary is **not committed**
-(gitignored, platform-specific); it must be downloaded from upstream releases
-into `bin/`. Started only when both `IBKR_FLEX_TOKEN` and `IBKR_FLEX_QUERY_ID`
-are set in `.env` **and** the binary exists (clear warning otherwise); the Flex
-Query must be configured in Client Portal (Reports → Flex Queries) to emit the
-desired sections. Resolved as `../bin` relative to the server directory —
-deploy.mjs ships `bin/` to `{DEPLOY_DIR}/bin/` when present.
+**ibkr** (remote, `https://api.ibkr.com/v1/api/mcp-public`): Interactive
+Brokers' **official MCP server** (portfolio, positions, cash, margin, P&L,
+market data, watchlists — read + write scopes; the chat LLM cannot place
+orders — `mcp.orders.submit` is deliberately not requested). Replaced the old
+third-party `ibkr-flex` Flex Web Service binary in 2026-10. Config lives in
+`server/data/mcps.json` (`{ name: 'ibkr', url: …, toolPrefix: 'ibkr',
+scopes: ['mcp.read', 'mcp.write'] }`). This is a **remote (streamable-HTTP)
+MCP server with OAuth 2.0** — the first of its kind in this app:
+
+- Transport: the MCP SDK's `StreamableHTTPClientTransport`; a server with
+  `url` set (instead of `command`) uses it. `perUser` is rejected for url
+  servers. One grant per server (not per user): whoever signs in exposes
+  *their* IBKR account to every notebook user the server is enabled for.
+- Auth: RFC 7591 **dynamic client registration** against
+  `https://api.ibkr.com/oauth2/register` (no pre-registered secret needed) +
+  authorization-code flow with PKCE, public client (`token_endpoint_auth_method:
+  none`). Tokens are persisted per server by `FileOAuthProvider`
+  (`server/lib/mcp-oauth.ts`) in `server/data/mcp-oauth/<name>.json` (0600)
+  and refreshed automatically by the SDK on 401.
+- The sign-in is interactive and the server is headless: `startHttpServer`
+  never runs the flow on boot — without stored tokens the server starts in a
+  "sign-in required" state (`authRequired` in `listServers()`). The user
+  clicks **Connect** in Settings → MCP servers: `POST /mcps/:name/authorize`
+  runs discovery + registration + PKCE via the SDK's `auth()` and returns the
+  IBKR-hosted authorization URL; the browser goes there, IBKR redirects to
+  `GET /mcps/:name/oauth/callback` (still `requireFull` — the session cookie
+  rides along), which validates the CSRF `state`, exchanges the code, stores
+  tokens and restarts the server. "Disconnect" revokes via the discovered
+  revocation endpoint and drops the file.
+- The redirect URI is derived per-request from `req.protocol` + host
+  (`/api/notebook/mcps/<name>/oauth/callback`, same pattern as the Google
+  OAuth callback) — IBKR only accepts **HTTPS or loopback** redirect URIs,
+  so the notebook must be reached over https (nginx + `trust proxy` as
+  usual). If the host changes, the stored client registration is dropped and
+  re-registered for the new redirect URI on the next Connect.
+- Resilience: a mid-session expiry (`UnauthorizedError` / session errors on
+  `callTool`) triggers one transparent `restartServer` + retry; if the grant
+  is dead the restart lands in the sign-in state and the chat tool returns a
+  "needs sign-in — reconnect from Settings" error the LLM can relay.
 
 **Google Workspace auth short-circuit**: before any `gw_*` tool call, the chat
 loop calls `validateWorkspaceAuth(email)` (`server/lib/workspace-auth.ts`) for

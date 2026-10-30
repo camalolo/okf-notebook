@@ -14,10 +14,9 @@ interface. Think "NotebookLM, but it's your own folders, and it can edit them."
   search the web, and drive git (status/diff/log/commit). Edits are applied
   to disk immediately and shown as collapsible diff cards.
 - **MCP extensibility** — add any [Model Context Protocol](https://modelcontextprotocol.io)
-  server from Settings (Google Workspace, a headless browser, or third-party
-  servers like [ibkr-flex-mcp](https://github.com/0xmichalis/ibkr-flex-mcp)
-  for read-only Interactive Brokers reports) and toggle them per notebook.
-  No MCP servers ship by default — you add the ones you trust.
+  server from Settings (Google Workspace, a headless browser, remote
+  OAuth-protected endpoints like Interactive Brokers' official MCP) and toggle
+  them per notebook. No MCP servers ship by default — you add the ones you trust.
 - **Daily digest** — an optional scheduled LLM pass over each bundle that
   emails you what matters in the next 24h, with an opt-in "cleanup" phase
   that lint-fixes and reorganizes files to OKF conformance before digesting.
