@@ -389,6 +389,15 @@ an MCP config is an arbitrary command line on the host) start/restart the
 server immediately; a failed start is recorded per-server and surfaced in the
 UI (`running: false` + error) rather than rejected.
 
+**Self-healing (stdio children)**: a child process that dies while running
+(crash, kill, OOM) is evicted by a `Client.onclose` handler in
+`mcp-manager.ts` (logged as `"…" closed — relaunching on next use`), and the
+next `callTool` relaunches it via the normal lazy-start path and retries once
+— for `perUser` servers only the calling user's instance. Child stderr is
+piped through the logger (prefixed `[mcp] "<name>" stderr:`) so crash reasons
+land in the journal. Intentional closes (restart/remove/stop) delete the map
+entry *before* `close()` so the eviction handler stays quiet.
+
 **Per-user MCP instances (`perUser: true`)**: the `google-workspace` server runs
 one child process per workspace-connected user. (The name `google-workspace`
 is the convention — `auth.ts`, `workspace-auth.ts`, and `digest.ts`
