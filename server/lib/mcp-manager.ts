@@ -11,6 +11,12 @@
  *
  * Tools are optionally namespaced with a prefix to avoid collisions between
  * MCP servers and the built-in bundle tools.
+ *
+ * Resilience: a transport that dies under the manager's feet (stdio child
+ * crashed/killed, remote session dropped) is evicted by an `onclose`
+ * handler and relaunched on demand by the next `callTool` — one restart +
+ * retry per failed call. Child stderr is piped through the logger so the
+ * reason for a stdio crash lands in the journal.
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -150,12 +156,29 @@ class McpManager {
       command: config.command,
       args: config.args ?? [],
       ...(env ? { env } : {}),
+      // Pipe the child's stderr through our logger (prefixed) so a crash
+      // shows its reason in the journal instead of a silent exit. The SDK
+      // creates the PassThrough in the constructor, so this is safe to
+      // attach before connect() — no early output is lost.
+      stderr: 'pipe',
+    });
+    let stderrRest = '';
+    transport.stderr?.on('data', (chunk: Buffer) => {
+      stderrRest += chunk.toString();
+      for (let nl = stderrRest.indexOf('\n'); nl !== -1; nl = stderrRest.indexOf('\n')) {
+        const line = stderrRest.slice(0, nl).trimEnd();
+        stderrRest = stderrRest.slice(nl + 1);
+        if (line) console.warn(`[mcp] "${config.name}"${who} stderr: ${line}`);
+      }
+      // Keep un-terminated partial lines bounded.
+      if (stderrRest.length > 8000) stderrRest = stderrRest.slice(-4000);
     });
 
     const client = new Client(
       { name: 'notebook', version: '1.0.0' },
       { capabilities: {} },
     );
+    this.wireLifecycle(config, client, userEmail);
 
     await client.connect(transport);
     if (userEmail) {
@@ -191,6 +214,7 @@ class McpManager {
       { name: 'notebook', version: '1.0.0' },
       { capabilities: {} },
     );
+    this.wireLifecycle(config, client);
 
     try {
       await client.connect(transport);
@@ -207,6 +231,31 @@ class McpManager {
     this.authNeeded.delete(config.name);
     this.clients.set(config.name, client);
     await this.registerTools(config, client);
+  }
+
+  /**
+   * Evict a client from its map when its transport closes (stdio child
+   * exited, HTTP connection dropped) so `callTool`'s lazy start relaunches
+   * the instance on demand instead of failing on a stale "Not connected"
+   * client, and so `listServers()` reports it as not running. Deliberate
+   * closes are no-ops here: closeServer/restartUserServer delete the map
+   * entry *before* closing, so the identity check fails.
+   */
+  private wireLifecycle(config: McpServerConfig, client: Client, userEmail?: string): void {
+    const key = userEmail ? `${config.name}|${userEmail}` : config.name;
+    const who = userEmail ? ` (${userEmail})` : '';
+    client.onerror = (err) => {
+      console.warn(
+        `[mcp] "${config.name}"${who} transport error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    };
+    client.onclose = () => {
+      const map: Map<string, Client> = userEmail ? this.userClients : this.clients;
+      if (map.get(key) === client) {
+        map.delete(key);
+        console.warn(`[mcp] "${config.name}"${who} closed — relaunching on next use`);
+      }
+    };
   }
 
   /** Discover a connected server's tools and expose them (namespaced). */
@@ -354,22 +403,52 @@ class McpManager {
         arguments: (args as Record<string, unknown>) ?? {},
       });
     } catch (err) {
-      // Remote servers can expire their HTTP session (or fail one refresh)
-      // mid-flight. A single reconnect retries with fresh tokens/session;
-      // if the grant itself is dead, the restart lands in the sign-in state
-      // and the retry surfaces the "needs sign-in" error above.
+      // Two failure shapes are recovered transparently (one restart + retry):
+      // - Remote (url) servers expiring their HTTP session or failing one
+      //   token refresh mid-flight — restartServer() reconnects with fresh
+      //   tokens; if the grant itself is dead, the restart lands in the
+      //   sign-in state and the retry surfaces the "needs sign-in" error.
+      // - A stdio child process that died since it was started — the SDK
+      //   throws "Not connected" once its transport is gone. The dead client
+      //   is evicted (the onclose handler normally did already) and the
+      //   instance is relaunched; for perUser servers only the calling
+      //   user's instance, via the same lazy-start path as the first call.
       const msg = err instanceof Error ? err.message : String(err);
       const recoverable =
-        err instanceof UnauthorizedError || /session|unauthor/i.test(msg);
-      if (!recoverable || this.clients.get(mapping.serverName) !== client) throw err;
-      console.warn(`[mcp] "${mapping.serverName}" reconnecting after: ${msg}`);
-      await this.restartServer(mapping.serverName);
-      const fresh = this.clients.get(mapping.serverName);
-      if (!fresh) throw err;
-      result = await fresh.callTool({
-        name: mapping.originalName,
-        arguments: (args as Record<string, unknown>) ?? {},
-      });
+        err instanceof UnauthorizedError || /session|unauthor|not connected/i.test(msg);
+      if (!recoverable) throw err;
+      if (!config) throw err;
+
+      const userKey = `${mapping.serverName}|${opts?.userEmail}`;
+      if (config.perUser && opts?.userEmail) {
+        if (this.userClients.get(userKey) === client) {
+          // Dead per-user instance — evict and relaunch it.
+          this.userClients.delete(userKey);
+          if (!(await hasWorkspaceTokens(opts.userEmail))) throw err;
+          console.warn(
+            `[mcp] "${mapping.serverName}" (${opts.userEmail}) relaunching after: ${msg}`,
+          );
+          await this.startUserServer(mapping.serverName, opts.userEmail);
+        }
+        // Retry against whatever instance is current now (ours or one a
+        // concurrent request already relaunched).
+        const fresh = this.userClients.get(userKey);
+        if (!fresh) throw err;
+        result = await fresh.callTool({
+          name: mapping.originalName,
+          arguments: (args as Record<string, unknown>) ?? {},
+        });
+      } else {
+        if (this.clients.get(mapping.serverName) !== client) throw err;
+        console.warn(`[mcp] "${mapping.serverName}" reconnecting after: ${msg}`);
+        await this.restartServer(mapping.serverName);
+        const fresh = this.clients.get(mapping.serverName);
+        if (!fresh) throw err;
+        result = await fresh.callTool({
+          name: mapping.originalName,
+          arguments: (args as Record<string, unknown>) ?? {},
+        });
+      }
     }
 
     if (result.isError) {
@@ -401,13 +480,15 @@ class McpManager {
   private async closeServer(name: string): Promise<void> {
     const oldClient = this.clients.get(name);
     if (oldClient) {
-      await oldClient.close().catch(() => {});
+      // Delete before close so wireLifecycle's onclose eviction is a no-op.
       this.clients.delete(name);
+      await oldClient.close().catch(() => {});
     }
     for (const key of Array.from(this.userClients.keys())) {
       if (key.startsWith(`${name}|`)) {
-        await this.userClients.get(key)!.close().catch(() => {});
+        const c = this.userClients.get(key)!;
         this.userClients.delete(key);
+        await c.close().catch(() => {});
       }
     }
     this.forgetServerTools(name);
@@ -469,8 +550,9 @@ class McpManager {
     const key = `${name}|${email}`;
     const oldClient = this.userClients.get(key);
     if (oldClient) {
-      await oldClient.close().catch(() => {});
+      // Delete before close so wireLifecycle's onclose eviction is a no-op.
       this.userClients.delete(key);
+      await oldClient.close().catch(() => {});
     }
     await this.startServer(config, email);
   }
@@ -491,13 +573,12 @@ class McpManager {
 
   /** Gracefully shut down all MCP child processes. */
   async stop(): Promise<void> {
-    await Promise.allSettled(
-      [...Array.from(this.clients.values()), ...Array.from(this.userClients.values())].map((c) =>
-        c.close(),
-      ),
-    );
+    // Clear the maps first so wireLifecycle's onclose eviction stays quiet —
+    // these closes are intentional, not crashes.
+    const all = [...Array.from(this.clients.values()), ...Array.from(this.userClients.values())];
     this.clients.clear();
     this.userClients.clear();
+    await Promise.allSettled(all.map((c) => c.close()));
     this.toolMap.clear();
     this.toolDefs = [];
     this.lastErrors.clear();
