@@ -1807,7 +1807,7 @@ select.form-input {
   color: var(--text-tertiary);
   white-space: nowrap;
   letter-spacing: 0.02em;
-  transition: color 0.2s;
+  transition: color 0.2s, opacity 0.2s;
 }
 .chat-ctx-badge.ctx-mid,
 .chat-compact-btn.ctx-mid .chat-compact-ctx {
@@ -1816,6 +1816,12 @@ select.form-input {
 .chat-ctx-badge.ctx-high,
 .chat-compact-btn.ctx-high .chat-compact-ctx {
   color: var(--danger);
+}
+/* Exact value predating the running turn: kept visible (instead of dropping
+   to the estimate) until the turn's first usage event replaces it. */
+.chat-ctx-badge.ctx-stale,
+.chat-compact-btn.ctx-stale .chat-compact-ctx {
+  opacity: 0.55;
 }
 
 .chat-compact-btn {
@@ -1841,7 +1847,7 @@ select.form-input {
   font-weight: 600;
   font-size: 0.7rem;
   color: var(--text-tertiary);
-  transition: color 0.2s;
+  transition: color 0.2s, opacity 0.2s;
 }
 
 .chat-compaction-divider {

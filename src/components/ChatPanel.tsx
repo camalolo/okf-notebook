@@ -510,12 +510,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
   /**
    * Exact context size reported by the API (final-chunk usage of the last
-   * LLM call) — replaces the estimate while streaming, since the estimate
-   * over-counts tool results that are not resent to the model. Falls back
-   * to the estimate before the first usage event of a turn.
+   * LLM call). `stale` marks a value that predates the running turn (its
+   * history has since grown): the badge keeps showing the stale number —
+   * dimmed, via `ctx-stale` — instead of dropping to the smaller estimate
+   * until this turn's first usage event replaces it.
    */
-  const [exactPromptTokens, setExactPromptTokens] = useState<number | null>(null);
-  const ctxTokens = exactPromptTokens ?? estimatedCtxTokens;
+  const [exactCtx, setExactCtx] = useState<{ tokens: number; stale: boolean } | null>(null);
+  const ctxTokens = exactCtx ? exactCtx.tokens : estimatedCtxTokens;
+  const ctxExactStale = exactCtx?.stale ?? false;
 
   /** The active model's context window — colours the indicator. Sourced
    *  from Settings on mount and from each usage event afterwards. */
@@ -660,9 +662,9 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     setResumable(restored.lastTurnInterrupted);
     // Exact context of the last completed round — persisted server-side, so
     // a reloaded chat keeps the real number instead of the estimate.
-    setExactPromptTokens(
+    setExactCtx(
       typeof session.lastUsage?.promptTokens === 'number'
-        ? session.lastUsage.promptTokens
+        ? { tokens: session.lastUsage.promptTokens, stale: false }
         : null,
     );
   }, []);
@@ -683,7 +685,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     setTurnEvents(restored.liveTurnEvents);
     setResumable(restored.lastTurnInterrupted);
     if (typeof session.lastUsage?.promptTokens === 'number') {
-      setExactPromptTokens(session.lastUsage.promptTokens);
+      setExactCtx({ tokens: session.lastUsage.promptTokens, stale: false });
     }
   }, []);
 
@@ -875,7 +877,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       // prompt size is the true context of the last LLM call.
       const obj = data as { promptTokens?: unknown; contextLimit?: unknown };
       if (typeof obj.promptTokens === 'number') {
-        setExactPromptTokens(obj.promptTokens);
+        setExactCtx({ tokens: obj.promptTokens, stale: false });
       }
       if (typeof obj.contextLimit === 'number' && obj.contextLimit > 0) {
         setCtxLimit(obj.contextLimit);
@@ -1023,9 +1025,11 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   }) => {
     const controller = new AbortController();
     abortRef.current = controller;
-    // New turn: the exact-context override from the previous turn no longer
-    // applies (history grew) until the first usage event of this turn.
-    setExactPromptTokens(null);
+    // New turn: the exact-context value from the previous turn predates this
+    // turn's (larger) history — keep showing it, dimmed, until the first
+    // usage event of this turn replaces it, rather than dropping to the
+    // smaller estimate.
+    setExactCtx((prev) => (prev ? { ...prev, stale: true } : prev));
     const { resume = false, isComplete } = opts;
 
     // Local tracking for this turn (mirrors the setTurnEvents/setProposedChanges
@@ -1397,6 +1401,10 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
       setPastTurns((prev) => [...prev, []]); // empty turn events for the summary
       setCompactionIndex(newIndex);
       compactionIndexRef.current = newIndex;
+      // The exact-context value predates the compaction (history shrank to
+      // the summary) — drop it so the indicator falls back to the smaller,
+      // roughly-right estimate until the next turn's first usage event.
+      setExactCtx(null);
 
       // The same query refreshed the title via the set_title tool — just
       // apply it (the server already persisted it).
@@ -1761,11 +1769,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           {messages.length > 0 && !loading ? (
             <button
               type="button"
-              className={`chat-compact-btn ctx-${formatCtxTokens(ctxTokens, ctxLimit).level}`}
+              className={`chat-compact-btn ctx-${formatCtxTokens(ctxTokens, ctxLimit).level}${ctxExactStale ? ' ctx-stale' : ''}`}
               onClick={() => void handleCompact()}
               title={
-                exactPromptTokens !== null
-                  ? `Summarise conversation to free up context (${ctxTokens.toLocaleString()} tokens active — exact, last LLM call)`
+                exactCtx !== null
+                  ? ctxExactStale
+                    ? `Summarise conversation to free up context (${ctxTokens.toLocaleString()} tokens — last turn's exact, refreshing…)`
+                    : `Summarise conversation to free up context (${ctxTokens.toLocaleString()} tokens active — exact, last LLM call)`
                   : `Summarise conversation to free up context (≈${ctxTokens.toLocaleString()} tokens active)`
               }
             >
@@ -1778,8 +1788,14 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
             const { label, level } = formatCtxTokens(ctxTokens, ctxLimit);
             return (
               <span
-                className={`chat-ctx-badge ctx-${level}`}
-                title={`≈${ctxTokens.toLocaleString()} tokens of conversation context`}
+                className={`chat-ctx-badge ctx-${level}${ctxExactStale ? ' ctx-stale' : ''}`}
+                title={
+                  exactCtx !== null
+                    ? ctxExactStale
+                      ? `${ctxTokens.toLocaleString()} tokens — last turn's exact, updating…`
+                      : `${ctxTokens.toLocaleString()} tokens of conversation context (exact, last LLM call)`
+                    : `≈${ctxTokens.toLocaleString()} tokens of conversation context`
+                }
               >
                 {label}
               </span>
