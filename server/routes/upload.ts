@@ -3,9 +3,13 @@
  * for dedup, extracts its content to markdown, and writes the result to
  * `{bundlePath}/uploads/{slug}.md`.
  *
+ * Image uploads prefer LLM vision transcription when the configured model is
+ * multimodal (`modelSupportsImageInput()`); otherwise tesseract.js OCR runs.
+ *
  * The extracted markdown includes YAML frontmatter with provenance metadata
- * (source name, SHA-256 hash, type, upload date, page/char count). Dedup
- * is done by scanning existing `uploads/*.md` frontmatter for a matching hash.
+ * (source name, SHA-256 hash, type, upload date, page/char count, extraction
+ * method). Dedup is done by scanning existing `uploads/*.md` frontmatter for
+ * a matching hash.
  */
 import { Router } from 'express';
 import crypto from 'node:crypto';
@@ -16,8 +20,9 @@ import matter from 'gray-matter';
 import { getBundle } from '../bundles.js';
 import { resolveBundlePath } from '../bundles.js';
 import { requireFull } from '../auth.js';
-import { extractDocument } from '../lib/doc-extract.js';
-import { chatCompletion } from '../lib/llm.js';
+import { extractDocument, type VisionOCR } from '../lib/doc-extract.js';
+import { chatCompletion, modelSupportsImageInput } from '../lib/llm.js';
+import { visionExtractText } from '../lib/vision-ocr.js';
 import { chatLogger, newTraceId, type ChatLogger } from '../lib/logger.js';
 
 const UPLOAD_DIR = 'uploads';
@@ -190,6 +195,22 @@ export interface UploadResult {
 }
 
 /**
+ * Build the vision extractor for image uploads when the configured model is
+ * multimodal (advertises image input on /models). Returns undefined when the
+ * model can't see images or the models list is unavailable — callers then use
+ * plain tesseract OCR. Never throws.
+ */
+export async function makeVisionOcr(log?: ChatLogger): Promise<VisionOCR | undefined> {
+  try {
+    if (!(await modelSupportsImageInput())) return undefined;
+    log?.debug('Upload: model supports image input — using LLM vision for image extraction');
+    return (buffer, mime) => visionExtractText(buffer, mime, { log });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Core upload processing: hash → dedup → extract → LLM content naming → write.
  * Exported for testing (bypasses the HTTP layer).
  */
@@ -200,6 +221,8 @@ export async function processUpload(
   log?: ChatLogger,
   /** Inherit the bundle's thinking setting for the LLM naming pass. */
   thinking?: 'off',
+  /** Vision extractor for image uploads (built by {@link makeVisionOcr}). */
+  visionOCR?: VisionOCR,
 ): Promise<UploadResult> {
   const hash = sha256(buffer);
 
@@ -217,8 +240,8 @@ export async function processUpload(
     };
   }
 
-  // Extract content.
-  const extracted = await extractDocument(buffer, filename);
+  // Extract content (images prefer the vision extractor when provided).
+  const extracted = await extractDocument(buffer, filename, { visionOCR });
 
   // Ensure uploads directory exists.
   await fs.mkdir(uploadsDir, { recursive: true });
@@ -239,6 +262,9 @@ export async function processUpload(
   };
   if (extracted.meta.pages !== undefined) {
     frontmatter.pages = extracted.meta.pages;
+  }
+  if (extracted.meta.ocr) {
+    frontmatter.ocr = extracted.meta.ocr;
   }
   if (extracted.meta.unsupported) {
     frontmatter.unsupported = true;
@@ -277,6 +303,7 @@ router.post('/:bundleId/upload', requireFull, upload.single('file'), async (req,
     // Multer decodes filenames as latin1; re-encode to UTF-8 so CJK/Unicode
     // filenames are preserved.
     const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+    const visionOCR = await makeVisionOcr(log);
     const result = await processUpload(
       req.file.buffer,
       originalName,
@@ -284,6 +311,7 @@ router.post('/:bundleId/upload', requireFull, upload.single('file'), async (req,
       log,
       // Inherit the bundle's thinking setting for the naming pass.
       bundle.thinking === 'on' ? undefined : 'off',
+      visionOCR,
     );
 
     res.status(result.duplicate ? 200 : 201).json(result);

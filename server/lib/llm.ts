@@ -91,9 +91,20 @@ export interface ToolCall {
   };
 }
 
+/** Multimodal content part (OpenAI chat-completions shape). */
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  /** `url` may be a `data:` URL (base64 inline image). */
+  | { type: 'image_url'; image_url: { url: string } }
+  /** Document input (e.g. native PDF on endpoints that advertise `pdf`). */
+  | { type: 'file'; file: { file_data: string; filename?: string } };
+
+/** Message content: plain text for most roles, parts for multimodal user messages. */
+export type ChatContent = string | ChatContentPart[];
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: ChatContent;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
 }
@@ -122,6 +133,13 @@ interface ModelEntry {
   /** OpenRouter-style context window (tokens) — absent on Z.ai/OpenAI. */
   context_length?: number;
   contextLength?: number;
+  /**
+   * Input modalities advertised by the endpoint (OpenRouter/inference-proxy
+   * style): e.g. ["text", "image"] or ["text", "image", "pdf"]. Some servers
+   * use MIME types instead (["text", "image/jpeg"]) under `modalities.input`.
+   */
+  input_modalities?: string[];
+  modalities?: { input?: string[]; output?: string[] };
 }
 
 interface ModelsResponse {
@@ -182,6 +200,56 @@ export function discoveredContextLimit(model: string): number | undefined {
   const entry = modelsMeta.get(model);
   const limit = entry?.context_length ?? entry?.contextLength;
   return typeof limit === 'number' && limit > 0 ? limit : undefined;
+}
+
+// --- Model capabilities ------------------------------------------------------
+
+/**
+ * Input modalities for a model id, as advertised by the /models endpoint
+ * (synchronous — reads the cache populated by {@link listModels}; the settings
+ * route always calls listModels first, so the cache is fresh there).
+ * Empty array when unknown (endpoint doesn't advertise modalities).
+ */
+export function modelInputModalitiesSync(model: string): string[] {
+  const entry = modelsMeta.get(model);
+  const mods = entry?.input_modalities ?? entry?.modalities?.input ?? [];
+  return Array.isArray(mods) ? mods : [];
+}
+
+/** True when the model id accepts image input per the /models advertisement. */
+export function modelHasImageInput(model: string): boolean {
+  return modelInputModalitiesSync(model).some((m) => m === 'image' || m.startsWith('image/'));
+}
+
+/** True when the model id accepts native PDF input per /models. */
+export function modelHasPdfInput(model: string): boolean {
+  return modelInputModalitiesSync(model).some((m) => m === 'pdf' || m === 'application/pdf');
+}
+
+/**
+ * Async capability check for "the model we're about to call": resolves the
+ * configured model (when not given), refreshes the models list if the cache
+ * is cold, and reports whether it accepts image input. Never throws — an
+ * unreachable endpoint simply reports `false` (callers fall back to
+ * non-vision processing, e.g. tesseract OCR).
+ */
+export async function modelSupportsImageInput(model?: string): Promise<boolean> {
+  let id = model;
+  if (!id) {
+    try {
+      ({ model: id } = await getSettings());
+    } catch {
+      return false;
+    }
+  }
+  if (!modelInputModalitiesSync(id).length) {
+    try {
+      await listModels(); // populates modelsMeta (5-min cache; free request)
+    } catch {
+      return false;
+    }
+  }
+  return modelHasImageInput(id);
 }
 
 // --- Chat completion --------------------------------------------------------

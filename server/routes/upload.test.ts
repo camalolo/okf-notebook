@@ -16,11 +16,13 @@ vi.mock('tesseract.js', () => ({
 // Mock the LLM client — upload naming must be deterministic in tests (the
 // real inference server runs on this host at 127.0.0.1:3003).
 const llmChatCompletion = vi.fn();
+const modelSupportsImageInputMock = vi.fn();
 vi.mock('../lib/llm.js', () => ({
   chatCompletion: (...args: unknown[]) => llmChatCompletion(...args),
+  modelSupportsImageInput: (...args: unknown[]) => modelSupportsImageInputMock(...args),
 }));
 
-import { sha256, slugifyFilename, findDuplicate, processUpload, sanitizeSlug } from './upload.js';
+import { sha256, slugifyFilename, findDuplicate, processUpload, makeVisionOcr, sanitizeSlug } from './upload.js';
 
 let tmpDir: string;
 
@@ -30,8 +32,10 @@ async function makeTmpDir(): Promise<string> {
 
 beforeEach(async () => {
   tmpDir = await makeTmpDir();
-  // Default: LLM unavailable → processUpload falls back to original filename.
+  // Default: LLM unavailable → processUpload falls back to original filename,
+  // and no model advertises vision → image uploads use tesseract OCR.
   llmChatCompletion.mockReset().mockRejectedValue(new Error('LLM unavailable in tests'));
+  modelSupportsImageInputMock.mockReset().mockResolvedValue(false);
 });
 
 afterEach(async () => {
@@ -215,7 +219,50 @@ describe('processUpload', () => {
     const written = await fs.readFile(path.join(uploadsDir, 'image.md'), 'utf8');
     const parsed = matter(written);
     expect(parsed.data.source_type).toBe('png');
+    expect(parsed.data.ocr).toBe('tesseract');
     expect(parsed.content.trim()).toBe('MOCK OCR TEXT');
+  });
+
+  it('prefers the vision extractor for images when provided', async () => {
+    const uploadsDir = path.join(tmpDir, 'uploads');
+    const binaryData = Buffer.alloc(256, 0xcd);
+    const visionText = '預約估價單\n| 項目 | 金額 |\n|---|---:|\n| 機油濾清器 | 240 |';
+
+    const result = await processUpload(binaryData, 'scan.jpg', uploadsDir, undefined, 'off', async () => visionText);
+
+    expect(result.chars).toBe(visionText.length);
+    const written = await fs.readFile(path.join(uploadsDir, 'scan.md'), 'utf8');
+    const parsed = matter(written);
+    expect(parsed.data.ocr).toBe('vision');
+    expect(parsed.content.trim()).toBe(visionText);
+  });
+
+  it('falls back to tesseract when the vision extractor returns null', async () => {
+    const uploadsDir = path.join(tmpDir, 'uploads');
+    const binaryData = Buffer.alloc(256, 0xef);
+
+    const result = await processUpload(binaryData, 'scan.png', uploadsDir, undefined, 'off', async () => null);
+
+    expect(result.chars).toBe('MOCK OCR TEXT'.length);
+    const written = await fs.readFile(path.join(uploadsDir, 'scan.md'), 'utf8');
+    const parsed = matter(written);
+    expect(parsed.data.ocr).toBe('tesseract');
+    expect(parsed.content.trim()).toBe('MOCK OCR TEXT');
+  });
+
+  it('makeVisionOcr returns undefined when the model has no image input', async () => {
+    modelSupportsImageInputMock.mockResolvedValue(false);
+    expect(await makeVisionOcr()).toBeUndefined();
+    expect(modelSupportsImageInputMock).toHaveBeenCalled();
+  });
+
+  it('makeVisionOcr returns an extractor when the model supports images', async () => {
+    modelSupportsImageInputMock.mockResolvedValue(true);
+    const ocr = await makeVisionOcr();
+    expect(typeof ocr).toBe('function');
+    // The extractor delegates to visionExtractText → chatCompletion (mocked to
+    // reject) and must convert that failure into null, not throw.
+    expect(await ocr!(Buffer.from('x'), 'image/png')).toBeNull();
   });
 
   it('preserves CSV data as a markdown table', async () => {

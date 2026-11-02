@@ -1240,7 +1240,9 @@ router.post('/:bundleId/chat', async (req, res, next) => {
     // (persisting again would duplicate it).
     if (!resume) {
       const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
-      if (lastUserMsg) {
+      // Multimodal (parts) user content is not produced by this route today;
+      // persistence stores plain text only.
+      if (lastUserMsg && typeof lastUserMsg.content === 'string') {
         persist({ kind: 'user', content: lastUserMsg.content });
       }
     }

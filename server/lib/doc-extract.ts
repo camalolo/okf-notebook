@@ -13,6 +13,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
+import { imageMimeFromExt } from './vision-ocr.js';
 
 export interface ExtractionResult {
   /** Extracted markdown text (empty string for unsupported types). */
@@ -26,7 +27,24 @@ export interface ExtractionResult {
     chars: number;
     /** True when no text could be extracted (binary/unknown type). */
     unsupported?: boolean;
+    /**
+     * How image text was extracted, when known: 'vision' (multimodal LLM
+     * transcription — higher quality) or 'tesseract' (local WASM OCR).
+     */
+    ocr?: 'vision' | 'tesseract';
   };
+}
+
+/**
+ * Optional vision extractor injected by the upload route: given image bytes
+ * and their MIME type, returns an LLM transcription, or null when vision is
+ * unavailable/failed (caller falls back to tesseract OCR).
+ */
+export type VisionOCR = (buffer: Buffer, mime: string) => Promise<string | null>;
+
+export interface ExtractOptions {
+  /** Vision extractor to prefer for images (see {@link VisionOCR}). */
+  visionOCR?: VisionOCR;
 }
 
 /** Detect the source file type from filename extension. */
@@ -38,6 +56,7 @@ export function detectType(filename: string): string {
 export async function extractDocument(
   buffer: Buffer,
   filename: string,
+  opts?: ExtractOptions,
 ): Promise<ExtractionResult> {
   const ext = path.extname(filename).toLowerCase();
 
@@ -56,7 +75,7 @@ export async function extractDocument(
 
     case '.mhtml':
     case '.mht':
-      return extractMhtml(buffer);
+      return extractMhtml(buffer, opts?.visionOCR);
 
     case '.json':
       return extractJson(buffer);
@@ -79,7 +98,7 @@ export async function extractDocument(
     case '.gif':
     case '.bmp':
     case '.webp':
-      return extractImage(buffer, ext.slice(1));
+      return extractImage(buffer, ext.slice(1), opts?.visionOCR);
 
     default:
       return {
@@ -220,12 +239,30 @@ function stripTags(s: string): string {
 }
 
 /**
- * OCR extraction for images using tesseract.js (lazy-loaded WASM).
- * Loads English + Simplified Chinese + Traditional Chinese language data.
- * First call downloads the trained data (~30MB total) — cached afterward.
- * Falls back to a metadata stub if OCR finds no text or fails.
+ * Text extraction for images. When a vision extractor is available (the
+ * configured model is multimodal) it is preferred — LLM transcription is far
+ * better than tesseract on real-world scans (CJK, tables, photos) — with
+ * tesseract.js as the local fallback (lazy-loaded WASM; loads English +
+ * Simplified + Traditional Chinese data, ~30MB cached on first call).
+ * Falls back to a metadata stub if both find no text or fail.
  */
-async function extractImage(buffer: Buffer, type: string): Promise<ExtractionResult> {
+async function extractImage(
+  buffer: Buffer,
+  type: string,
+  visionOCR?: VisionOCR,
+): Promise<ExtractionResult> {
+  const mime = imageMimeFromExt(type);
+  if (visionOCR && mime) {
+    try {
+      const text = (await visionOCR(buffer, mime))?.trim() ?? '';
+      if (text) {
+        return { text, type, meta: { chars: text.length, ocr: 'vision' } };
+      }
+      // Empty transcription → fall through to tesseract.
+    } catch {
+      // Vision failed → fall through to tesseract.
+    }
+  }
   try {
     const { createWorker } = await import('tesseract.js');
     const worker = await createWorker(['eng', 'chi_sim', 'chi_tra']);
@@ -235,7 +272,7 @@ async function extractImage(buffer: Buffer, type: string): Promise<ExtractionRes
     return {
       text,
       type,
-      meta: { chars: text.length, unsupported: text.length === 0 },
+      meta: { chars: text.length, unsupported: text.length === 0, ocr: 'tesseract' },
     };
   } catch {
     // OCR failed (e.g. WASM unavailable, corrupt image) — return stub.
@@ -503,7 +540,7 @@ const MHTML_MIN_IMAGE_BYTES = 4096;
  * preceded by the snapshot URL, and unique embedded images (deduped by content
  * hash, tiny icons skipped) are OCR'd and appended as labelled sections.
  */
-async function extractMhtml(buffer: Buffer): Promise<ExtractionResult> {
+async function extractMhtml(buffer: Buffer, visionOCR?: VisionOCR): Promise<ExtractionResult> {
   const raw = buffer.toString('latin1');
   const split = /(?:\r?\n){2}/.exec(raw);
   const topHeaders = parseHeaders(split ? raw.slice(0, split.index) : raw);
@@ -540,7 +577,7 @@ async function extractMhtml(buffer: Buffer): Promise<ExtractionResult> {
   const snapshotUrl = topHeaders.get('snapshot-content-location');
   if (snapshotUrl) markdown = `Source: ${snapshotUrl}\n\n${markdown}`;
 
-  const ocrSection = await ocrMhtmlImages(parts);
+  const ocrSection = await ocrMhtmlImages(parts, visionOCR);
   if (ocrSection) markdown += `\n\n${ocrSection}`;
 
   return { text: markdown.trim(), type: 'mhtml', meta: { chars: markdown.length } };
@@ -566,11 +603,13 @@ function imagePartLabel(part: MimePart, index: number): string {
 }
 
 /**
- * OCR unique embedded image parts with a single shared tesseract worker.
- * Skips duplicates (same content hash) and tiny icons; per-image failures are
- * skipped silently. Returns a markdown section, or '' when nothing usable.
+ * Extract text from unique embedded image parts. Uses the injected vision
+ * extractor when available (one LLM call per image), otherwise a single
+ * shared tesseract worker. Skips duplicates (same content hash) and tiny
+ * icons; per-image failures are skipped silently. Returns a markdown
+ * section, or '' when nothing usable.
  */
-async function ocrMhtmlImages(parts: MimePart[]): Promise<string> {
+async function ocrMhtmlImages(parts: MimePart[], visionOCR?: VisionOCR): Promise<string> {
   const seen = new Set<string>();
   const candidates: { part: MimePart; label: string }[] = [];
   for (const part of parts) {
@@ -585,6 +624,20 @@ async function ocrMhtmlImages(parts: MimePart[]): Promise<string> {
   if (candidates.length === 0) return '';
 
   const lines: string[] = ['## Embedded images (OCR)', ''];
+
+  if (visionOCR) {
+    for (const { part, label } of candidates) {
+      try {
+        const text = (await visionOCR(part.body, part.contentType))?.trim() ?? '';
+        if (text.length < 2) continue; // Blank / decorative image.
+        lines.push(`### ${label}`, '', text, '');
+      } catch {
+        // Vision failed for this image — skip it.
+      }
+    }
+    return lines.length > 2 ? lines.join('\n').trimEnd() : '';
+  }
+
   let worker: { recognize: (b: Buffer) => Promise<{ data: { text: string } }>; terminate: () => Promise<unknown> };
   try {
     const { createWorker } = await import('tesseract.js');
