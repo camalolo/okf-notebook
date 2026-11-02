@@ -238,6 +238,8 @@ export interface AppSettingsInfo {
   defaultModel: string;
   /** Official model ids from the API, or null when the list is unavailable. */
   models: string[] | null;
+  /** Model ids that accept image input (📷 badge; LLM-vision uploads). */
+  visionModels?: string[];
   /** The active model's context window (tokens) — indicator colouring. */
   contextLimit: number;
 }

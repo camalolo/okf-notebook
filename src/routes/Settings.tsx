@@ -682,7 +682,9 @@ export function Settings({ user }: SettingsProps) {
         <h2 className="settings-section-title">AI model</h2>
         <p className="settings-section-hint">
           The model used for every LLM feature across all bundles — chats, digests, uploads. The list
-          comes straight from the API; changes apply to new requests immediately.
+          comes straight from the API; changes apply to new requests immediately. 📷 marks models
+          that accept images — they transcribe image uploads directly (much better OCR) instead of
+          falling back to local tesseract.
         </p>
         <div className="form-row">
           <label className="form-field">
@@ -702,6 +704,7 @@ export function Settings({ user }: SettingsProps) {
                   .map((m) => (
                     <option key={m} value={m}>
                       {m}
+                      {settingsInfo?.visionModels?.includes(m) ? ' 📷' : ''}
                       {m === settingsInfo?.defaultModel ? ' (default)' : ''}
                     </option>
                   ))

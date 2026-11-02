@@ -16,6 +16,9 @@ vi.mock('../lib/llm.js', () => ({
   // Real implementation is env-dependent and trivial; mirror it.
   contextLimitFor: (model: string) =>
     /^glm-/.test(model) ? 1_000_000 : 128_000,
+  // Vision metadata comes from the proxy's /models advertisement; in tests
+  // nothing advertises image input.
+  modelHasImageInput: () => false,
 }));
 
 const { getSettings, saveSettings, resetSettingsCache, DEFAULT_MODEL } = await import('../settings.js');
@@ -86,6 +89,8 @@ describe('GET / settings route', () => {
     expect(body.models).toEqual(['glm-5.2', 'glm-5.3', 'glm-5-turbo']);
     // Derived from the model family (mock mirrors the real derivation).
     expect(body.contextLimit).toBe(1_000_000);
+    // No model advertises image input in the stub → empty vision list.
+    expect(body.visionModels).toEqual([]);
   });
 
   it('reports models: null when the proxy list is unavailable', async () => {

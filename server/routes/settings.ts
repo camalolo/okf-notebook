@@ -8,7 +8,7 @@
 import { Router } from 'express';
 import { requireFull } from '../auth.js';
 import { getSettings, saveSettings, DEFAULT_MODEL } from '../settings.js';
-import { listModels, contextLimitFor } from '../lib/llm.js';
+import { listModels, contextLimitFor, modelHasImageInput } from '../lib/llm.js';
 
 export const settingsRouter: Router = Router();
 
@@ -22,6 +22,8 @@ settingsRouter.get('/', async (_req, res, next) => {
       model: settings.model,
       defaultModel: DEFAULT_MODEL,
       models,
+      // Ids the endpoint advertises image input for (📷 badge in the UI).
+      visionModels: (models ?? []).filter(modelHasImageInput),
       contextLimit: contextLimitFor(settings.model),
     });
   } catch (err) {
@@ -54,7 +56,7 @@ settingsRouter.put('/', requireFull, async (req, res, next) => {
     }
 
     const settings = await saveSettings({ model });
-    res.json({ model: settings.model, defaultModel: DEFAULT_MODEL, models });
+    res.json({ model: settings.model, defaultModel: DEFAULT_MODEL, models, visionModels: models.filter(modelHasImageInput) });
   } catch (err) {
     next(err);
   }
