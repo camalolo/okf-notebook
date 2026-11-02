@@ -231,10 +231,17 @@ describe('processUpload', () => {
     const result = await processUpload(binaryData, 'scan.jpg', uploadsDir, undefined, 'off', async () => visionText);
 
     expect(result.chars).toBe(visionText.length);
+    expect(result.ocr).toBe('vision');
     const written = await fs.readFile(path.join(uploadsDir, 'scan.md'), 'utf8');
     const parsed = matter(written);
     expect(parsed.data.ocr).toBe('vision');
     expect(parsed.content.trim()).toBe(visionText);
+
+    // Re-uploading the same image hits the duplicate guard and reports the
+    // stored extraction method (the UI surfaces it: "already in the bundle").
+    const dup = await processUpload(binaryData, 'scan.jpg', uploadsDir, undefined, 'off', async () => visionText);
+    expect(dup.duplicate).toBe(true);
+    expect(dup.ocr).toBe('vision');
   });
 
   it('falls back to tesseract when the vision extractor returns null', async () => {

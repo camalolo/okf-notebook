@@ -66,7 +66,7 @@ export function slugifyFilename(filename: string): string {
 export async function findDuplicate(
   uploadsDir: string,
   hash: string,
-): Promise<{ filename: string; source: string; chars: number; pages?: number } | null> {
+): Promise<{ filename: string; source: string; chars: number; pages?: number; ocr?: 'vision' | 'tesseract' } | null> {
   const fullHash = `sha256:${hash}`;
   let files: string[];
   try {
@@ -81,11 +81,13 @@ export async function findDuplicate(
       const raw = await fs.readFile(path.join(uploadsDir, file), 'utf8');
       const parsed = matter(raw);
       if (parsed.data.hash === fullHash) {
+        const ocr = parsed.data.ocr;
         return {
           filename: file,
           source: String(parsed.data.source ?? file),
           chars: Number(parsed.data.chars ?? 0),
           pages: typeof parsed.data.pages === 'number' ? parsed.data.pages : undefined,
+          ocr: ocr === 'vision' || ocr === 'tesseract' ? ocr : undefined,
         };
       }
     } catch {
@@ -192,6 +194,8 @@ export interface UploadResult {
   hash: string;
   chars: number;
   pages?: number;
+  /** How image text was extracted ('vision' | 'tesseract') — absent for non-images. */
+  ocr?: 'vision' | 'tesseract';
 }
 
 /**
@@ -237,6 +241,7 @@ export async function processUpload(
       hash,
       chars: existing.chars,
       pages: existing.pages,
+      ocr: existing.ocr,
     };
   }
 
@@ -280,6 +285,7 @@ export async function processUpload(
     hash,
     chars: extracted.meta.chars,
     pages: extracted.meta.pages,
+    ocr: extracted.meta.ocr,
   };
 }
 

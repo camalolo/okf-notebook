@@ -2663,6 +2663,47 @@ select.form-input {
   color: var(--text-muted);
 }
 
+/* Per-file upload outcomes (attached · duplicate · failed) shown above the
+   composer after a send — without these, a duplicate hash-match reads as a
+   silently dropped attachment. */
+.chat-upload-notices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+.chat-upload-notice {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-upload-notices-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.chat-upload-notices-dismiss:hover {
+  color: var(--text);
+}
+
 .chat-attachment-dup {
   font-size: 0.68rem;
   color: var(--text-muted);

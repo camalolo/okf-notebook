@@ -478,6 +478,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   /** True while files are being uploaded/extracted during send. */
   const [uploading, setUploading] = useState(false);
+  /**
+   * Per-file upload outcomes shown above the composer after a send. Duplicates
+   * and failures otherwise look exactly like a silently-dropped attachment —
+   * the request succeeds but nothing visibly attaches (2026-11-02: re-attaching
+   * the same estimate read as "attach is broken" three times in a row).
+   */
+  const [uploadNotices, setUploadNotices] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -1275,6 +1282,7 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
     if ((!rawText && pendingFiles.length === 0) || loading || uploading) return;
     stoppedRef.current = false;
     watchGenRef.current++; // cancel any background-turn watcher
+    setUploadNotices([]); // fresh send — drop the previous batch's outcomes
 
     // Auto-create a chat session on first message (if none active).
     if (chatIdRef.current === null) {
@@ -1303,11 +1311,13 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
 
       if (ok.length > 0) {
         attachmentNote = ok
-          .map((a) =>
-            a.duplicate
-              ? `📎 Duplicate upload: "${a.sourceName}" is already in this bundle at ${a.mdPath} (unchanged, not re-imported). Inform the user and reference the existing file.`
-              : `📎 Attached: ${a.sourceName} → ${a.mdPath}`,
-          )
+          .map((a) => {
+            if (!a.duplicate) {
+              const ocr = a.ocr ? ` (${a.ocr} OCR, ${a.chars.toLocaleString()} chars)` : '';
+              return `📎 Attached: ${a.sourceName} → ${a.mdPath}${ocr}`;
+            }
+            return `📎 Duplicate upload: "${a.sourceName}" is already in this bundle at ${a.mdPath} (unchanged, not re-imported). Inform the user and reference the existing file.`;
+          })
           .join('\n') + '\n\n';
       }
       if (failures.length > 0) {
@@ -1317,6 +1327,26 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           .join(', ');
         attachmentNote += `[Upload failed for: ${failedNames}]\n\n`;
       }
+
+      // Visible per-file outcomes (the message text above is for the model —
+      // this banner is for the human).
+      const failureNotices = pendingFiles
+        .map((f, i) => ({ f, r: results[i] }))
+        .filter(({ r }) => r.status === 'rejected')
+        .map(({ f, r }) => {
+          const reason = r.status === 'rejected' ? String((r.reason as Error)?.message ?? r.reason) : '';
+          return `✗ Upload failed: "${f.name}"${reason ? ` — ${reason}` : ''}`;
+        });
+      setUploadNotices([
+        ...ok.map((a) =>
+          a.duplicate
+            ? `⚠️ "${a.sourceName}" is already in the bundle — ${a.mdPath} (unchanged, not re-imported)`
+            : a.ocr
+              ? `✓ "${a.sourceName}" → ${a.mdPath} · ${a.ocr} OCR, ${a.chars.toLocaleString()} chars`
+              : `✓ "${a.sourceName}" → ${a.mdPath}`,
+        ),
+        ...failureNotices,
+      ]);
       onFilesChanged?.();
     }
 
@@ -2131,6 +2161,23 @@ export function ChatPanel({ bundleId, bundleName, bundleIcon, onFilesChanged, on
           }
         }}
       >
+        {uploadNotices.length > 0 && (
+          <div className="chat-upload-notices">
+            {uploadNotices.map((n, i) => (
+              <span key={i} className="chat-upload-notice">
+                {n}
+              </span>
+            ))}
+            <button
+              type="button"
+              className="chat-upload-notices-dismiss"
+              onClick={() => setUploadNotices([])}
+              aria-label="Dismiss upload notices"
+            >
+              ×
+            </button>
+          </div>
+        )}
         {(pendingFiles.length > 0 || uploading) && (
           <div className="chat-attachments">
             {pendingFiles.map((file, i) => (

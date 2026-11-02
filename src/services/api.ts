@@ -352,6 +352,8 @@ export interface UploadResult {
   hash: string;
   chars: number;
   pages?: number;
+  /** How image text was extracted ('vision' | 'tesseract') — absent for non-images. */
+  ocr?: 'vision' | 'tesseract';
 }
 
 /** Upload a file to the bundle. The server extracts content and writes uploads/{slug}.md. */
