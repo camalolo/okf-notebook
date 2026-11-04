@@ -233,6 +233,12 @@ export function retitleChat(
 
 /* --- Global settings --- */
 
+export interface OutsideBundle {
+  id: string;
+  name: string;
+  path: string;
+}
+
 export interface AppSettingsInfo {
   model: string;
   defaultModel: string;
@@ -242,17 +248,28 @@ export interface AppSettingsInfo {
   visionModels?: string[];
   /** The active model's context window (tokens) — indicator colouring. */
   contextLimit: number;
+  /** Root directory every notebook must live under (absolute, ~ expanded). */
+  notebooksRoot: string;
+  defaultNotebooksRoot: string;
+  /** Registered bundles whose path falls outside `notebooksRoot`. */
+  outsideBundles?: OutsideBundle[];
 }
 
 export function getSettings(): Promise<AppSettingsInfo> {
   return request<AppSettingsInfo>(`${API_BASE}/settings`);
 }
 
-export function updateModel(model: string): Promise<AppSettingsInfo> {
+export function updateSettings(
+  patch: { model?: string; notebooksRoot?: string },
+): Promise<AppSettingsInfo> {
   return request<AppSettingsInfo>(`${API_BASE}/settings`, {
-    ...jsonOptions({ model }),
+    ...jsonOptions(patch),
     method: 'PUT',
   });
+}
+
+export function updateModel(model: string): Promise<AppSettingsInfo> {
+  return updateSettings({ model });
 }
 
 /* --- MCP servers --- */

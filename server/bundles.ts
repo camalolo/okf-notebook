@@ -6,8 +6,28 @@ import type { BundleConfig, DigestConfig } from './config.js';
 import type { User } from './config.js';
 import { OKF_SPEC } from './lib/okf-template.js';
 import { agentsTemplate } from './lib/agents-template.js';
+import { getSettings, expandHome, DEFAULT_NOTEBOOKS_ROOT } from './settings.js';
 
 const BUNDLES_PATH = fileURLToPath(BUNDLES_FILE);
+
+/**
+ * Resolve the configured notebooks root (Settings → "Notebooks root") to an
+ * absolute path. Every bundle must live strictly inside it.
+ */
+export async function getNotebooksRoot(): Promise<string> {
+  const settings = await getSettings();
+  const root = expandHome(settings.notebooksRoot || DEFAULT_NOTEBOOKS_ROOT);
+  return path.resolve(root);
+}
+
+/**
+ * Whether `dir` is strictly inside `root` (the root itself does not count —
+ * it is the container, not a notebook). Purely textual: use on real paths.
+ */
+export function isInsideRoot(root: string, dir: string): boolean {
+  const rel = path.relative(path.resolve(root), path.resolve(dir));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
 
 /** Generate a URL-safe slug from a display name. */
 function slugify(name: string): string {
@@ -203,33 +223,69 @@ export async function seedAgentsMd(bundlePath: string, name: string, description
   return writeIfAbsent(path.join(bundlePath, 'AGENTS.md'), agentsTemplate(name, description));
 }
 
-/** Add a new bundle after validating that the path is an existing directory. */
+/**
+ * Add a new bundle after validating that the path is an existing directory
+ * strictly inside the configured notebooks root. Relative paths are resolved
+ * against that root.
+ */
 export async function addBundle(data: NewBundleInput): Promise<BundleConfig> {
+  const root = await getNotebooksRoot();
+
+  // Resolve the requested path: relative inputs anchor to the notebooks root.
+  const resolved = path.resolve(
+    path.isAbsolute(data.path) ? data.path : path.join(root, data.path),
+  );
+
+  // Containment first (textual), so a nonexistent path outside the root
+  // reports the restriction rather than a confusing "does not exist".
+  if (!isInsideRoot(root, resolved)) {
+    throw new BundleError(
+      `Notebooks must live inside the configured root (${root}): ${data.path}`,
+      'PATH_OUTSIDE_ROOT',
+    );
+  }
+
   // Validate the path exists and is a directory.
   let stat: import('node:fs').Stats;
   try {
-    stat = await fs.stat(data.path);
+    stat = await fs.stat(resolved);
   } catch {
-    throw new BundleError(`Path does not exist: ${data.path}`, 'PATH_NOT_FOUND');
+    throw new BundleError(`Path does not exist: ${resolved}`, 'PATH_NOT_FOUND');
   }
   if (!stat.isDirectory()) {
-    throw new BundleError(`Path is not a directory: ${data.path}`, 'PATH_NOT_DIRECTORY');
+    throw new BundleError(`Path is not a directory: ${resolved}`, 'PATH_NOT_DIRECTORY');
+  }
+
+  // Re-check containment on real (symlink-resolved) paths so a link pointing
+  // out of the root cannot sneak in. When the root itself does not exist yet
+  // (fresh install), the textual check above is the gate.
+  try {
+    const [rootReal, real] = await Promise.all([fs.realpath(root), fs.realpath(resolved)]);
+    if (!isInsideRoot(rootReal, real)) {
+      throw new BundleError(
+        `Notebooks must live inside the configured root (${root}): ${data.path}`,
+        'PATH_OUTSIDE_ROOT',
+      );
+    }
+  } catch (err) {
+    if (err instanceof BundleError) throw err;
+    // realpath failures fall through to the textual verdict above.
   }
 
   // Ship the OKF spec and a starter AGENTS.md with every new bundle
   // (no-ops when already present).
-  if (await seedOkfSpec(data.path)) {
-    console.log(`[bundles] Seeded OKF.md into ${data.path}`);
+  if (await seedOkfSpec(resolved)) {
+    console.log(`[bundles] Seeded OKF.md into ${resolved}`);
   }
-  if (await seedAgentsMd(data.path, data.name, data.description ?? '')) {
-    console.log(`[bundles] Seeded starter AGENTS.md into ${data.path}`);
+  if (await seedAgentsMd(resolved, data.name, data.description ?? '')) {
+    console.log(`[bundles] Seeded starter AGENTS.md into ${resolved}`);
   }
 
   const bundles = await loadBundles();
   const bundle: BundleConfig = {
     id: uniqueId(data.name, bundles),
     name: data.name,
-    path: data.path,
+    path: resolved,
     icon: data.icon ?? '',
     description: data.description ?? '',
     ...(data.allowedUsers ? { allowedUsers: data.allowedUsers } : {}),
@@ -279,6 +335,7 @@ export async function updateBundle(
 export type BundleErrorCode =
   | 'PATH_NOT_FOUND'
   | 'PATH_NOT_DIRECTORY'
+  | 'PATH_OUTSIDE_ROOT'
   | 'NOT_FOUND'
   | 'INVALID_ALLOWED_USERS'
   | 'INVALID_MCPS'

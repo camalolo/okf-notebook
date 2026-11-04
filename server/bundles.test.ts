@@ -3,14 +3,21 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-// Redirect the bundle store to a temp file (must be set before import).
+// Redirect the bundle store and the settings store to temp files (must be set
+// before import — addBundle validates paths against the configured root).
 const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'notebook-bundles-test-'));
 process.env.NOTEBOOK_BUNDLES_FILE = path.join(tmpDir, 'bundles.json');
+process.env.NOTEBOOK_SETTINGS_FILE = path.join(tmpDir, 'settings.json');
 
-// A temp directory standing in for a real bundle directory (registering the
-// repo root would seed OKF.md/AGENTS.md into the repo itself).
-const bundleDir = path.join(tmpDir, 'bundle');
+// A fake notebooks root with a real bundle directory inside it (registering
+// the repo root would seed OKF.md/AGENTS.md into the repo itself).
+const rootDir = path.join(tmpDir, 'notebooks');
+const bundleDir = path.join(rootDir, 'bundle');
 await fs.mkdir(bundleDir, { recursive: true });
+
+const { saveSettings } = await import('./settings.js');
+// Anchor the root before any addBundle call (default would be the tester's ~/Notebooks).
+await saveSettings({ notebooksRoot: rootDir });
 
 const {
   sanitizeMcps,
@@ -20,6 +27,8 @@ const {
   loadBundles,
   BundleError,
   seedOkfSpec,
+  isInsideRoot,
+  getNotebooksRoot,
 } = await import('./bundles.js');
 const { OKF_SPEC } = await import('./lib/okf-template.js');
 const { agentsTemplate } = await import('./lib/agents-template.js');
@@ -150,6 +159,56 @@ describe('sanitizeThinking', () => {
     expect(() => sanitizeThinking(true)).toThrow(BundleError);
     expect(() => sanitizeThinking('enabled')).toThrow(BundleError);
     expect(() => sanitizeThinking(1)).toThrow(BundleError);
+  });
+});
+
+describe('notebooks root containment', () => {
+  it('getNotebooksRoot resolves the configured root', async () => {
+    await expect(getNotebooksRoot()).resolves.toBe(path.resolve(rootDir));
+  });
+
+  it('isInsideRoot accepts nested dirs but not the root itself or outside paths', () => {
+    expect(isInsideRoot(rootDir, path.join(rootDir, 'a', 'b'))).toBe(true);
+    expect(isInsideRoot(rootDir, rootDir)).toBe(false);
+    expect(isInsideRoot(rootDir, tmpDir)).toBe(false);
+    expect(isInsideRoot(rootDir, path.join(rootDir, '..', 'elsewhere'))).toBe(false);
+  });
+
+  it('addBundle resolves a relative path against the root', async () => {
+    const relDir = path.join(rootDir, 'relative-bundle');
+    await fs.mkdir(relDir, { recursive: true });
+    const bundle = await addBundle({ name: 'Relative', path: 'relative-bundle' });
+    expect(bundle.path).toBe(relDir);
+  });
+
+  it('addBundle rejects a path outside the root', async () => {
+    await expect(addBundle({ name: 'Outside', path: tmpDir })).rejects.toMatchObject({
+      code: 'PATH_OUTSIDE_ROOT',
+    });
+  });
+
+  it('addBundle rejects the root itself', async () => {
+    await expect(addBundle({ name: 'Root', path: rootDir })).rejects.toMatchObject({
+      code: 'PATH_OUTSIDE_ROOT',
+    });
+  });
+
+  it('addBundle rejects a nonexistent path inside the root as PATH_NOT_FOUND', async () => {
+    await expect(addBundle({ name: 'Ghost', path: 'no-such-dir' })).rejects.toMatchObject({
+      code: 'PATH_NOT_FOUND',
+    });
+  });
+
+  it('addBundle rejects a symlink escaping the root', async () => {
+    const link = path.join(rootDir, 'escape-link');
+    await fs.symlink(tmpDir, link);
+    try {
+      await expect(addBundle({ name: 'Escape', path: link })).rejects.toMatchObject({
+        code: 'PATH_OUTSIDE_ROOT',
+      });
+    } finally {
+      await fs.unlink(link);
+    }
   });
 });
 

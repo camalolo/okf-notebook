@@ -15,6 +15,7 @@ import {
   updateBundle,
   updateModel,
   updateMcpServer,
+  updateSettings,
 } from '../services/api.ts';
 import type { AppSettingsInfo, McpServerConfig, McpServerInfo } from '../services/api.ts';
 
@@ -113,6 +114,10 @@ export function Settings({ user }: SettingsProps) {
   const [modelDraft, setModelDraft] = useState('');
   const [modelSaving, setModelSaving] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+  const [rootDraft, setRootDraft] = useState('');
+  const [rootSaving, setRootSaving] = useState(false);
+  const [rootError, setRootError] = useState<string | null>(null);
+  const [rootSaved, setRootSaved] = useState(false);
   /** 'new' → add form open; a server name → edit form for it; null → closed. */
   const [mcpEditing, setMcpEditing] = useState<string | null>(null);
   const [mcpForm, setMcpForm] = useState<McpFormState>(EMPTY_MCP_FORM);
@@ -146,6 +151,23 @@ export function Settings({ user }: SettingsProps) {
     }
   };
 
+  const handleSaveRoot = async () => {
+    if (!rootDraft.trim()) return;
+    setRootSaving(true);
+    setRootError(null);
+    setRootSaved(false);
+    try {
+      const info = await updateSettings({ notebooksRoot: rootDraft.trim() });
+      setSettingsInfo(info);
+      setRootDraft(info.notebooksRoot);
+      setRootSaved(true);
+    } catch (err: unknown) {
+      setRootError(toMessage(err, 'Failed to update the notebooks root'));
+    } finally {
+      setRootSaving(false);
+    }
+  };
+
   const refresh = () => {
     setLoading(true);
     setError(null);
@@ -175,6 +197,7 @@ export function Settings({ user }: SettingsProps) {
         if (active) {
           setSettingsInfo(info);
           setModelDraft(info.model);
+          setRootDraft(info.notebooksRoot);
           setModelError(info.models === null ? 'Could not load the model list from the API.' : null);
         }
       })
@@ -725,6 +748,56 @@ export function Settings({ user }: SettingsProps) {
       </section>
 
       <section className="settings-section">
+        <h2 className="settings-section-title">Notebooks root</h2>
+        <p className="settings-section-hint">
+          The directory all notebooks live in — new bundles can only be registered inside it (a
+          relative path in "Add bundle" below is resolved against this root). Changing it does not
+          move any files: existing notebooks that end up outside the new root keep working but can
+          no longer be re-registered after removal.
+        </p>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">Root directory</span>
+            <input
+              className="form-input"
+              type="text"
+              value={rootDraft}
+              onChange={(e) => {
+                setRootDraft(e.target.value);
+                setRootSaved(false);
+              }}
+              placeholder="/home/me/Notebooks"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
+          <div className="form-actions model-actions">
+            <button
+              className="btn btn-primary"
+              onClick={handleSaveRoot}
+              disabled={rootSaving || !rootDraft.trim() || rootDraft === settingsInfo?.notebooksRoot}
+            >
+              {rootSaving ? 'Saving…' : 'Save root'}
+            </button>
+          </div>
+        </div>
+        {rootSaved && !rootError && (
+          <div className="error-banner error-banner-sm" role="status">
+            Notebooks root saved{rootDraft ? `: ${rootDraft}` : ''}.
+          </div>
+        )}
+        {(settingsInfo?.outsideBundles?.length ?? 0) > 0 && (
+          <div className="error-banner error-banner-sm">
+            Outside this root:{' '}
+            {settingsInfo!.outsideBundles!.map((b) => b.name || b.id).join(', ')} — move
+            {settingsInfo!.outsideBundles!.length === 1 ? ' it' : ' them'} into{' '}
+            {settingsInfo!.notebooksRoot} (and update its registration) to allow re-registering.
+          </div>
+        )}
+        {rootError && <div className="error-banner error-banner-sm">{rootError}</div>}
+      </section>
+
+      <section className="settings-section">
         <h2 className="settings-section-title">MCP servers</h2>
         <p className="settings-section-hint">
           MCP (Model Context Protocol) servers extend the chat assistant with external
@@ -894,8 +967,9 @@ export function Settings({ user }: SettingsProps) {
       <section className="settings-section">
         <h2 className="settings-section-title">Add bundle</h2>
         <p className="settings-section-hint">
-          Register an existing directory of markdown files. Files on disk are never deleted when
-          a bundle is removed.
+          Register an existing directory of markdown files inside the notebooks root
+          {settingsInfo?.notebooksRoot ? ` (${settingsInfo.notebooksRoot})` : ''} — a relative path
+          is resolved against it. Files on disk are never deleted when a bundle is removed.
         </p>
 
         <form className="settings-form" onSubmit={handleAdd}>
@@ -907,7 +981,7 @@ export function Settings({ user }: SettingsProps) {
                 type="text"
                 value={form.path}
                 onChange={(e) => update('path', e.target.value)}
-                placeholder="/home/me/notes/my-project"
+                placeholder={settingsInfo?.notebooksRoot ?? '/home/me/Notebooks/my-project'}
                 spellCheck={false}
                 autoComplete="off"
               />

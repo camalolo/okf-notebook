@@ -5,9 +5,16 @@ import path from 'node:path';
 import express from 'express';
 import http from 'node:http';
 
-// Redirect the settings store to a temp file (must be set before import).
+// Redirect the settings store and the bundle store to temp files (must be set
+// before import — the settings PUT reports bundles outside the notebooks root).
 const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'notebook-settings-test-'));
 process.env.NOTEBOOK_SETTINGS_FILE = path.join(tmpDir, 'settings.json');
+process.env.NOTEBOOK_BUNDLES_FILE = path.join(tmpDir, 'bundles.json');
+
+// A fake notebooks root with one registered bundle inside it and one outside.
+const rootDir = path.join(tmpDir, 'notebooks');
+await fs.mkdir(path.join(rootDir, 'inside'), { recursive: true });
+await fs.mkdir(path.join(tmpDir, 'outside'), { recursive: true });
 
 // Stub the model list from the inference proxy — tests must not hit the network.
 const listModelsMock = vi.fn();
@@ -21,7 +28,8 @@ vi.mock('../lib/llm.js', () => ({
   modelHasImageInput: () => false,
 }));
 
-const { getSettings, saveSettings, resetSettingsCache, DEFAULT_MODEL } = await import('../settings.js');
+const { getSettings, saveSettings, resetSettingsCache, DEFAULT_MODEL, DEFAULT_NOTEBOOKS_ROOT } = await import('../settings.js');
+const { saveBundles } = await import('../bundles.js');
 const { settingsRouter } = await import('./settings.js');
 
 let server: http.Server;
@@ -46,9 +54,26 @@ afterAll(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   resetSettingsCache();
   listModelsMock.mockReset().mockResolvedValue(['glm-5.2', 'glm-5.3', 'glm-5-turbo']);
+  // Fresh bundle store per test: one inside the root, one outside.
+  await saveBundles([
+    {
+      id: 'inside',
+      name: 'Inside',
+      path: path.join(rootDir, 'inside'),
+      icon: '',
+      description: '',
+    },
+    {
+      id: 'outside',
+      name: 'Outside',
+      path: path.join(tmpDir, 'outside'),
+      icon: '',
+      description: '',
+    },
+  ]);
 });
 
 afterEach(() => {
@@ -101,6 +126,18 @@ describe('GET / settings route', () => {
     expect(body.models).toBeNull();
     expect(body.model).toBe('glm-5-turbo');
   });
+
+  it('returns the notebooks root and flags registered bundles outside it', async () => {
+    await saveSettings({ notebooksRoot: rootDir });
+    const res = await realFetch(`${baseUrl}/`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.notebooksRoot).toBe(path.resolve(rootDir));
+    expect(body.defaultNotebooksRoot).toBe(DEFAULT_NOTEBOOKS_ROOT);
+    expect(body.outsideBundles).toEqual([
+      { id: 'outside', name: 'Outside', path: path.join(tmpDir, 'outside') },
+    ]);
+  });
 });
 
 describe('PUT / settings route', () => {
@@ -136,5 +173,78 @@ describe('PUT / settings route', () => {
     listModelsMock.mockRejectedValue(new Error('proxy down'));
     const res = await put('glm-5.2');
     expect(res.status).toBe(503);
+  });
+
+  it('saves a valid notebooks root, creating the directory', async () => {
+    const newRoot = path.join(tmpDir, 'elsewhere', 'notebooks');
+    const res = await realFetch(`${baseUrl}/`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notebooksRoot: newRoot }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.notebooksRoot).toBe(newRoot);
+    expect((await fs.stat(newRoot)).isDirectory()).toBe(true);
+    expect((await getSettings()).notebooksRoot).toBe(newRoot);
+    // Both fixture bundles live outside the new root.
+    expect(body.outsideBundles.map((b: { id: string }) => b.id).sort()).toEqual([
+      'inside',
+      'outside',
+    ]);
+  });
+
+  it('expands ~ in the notebooks root', async () => {
+    const res = await realFetch(`${baseUrl}/`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notebooksRoot: '~/notebooks-from-test' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.notebooksRoot).toBe(path.join(os.homedir(), 'notebooks-from-test'));
+    // Clean up the directory the request created in the real home dir.
+    await fs.rm(path.join(os.homedir(), 'notebooks-from-test'), { recursive: true, force: true });
+  });
+
+  it('rejects a relative notebooks root', async () => {
+    const res = await realFetch(`${baseUrl}/`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notebooksRoot: 'relative/path' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects the filesystem root', async () => {
+    const res = await realFetch(`${baseUrl}/`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notebooksRoot: '/' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('updates model and root in one request', async () => {
+    const newRoot = path.join(tmpDir, 'combined-root');
+    const res = await realFetch(`${baseUrl}/`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'glm-5.3', notebooksRoot: newRoot }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.model).toBe('glm-5.3');
+    expect(body.notebooksRoot).toBe(newRoot);
+    expect((await getSettings()).model).toBe('glm-5.3');
+  });
+
+  it('rejects an empty patch', async () => {
+    const res = await realFetch(`${baseUrl}/`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
   });
 });

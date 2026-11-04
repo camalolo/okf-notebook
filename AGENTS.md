@@ -303,6 +303,17 @@ regex curates which ids the dropdown offers (useful behind a routing proxy
 with a huge catalog). Changes take effect on the next request — no restart
 needed.
 
+**Notebooks live under a configurable root** (Settings page → "Notebooks
+root"): the same `settings.json` holds `notebooksRoot` (defaults to
+`~/Notebooks`, `~` expanded at read time). `addBundle()` only registers
+directories **strictly inside** that root (error code `PATH_OUTSIDE_ROOT`;
+the root itself is refused, symlinks are re-checked after realpath, and
+relative "Add bundle" paths resolve against the root). Changing the root
+never moves files and never un-registers existing bundles — but ones left
+outside the new root are reported as `outsideBundles` by the settings
+GET/PUT and can't be re-registered after removal until they're moved back
+in. Helpers: `getNotebooksRoot()`/`isInsideRoot()` in `server/bundles.ts`.
+
 `thinking: {type: "disabled"}` is sent whenever a bundle has not opted
 into extended thinking (`bundle.thinking`, Settings → Chat/Digest…). This
 applies to chat AND to every background LLM task — digest, OKF cleanup,

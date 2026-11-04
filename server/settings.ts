@@ -9,20 +9,44 @@
  */
 
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 /** Fallback model when nothing has been configured yet (env: LLM_MODEL). */
 export const DEFAULT_MODEL = process.env.LLM_MODEL || 'glm-5.2';
 
+/**
+ * Default notebooks root when nothing has been configured yet: `~/Notebooks`.
+ * Every registered bundle must live inside this directory (see `bundles.ts`).
+ */
+export const DEFAULT_NOTEBOOKS_ROOT = path.join(os.homedir(), 'Notebooks');
+
 export interface AppSettings {
   /** Model id sent to the LLM API for every call (chat, digest, uploads). */
   model: string;
+  /**
+   * Root directory every notebook (bundle) must live under. Stored as the
+   * user typed it (`~` allowed) — resolved to an absolute path by
+   * `expandHome()`/`getNotebooksRoot()` at use time.
+   */
+  notebooksRoot: string;
+}
+
+/**
+ * Expand a leading `~` or `~/` to the user's home directory. Everything else
+ * is returned unchanged (relative paths stay relative and are resolved by the
+ * caller — bundle registration anchors them to the notebooks root).
+ */
+export function expandHome(p: string): string {
+  if (p === '~') return os.homedir();
+  if (p === '~/' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
+  return p;
 }
 
 const SETTINGS_PATH =
   process.env.NOTEBOOK_SETTINGS_FILE ?? path.join(import.meta.dirname, 'data', 'settings.json');
 
-const DEFAULTS: AppSettings = { model: DEFAULT_MODEL };
+const DEFAULTS: AppSettings = { model: DEFAULT_MODEL, notebooksRoot: DEFAULT_NOTEBOOKS_ROOT };
 
 let cached: AppSettings | null = null;
 let loading: Promise<AppSettings> | null = null;
@@ -30,9 +54,15 @@ let loading: Promise<AppSettings> | null = null;
 /** Normalize untrusted/persisted JSON into a valid AppSettings object. */
 function sanitize(raw: unknown): AppSettings {
   if (raw === null || typeof raw !== 'object') return { ...DEFAULTS };
-  const model = (raw as Record<string, unknown>).model;
+  const obj = raw as Record<string, unknown>;
+  const model = obj.model;
+  const notebooksRoot = obj.notebooksRoot;
   return {
     model: typeof model === 'string' && model.trim() ? model.trim() : DEFAULT_MODEL,
+    notebooksRoot:
+      typeof notebooksRoot === 'string' && notebooksRoot.trim()
+        ? expandHome(notebooksRoot.trim())
+        : DEFAULT_NOTEBOOKS_ROOT,
   };
 }
 
